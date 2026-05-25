@@ -27,7 +27,6 @@ ProbHub/
 │   ├── main.typ
 │   ├── problem.typ
 │   └── problem-sample.json
-
 ├── scripts/                 # 自动化脚本 
 │   ├── add_problem.py       # 向 problem.json 追加新题
 │   └── extract_new_problem.py # 自动裁剪单题 PDF
