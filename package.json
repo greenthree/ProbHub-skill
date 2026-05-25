@@ -1,0 +1,34 @@
+{
+  "name": "probhub-skill",
+  "version": "0.0.4",
+  "description": "基于大语言模型 (LLM Agent) 和现代排版框架构建的 ACM/ICPC 自动化出题工作流。",
+  "main": "bin/init.js",
+  "bin": {
+    "probhub-skill": "bin/init.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/greenthree/ProbHub-skill.git"
+  },
+  "keywords": [
+    "acm",
+    "icpc",
+    "problem-setting",
+    "typst",
+    "cyaron",
+    "agent",
+    "claude"
+  ],
+  "author": "greenthree",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/greenthree/ProbHub-skill/issues"
+  },
+  "homepage": "https://github.com/greenthree/ProbHub-skill#readme",
+  "dependencies": {
+    "fs-extra": "^11.3.5"
+  }
+}

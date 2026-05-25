@@ -1,3 +1,4 @@
+
 # ProbHub-skill: ACM/ICPC 自动化出题工作流
 
 ProbHub 是一个基于大语言模型 (LLM Agent) 和现代排版/测试框架构建的算法竞赛出题环境。本项目旨在通过标准化的自动化工作流，减少造数据、调格式和配置评测包等重复性劳动。
@@ -13,32 +14,28 @@ ProbHub 是一个基于大语言模型 (LLM Agent) 和现代排版/测试框架�
 
 ---
 
-## 目录结构
+## 快速安装
 
-```text
-ProbHub/
-├── README.md                # 项目说明文档
-├── SKILL.md                 # Agent 工作流指令与约束
-├── references/              # 外部工具与模板
-│   ├── cyaron.md            # CYaRon API 快速参考
-│   ├── fast.md              # 基础数据生成规范
-│   ├── testlib.h            # SPJ/交互题评测头文件
-│   ├── lib.typ
-│   ├── main.typ
-│   ├── problem.typ
-│   └── problem-sample.json
-├── scripts/                 # 自动化脚本 
-│   ├── add_problem.py       # 向 problem.json 追加新题
-│   └── extract_new_problem.py # 自动裁剪单题 PDF
-└── typst-template/          # typst题面示例
+在一个干净的空文件夹中打开终端，选择以下任意一种方式即可一键初始化（自动安装依赖并注入 Claude 技能库）：
 
+**方式一：使用社区通用 Skills 框架 (推荐)**
+```bash
+npx skills add greenthree/ProbHub-skill
+```
+
+**方式二：使用本项目的独立脚手架**
+
+```bash
+npx probhub-skill
 ```
 
 ---
 
-## 环境依赖与安装
+## 环境依赖与前置安装
 
-**1. 基础环境**
+除了通过上述命令一键安装的工具外，底层编译仍需要依赖本地的运行环境。请确保你的系统已配置好以下基础依赖：
+
+**1. 基础编译环境**
 
 * Python 3.8+
 * GCC/G++ (用于编译 `outmaker.cpp` 和 `checker.cpp`)
@@ -61,20 +58,37 @@ winget install typst
 ```
 
 **4. 字体依赖 (核心排版要求)**
-本项目的 Typst 模板指定了特定的中英文字体栈。为保证 PDF 成功编译且排版符合预期，请务必在本地系统或 Typst 字体路径中安装以下字体：
+本项目的 Typst 模板指定了高标准的竞赛级中英文字体栈。为保证 PDF 成功编译且排版符合预期，请务必在本地系统中安装以下字体：
 
-* **开源英数与代码字体:**
-* `New Computer Modern Math` (用于公式与标准西文)
-* `New Computer Modern Mono` (用于代码块与等宽字符)
+* **开源英文字体**: `New Computer Modern Math` (用于公式与标准西文)
+* **开源等宽字体**: `New Computer Modern Mono` (用于代码块)
+* **方正楷体**: `FZKai-Z03` (用于题面特殊说明)
+* **华文中宋**: `STZhongSong` (用于标题与加粗)
+* **微软雅黑**: `Microsoft YaHei` (用于无衬线文本)
+* **宋体**: `SimSun` / `simsun` (用于基础中文正文)
 
+---
 
-* **中文字体系列:**
-* `FZShuSong-Z01` (方正书宋 - 正文衬线)
-* `FZKai-Z03` (方正楷体 - 题面特殊说明)
-* `STZhongSong` (华文中宋 - 标题与加粗)
-* `Microsoft YaHei` (微软雅黑 - 无衬线)
-* `SimSun` / `simsun` (宋体 - 基础中文)
-* `SimSun-ExtG` (宋体扩展 - 特殊字形支持)
+## 目录结构
+
+```text
+ProbHub/
+├── README.md                # 项目说明文档
+├── SKILL.md                 # Agent 工作流指令与约束
+├── references/              # 外部工具与模板
+│   ├── cyaron.md            # CYaRon API 快速参考
+│   ├── fast.md              # 基础数据生成规范
+│   ├── testlib.h            # SPJ/交互题评测头文件
+│   ├── lib.typ              # Typst 宏包依赖
+│   ├── main.typ             # Typst 组卷入口
+│   ├── problem.typ          # Typst 单题模板
+│   └── problem-sample.json  # 题目元数据配置样例
+├── scripts/                 # 自动化脚本 
+│   ├── add_problem.py       # 向 problem.json 追加新题
+│   └── extract_new_problem.py # 自动裁剪单题 PDF
+└── typst-template/          # Typst 题面示例
+
+```
 
 ---
 
@@ -82,22 +96,21 @@ winget install typst
 
 本项目设计为由拥有本地文件读写权限的 AI Agent 工具（如 Claude Code）驱动。
 
-1. **唤醒助手**: 在项目根目录启动 Agent，输入指令：“使用 probhub 技能，我要出一道新题。”
-2. **提供题面**: 提供题目的 Markdown、PDF、网页链接或初始构思。
-3. **自动化执行**: 助手将根据 `SKILL.md` 的设定，自动建立目录、编写生成器和标程、构造 `data/` 测试集、合并 Typst 题面并最终打包为可上传到 DomJudge 的 `.zip`。
+1. **唤醒助手**: 在项目根目录启动 Agent (执行 `claude`)，输入指令：“**使用 probhub 技能，我要出一道新题。**”
+2. **提供题面**: 随意提供你构思的 Markdown、PDF、网页链接或纯文字想法。
+3. **全自动执行**: 助手将根据 `SKILL.md` 的设定，自动建立题目目录、编写数据生成器和标准程序、构造 `data/` 测试集、合并排版 Typst 题面，并最终打包成可直接上传至 DOMjudge 的 `.zip` 压缩包。
 
-**[Typst 题面示例](https://uploadfiles.nowcoder.com/files/20260503/468072_1777778993097/第十二届苏州科技大学程序设计竞赛正式赛.pdf)**
+**[点击查看：真实赛事 Typst 题面排版示例](https://uploadfiles.nowcoder.com/files/20260503/468072_1777778993097/第十二届苏州科技大学程序设计竞赛正式赛.pdf)**
 
-注：typst-template/热身赛 中有可以添加图片、副标题的方法，有需要可手动添加。
+> **提示**: `typst-template/热身赛` 目录中保留了手动添加插图、副标题的进阶方法，如有需要可参考该模板进行手动扩展。
 
 ---
 
 ## 鸣谢
 
-本项目的基础设施依赖于以下开源项目：
+本项目的基础设施依赖于以下优秀的开源生态：
 
 * **[CYaRon](https://github.com/luogu-dev/cyaron)**: 洛谷团队开源的 Python 测试数据生成库。
-* **[olymp-in-typst](https://github.com/lihaoze123/olymp-in-typst)**: 基于 Typst 的算法竞赛题面排版模板。
-* **[testlib](https://github.com/MikeMirzayanov/testlib)**: Codeforces 官方维护的 C++ 评测辅助头文件。
-
+* **[olymp-in-typst](https://github.com/lihaoze123/olymp-in-typst)**: 基于 Typst 的算法竞赛题面极简排版模板。
+* **[testlib](https://github.com/MikeMirzayanov/testlib)**: 业界标准的 C++ 评测辅助库。
 

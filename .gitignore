@@ -1,6 +1,3 @@
-# Output files
-
-
 # Typst cache
 .cache/
 
@@ -23,3 +20,9 @@ CLAUDE.md
 # Temporary files
 *.tmp
 *.temp
+
+#npm
+# bin/
+node_modules/
+# package.json
+# package-lock.json

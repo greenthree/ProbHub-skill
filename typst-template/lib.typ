@@ -4,14 +4,11 @@
 
 #let md = cmarker-render.with(math: mitex, scope: (image: (source, alt: none, format: auto) => align(center)[#image(source, alt: alt, format: format)]))
 #let fonts = (
-  serif: ("New Computer Modern Math", "FZShuSong-Z01"),
   sans: ("Microsoft YaHei", "simsun"),
   song: ("New Computer Modern Math", "Simsun"),
   zsong: ("STZhongSong", "STZhongSong"),
   kaishu: ("FZKai-Z03",),
-  songti-bold: ("New Computer Modern Math", "SimSun-ExtG"),
-  mono: ("New Computer Modern Mono",),
-  yl: ("New Computer Modern Mono","New Computer Modern Mono")
+  mono: ("New Computer Modern Mono","New Computer Modern Mono")
 )
 #set text(font: fonts.song)
 #let maketitle(
@@ -134,7 +131,7 @@
 
   #if problem.samples.len() > 0 [
     == #text(font: fonts.sans, size: 14pt)[#translations.at(language).examples]
-    #set text(font: fonts.yl,size: 11pt)
+    #set text(font: fonts.mono,size: 11pt)
     #v(0.3em)
     #figure(
       table(
@@ -146,11 +143,11 @@
         (
           // 使用局部作用域设置文本大小，不影响表格其他部分
           {
-            set text(font: fonts.yl, size: 14pt)
+            set text(font: fonts.mono, size: 14pt)
             raw(s.input)
           },
           {
-            set text(font: fonts.yl, size: 14pt)
+            set text(font: fonts.mono, size: 14pt)
             raw(s.output)
           }
         )
