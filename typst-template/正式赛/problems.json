@@ -1,0 +1,199 @@
+[
+  {
+    "problem": {
+      "display_name": "平衡",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "3 5\n101\n2 1 3\n2 2 3\n1 2 2\n2 1 3\n2 2 3",
+          "output": "2\n1\n3\n2"
+        }
+      ]
+    },
+    "statement": {
+      "description": "给定一个长度为 $n$ 的 $01$ 字符串 $s$。\n\n对于字符串中的任意位置 $i$（$1 \\le i \\le n$），如果满足：$s$ 的前 $i$ 个字符中 $0$ 的数量，小于等于第 $i+1$ 到第 $n$ 个字符中 $1$ 的数量，则称位置 $i$ 为一个**平衡点**。\n\n现在需要对该字符串处理 $m$ 次操作，操作分为以下两种类型：\n\n $\\quad$**·** $1\\ l\\ r$：将区间 $[l, r]$ 内的所有字符取反（即 $0$ 变成 $1$，$1$ 变成 $0$）。\n\n $\\quad$**·** $2\\ l\\ r$：查询当前区间 $[l, r]$ 内包含了多少个平衡点。",
+      "input": "第一行包含两个整数 $n$ 和 $m$（$1 \\le n, m \\le 2 \\times 10^5$），分别表示字符串的长度和操作的次数。\n\n第二行包含一个长度为 $n$ 的字符串 $s$，仅由字符 $0$ 和 $1$ 组成。\n\n接下来 $m$ 行，每行包含三个整数 $op, l, r$（$op \\in \\{1, 2\\}, 1 \\le l \\le r \\le n$），表示操作类型及区间的左右端点。",
+      "output": "对于每次 $op = 2$ 的查询操作，输出一行包含一个整数，表示该区间内的平衡点数量。",
+      "notes": "对于样例一：\n\n 初始串 $101$，平衡点位置为 $1$ 和 $2$。  \n\n$\\quad$第一个询问 $[1,3]$ 包含位置 $1$ 和 $2$，答案为 $2$。  \n\n$\\quad$第二个询问 $[2,3]$ 包含位置 $2$，答案为 $1$。\n\n翻转位置 $2$（区间 $[2,2]$），串变为 $111$，平衡点位置为 $1,2,3$。  \n\n$\\quad$第三个询问 $[1,3]$ 包含全部，答案为 $3$。  \n\n$\\quad$第四个询问 $[2,3]$ 包含位置 $2$ 和 $3$，答案为 $2$。"
+    }
+  },
+  {
+    "problem": {
+      "display_name": "最短异或2",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "5 13\n8 1 9 5 4",
+          "output": "3"
+        }
+      ]
+    },
+    "statement": {
+      "description": "给定一个长度为 $n$ 的序列 $a$ 以及一个整数 $k$。\n\n你需要找到序列 $a$ 的一个**最短的连续子段** $b$，满足：在 $b$ 中存在一个子序列 $c$，使得 $c$ 中所有元素的异或和大于等于 $k$。即：\n\n$$\\bigoplus_{x \\in c} x \\ge k$$\n\n请输出该最短连续子段的长度。如果不存在满足条件的连续子段，请输出 $-1$。",
+      "input": "第一行包含两个整数 $n,k$（$1\\le n\\le 10^5, 0\\le k<2^{31}$） 表示序列 $a$ 的长度和 $k$ 值。\n\n第二行包含 $n$ 个整数 $a_1, a_2, \\dots, a_n$（$0\\le a_i <2^{31}$），表示序列 $a$。",
+      "output": "输出一行一个整数，表示满足条件的最短连续子段的长度。若无解，则输出 $-1$。",
+      "notes": ""
+    }
+  },
+  {
+    "problem": {
+      "display_name": "天上一天地上一年",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "2 10\n3 3",
+          "output": "5"
+        },
+        {
+          "input": "5 365\n2 3 5 7 9",
+          "output": "343"
+        }
+      ]
+    },
+    "statement": {
+      "description": "存在一个时间流速是现实世界 $m$ 倍的平行维度，我们称之为 $\\operatorname{M}$ 世界。该世界中每天的物理时长（秒数）与现实完全相同，即我们的世界每过去 $1$ 天，$\\operatorname{M}$ 世界就会过去 $m$ 天。\n\n 我们目前需要观测 $\\operatorname{M}$ 世界中的一个房间。该房间的录像会实时向我们的世界转播（即：在我们的世界每经过 $t$ 秒，我们将累计接收到 $\\operatorname{M}$ 世界中时长为 $m×t$ 秒的录像数据）。\n\n 现有 $n$ 名观测员，第 $i$ 名观测员最高能以 $a_i​$ 倍速观看录像（现实中花费 $t$ 秒，可处理 $a_i​×t$ 秒的录像）。在观测期间，多名观测员可以同时工作，且单人支持分段多次工作。但为了保证信息的连贯性，规定 $\\operatorname{M}$ 世界每一整天的录像必须由恰好一名观测员**独立且完整地**看完。\n\n你需要合理安排这 $n$ 个观测员的观看策略，使得在我们的世界 $1$ 天结束时，$\\operatorname{M}$ 世界没有被完整观测到的录像天数最少。",
+      "input": "第一行包含两个正整数 $n,m$（$1\\le n\\le 10 ^ 5, 2\\le m\\le 10^6$），表示观测员个数与 $\\operatorname{M}$ 世界时间流速。\n\n第二行包含 $n$ 个互不相同的正整数 $a_1,a_2,\\dots,a_n$（$1\\le a_i\\le m$），表示观测员最高能处理的录像倍速。",
+      "output": "输出一行包含一个整数，表示 $M$ 世界最后没有被完整观测到的最少天数。",
+      "notes": "对于样例一，一种最优的观测方案如下：：\n\n $\\quad$**·** 第一位观测员可分别在一天的 $0,\\frac{1}{3},\\frac{2}{3}$ 的时刻开始观看 $\\operatorname{M}$ 世界第 $1,4,7$ 天的录像\n\n $\\quad$**·** 第二位观测员可分别在一天的 $\\frac{1}{10},\\frac{13}{30}$ 的时刻开始观看 $\\operatorname{M}$ 世界第 $2,5$ 天的录像\n\n最后 $\\operatorname{M}$ 世界中有第 $3,6,8,9,10$ 天没有被观测到。"
+    }
+  },
+  {
+    "problem": {
+      "display_name": "2026",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "12\n202620220202",
+          "output": "2"
+        }
+      ]
+    },
+    "statement": {
+      "description": "给定一个长度为 $n$ 的字符串 $s$，其中只包含数字 $0$、$2$、$6$。\n\n你可以对字符串 $s$ 进行任意次（包括 $0$ 次）操作，每次操作具体如下：\n\n $\\quad$**·** 选择字符串中的任意一个字符，将其替换为字符 $6$。\n\n你的目标是通过合理地执行操作，使得最终得到的字符串中，子串 $2026$ 出现的次数最多。\n\n请计算出子串 $2026$ 能够出现的最大次数。",
+      "input": "第一行包含一个整数 $n$（$1 ≤ n ≤ 2\\times 10^5$），表示字符串 $s$ 的长度。\n\n第二行包含一个长度为 $n$ 的字符串 $s$，保证仅由 $\\left\\{0, 2, 6\\right\\}$ 内的字符组成。",
+      "output": "输出一行一个整数，表示最终字符串中子串 $2026$ 出现的最大次数。",
+      "notes": "对于样例一，一种可行的操作方案是：将第 $11$ 个字符替换为 $6$，最后会出现 $2$ 个 $2026$ 子串。"
+    }
+  },
+  {
+    "problem": {
+      "display_name": "气球",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "1\n10 6",
+          "output": "891949823"
+        }
+      ]
+    },
+    "statement": {
+      "description": "小 $\\operatorname{G}$ 正在破坏校赛。\n\n场上有 $n$ 个气球。小 $\\operatorname{G}$ 会不断地掷一个 $m$ 面骰子，每次等概率掷出 $1$ 到 $m$ 之间的整数点数。\n\n假设当前掷出的点数为 $x$：\n\n $\\quad$**·** 如果 $x$ 小于等于当前场上剩余的气球数，小 $\\operatorname{G}$ 会立刻扎破 $x$ 个气球。\n\n $\\quad$**·** 如果 $x$ 大于当前场上剩余的气球数，小 $\\operatorname{G}$ 本次操作将不扎破任何气球（但本次投掷**依然计入**总掷骰子次数中）。\n\n小 $\\operatorname{G}$ 会一直掷骰子，直到场上的 $n$ 个气球被全部扎破为止。请你求出小 $\\operatorname{G}$ 掷骰子总次数的数学期望。",
+      "input": "有多组测试数据。第一行输入一个整数 $T$（$1 ≤ T ≤ 10^5$）表示测试数据组数。对于每组测试数据：\n\n输入一行包含两个整数 $n,m$（$1\\le n \\le 2\\times 10^5, 6\\le m\\le 200$），表示气球个数与骰子面数。\n\n保证所有数据中 $n$ 之和不超过 $5\\times 10^6$。",
+      "output": "对于每组数据，输出一行一个整数表示答案在模 $998244353$ 意义下的值。\n\n可以证明答案是一个有理数 $\\dfrac{P}{Q}$ 。您需要输出 $PQ^{−1} \\bmod 998244353$ 的值，其中 $Q^{−1}$ 是满足 $QQ^{−1} \\bmod 998244353 = 1$ 的整数。",
+      "notes": ""
+    }
+  },
+  {
+    "problem": {
+      "display_name": "斐波那契数列",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "2",
+          "output": "1"
+        },
+        {
+          "input": "6",
+          "output": "15"
+        }
+      ]
+    },
+    "statement": {
+      "description": "刚接触算法竞赛的小 M 学习了递归，他迫不及待地开始计算斐波那契数列，却发现程序运行地特别慢，小 M 决定测试一下到底要进行多少次递归。\n\n求调用以下函数计算斐波那契数列第 $n$ 位时的递归次数，即求其中的 $count$。\n\n$\\quad count \\leftarrow 0$\n\n$\\quad\\operatorname{Function}$ $f(x)$:\n\n$\\quad\\qquad$ $count \\leftarrow count + 1$\n\n$\\quad\\qquad$ $\\operatorname{if}$ $x = 1$ $\\operatorname{or}$ $x = 2$ $\\operatorname{then}$\n\n$\\quad\\qquad$ $\\qquad$ $\\operatorname{return}$ $1$\n\n$\\quad\\qquad$ $\\operatorname{end}$ $\\operatorname{if}$\n\n$\\quad\\qquad$ $\\operatorname{return}$ $f(x - 1) + f(x - 2)$\n\n$\\quad\\operatorname{end}$ $\\operatorname{Function}$",
+      "input": "输入一行一个正整数 $n$（$1\\le n\\le 44$），表示需要求解斐波那契数列的第 $n$ 位。",
+      "output": "输出一行一个整数，表示求解斐波那契数列第 $n$ 位时，函数 $f$ 的运行次数，即全局变量 $count$ 的最终值。",
+      "notes": ""
+
+
+    }
+  },
+  
+  {
+    "problem": {
+      "display_name": "构造王国",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "4",
+          "output": "4\n1 2\n1 3\n3 4\n1 4"
+        }
+      ]
+    },
+    "statement": {
+      "description": "小 $\\operatorname{G}$ 设想建立一个构造王国，以下是他的一个规划：\n\n $\\quad$ 1. 王国包含 $n$ 座城市，由若干条双向道路相连。\n\n $\\quad$ 2. 任意一条道路必须连接两座不同的城市，且任意两座城市之间至多只有一条道路。\n\n $\\quad$ 3. 每座城市的“繁荣度”定义为与该城市直接相连的道路数量。\n\n $\\quad$ 4. 为了使王国结构稳定、更有多样性，要求所有 $n$ 座城市中，**恰有** $n - 1$ 种不同的繁荣度。\n\n给定城市数量 $n$，请你设计并输出一张满足上述所有规划的王国地图。",
+      "input": "输入一行一个整数 $n$（$2 \\le n \\le 1000$），表示王国的城市个数。",
+      "output": "第一行输出一个整数 $m$（$1 \\le m \\le \\frac{n(n-1)}{2}$），表示你设计的地图中的道路条数。\n\n接下来的 $m$ 行，每行输出两个整数 $u, v$（$1 \\le u, v \\le n, u \\neq v$），表示城市 $u$ 和城市 $v$ 之间有一条双向道路。如果存在多种合法的地图规划方案，输出任意一种即可。",
+      "notes": ""
+    }
+  },
+  
+  {
+    "problem": {
+      "display_name": "Hard Problem",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "7\n1 2 3 4 5 6 7",
+          "output": "2"
+        }
+      ]
+    },
+    "statement": {
+      "description": "小 $\\operatorname{G}$ 正在为 $\\operatorname{OJ}$ 上的题目进行难度分类。\n\n目前共有 $n$ 道题目，每道题都有一个难度评级，评级的值为 $1$ 到 $7$ 之间的整数。小 $\\operatorname{G}$ 计划将所有题目划分为三类：$\\operatorname{Easy\\; Problem}(1\\sim 3)$、$\\operatorname{Medium\\;  Problem}(4\\sim 5)$ 和 $\\operatorname{Hard\\; Problem}(6\\sim 7)$。\n\n现在给定这 $n$ 道题目的难度评级，请你帮小 $\\operatorname{G}$ 计算出其中 $\\operatorname{Hard\\; Problem}$ 的数量。",
+      "input": "第一行包含一个整数 $n$（$1 \\le n \\le 10^5$），表示题目的总数。\n\n第二行包含 $n$ 个整数 $a_1, a_2, \\dots, a_n$（$1 \\le a_i \\le 7$），分别表示每道题目的难度评级。",
+      "output": "输出一行一个整数，表示 $\\operatorname{Hard\\;Problem}$ 的个数。",
+      "notes": ""
+    }
+  },
+  {
+    "problem": {
+      "display_name": "完全非等比数列",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "2",
+          "output": "1 2 "
+        },
+        {
+          "input": "8 ",
+          "output": "1 3 4 2 5 6 7 8 "
+        }
+      ]
+    },
+    "statement": {
+      "description": "对于一个排列，若其中**不存在**任何长度为 $3$ 的等比子序列，则称它为完全非等比数列。\n\n现给定排列长度 $n$，请你构造一个完全非等比数列。\n\n形式化的，你构造的排列 $a$ 必须满足：对于任意的下标 $1\\le i < j < k\\le n$，均有 $a_i \\times a_k \\neq {a_j}^2$。\n\n保证在题目约束条件下一定有解。 ",
+      "input": "第一行包含一个正整数 $n$（$1 \\le n \\le 2\\times 10^5$）。",
+      "output": "输出一行，包含 $n$ 个用空格隔开的正整数，表示你构造出的排列 $a$，如果构造方法有多种，你可以输出任意一种。",
+      "notes": ""
+    }
+  },
+  {
+    "problem": {
+      "display_name": "完全非等比数列（Checker）",
+      "format": "markdown",
+      "samples": [
+        {
+          "input": "5\n5\n3 4 2 5 1\n4\n4 1 3 2\n1\n1\n2\n1 2\n3\n3 1 2",
+          "output": "No\nYes\nYes\nYes\nYes"
+        }
+      ]
+    },
+    "statement": {
+      "description": "对于一个排列，若其中**不存在**任何长度为 $3$ 的等比子序列，则称它为完全非等比数列。\n\n给定一个长度为 $n$ 的排列 $a$，请你判断其是否为完全非等比数列。\n\n形式化的，若排列 $a$ 满足：对于任意的下标 $1\\le i < j < k\\le n$，均有 $a_i \\times a_k \\neq {a_j}^2$\n\n则输出 $\\operatorname{Yes}$，反之输出 $\\operatorname{No}$。",
+      "input": "有多组测试数据。第一行输入一个整数 $T$（$1 ≤ T ≤ 10^3$）表示测试数据组数。对于每组测试数据：\n\n第一行包含一个正整数 $n$（$1\\le n\\le 2\\times 10 ^ 5$），表示排列长度。\n\n第二行包含 $n$ 个互不相同的正整数 $a_1,a_2,\\dots,a_n$（$1\\le a_i\\le n$）。\n\n保证所有数据中 $n$ 之和不超过 $10^6$。",
+      "output": "输出排序后的数组，元素之间用空格分隔。",
+      "notes": "对于样例一的第一组数据：其中子序列 $4,2,1$ 是公比为 $\\dfrac{1}{2}$ 的等比数列"
+    }
+  }
+  
+]
