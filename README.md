@@ -12,7 +12,7 @@ ProbHub 是一个基于大语言模型 (LLM Agent) 和现代排版/测试框架�
 * **极速排版**: 采用 Typst 模板，替代传统 LaTeX，大幅提升题面 PDF 编译速度。
 * **DOMjudge 兼容**: 自动生成 `problem.yaml`、`domjudge-problem.ini` 及基于 `testlib.h` 的验证器，一键打包 `.zip` 题库。
 
-**[点击查看：真实赛事 Typst 题面排版示例](https://uploadfiles.nowcoder.com/files/20260503/468072_1777778993097/第十二届苏州科技大学程序设计竞赛正式赛.pdf)**
+**[点击查看：真实赛事 Typst 题面排版示例](https://github.com/greenthree/ProbHub-skill/blob/main/typst-template/%E6%AD%A3%E5%BC%8F%E8%B5%9B/main.pdf)**
 
 ---
 
