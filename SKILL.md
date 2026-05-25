@@ -42,15 +42,15 @@ description: 当用户需要出算法竞赛题目、造测试数据、配置 DOM
   1. 询问用户 `subtitle`（例如“热身赛”或“正式赛”）以及 `title`（总标题）、`author`。
   2. 在工作区根目录下创建 `typst-statement` 和 `typst-statement/<subtitle>` 目录（`<subtitle>` 为用户提供的 `subtitle` 字段）：  
      `mkdir -p typst-statement/<subtitle>`
-  3. 将 `references` 下的 `lib.typ`、`problem-sample.json`、`usts.png` 复制到 `typst-statement/`，将 `references` 下的 `main.typ`、`problem.typ` 复制到 `typst-statement/<subtitle>/` 目录中。
+  3. 将 `references` 下的 `lib.typ`、`problem-sample.json`、`usts.png` 复制到 `typst-statement/`，将 `references` 下的 `main.typ`、`problems.typ` 复制到 `typst-statement/<subtitle>/` 目录中。
   4. 编辑 `typst-statement/<subtitle>/main.typ`，填入 `title`、`subtitle`、`author` 等基础信息。
-  5. 按照 `problem-sample.json` 的格式，在 `typst-statement/<subtitle>/problem.json` 中初始化题目列表（空或包含已有题目）。
+  5. 按照 `problems-sample.json` 的格式，在 `typst-statement/<subtitle>/problems.json` 中初始化题目列表（空或包含已有题目）。
 
 - **若已有 `typst-statement` 目录：**
   1. 询问用户需要加入哪个 `subtitle`（对应的子目录）。如果 `typst-statement/<subtitle>` 不存在，则按照上述“没有 `typst-statement` 目录”的步骤 2–5 创建该子目录及其模板内容。
-  2. 为当前题目在 `<英文目录名>` 下生成 `meta.json`，内容格式参考 `problem-sample.json` 中的单道题目元数据（题目名、题面描述等，使用 Typst 语法）。
-  3. 执行以下命令，安全地将该题合并到对应 `subtitle` 的 `problem.json` 中：  
-     `python scripts/add_problem.py "typst-statement/<subtitle>/problem.json" "<英文目录名>/meta.json"`
+  2. 为当前题目在 `<英文目录名>` 下生成 `meta.json`，内容格式参考 `problems-sample.json` 中的单道题目元数据（题目名、题面描述等，使用 Typst 语法）。
+  3. 执行以下命令，安全地将该题合并到对应 `subtitle` 的 `problems.json` 中：  
+     `python scripts/add_problem.py "typst-statement/<subtitle>/problems.json" "<英文目录名>/meta.json"`
 
 - **自动编译与 PDF 提取（必须通过脚本执行）：**
   1. 在终端执行命令：  

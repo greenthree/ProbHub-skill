@@ -33,7 +33,7 @@ def main():
     # 2. 编译 Typst
     print(f"[*] 正在编译 {main_typ_path} ...")
     try:
-        subprocess.run(["typst", "compile", "main.typ"], cwd=typst_dir, check=True)
+        subprocess.run(["typst", "compile", "--root", "..", "main.typ"], cwd=typst_dir, check=True)
     except subprocess.CalledProcessError as e:
         print(f"[!] Typst 编译失败，请检查 main.typ 或 JSON 语法。错误信息: {e}")
         sys.exit(1)
