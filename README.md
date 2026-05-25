@@ -23,15 +23,16 @@ ProbHub/
 │   ├── cyaron.md            # CYaRon API 快速参考
 │   ├── fast.md              # 基础数据生成规范
 │   ├── testlib.h            # SPJ/交互题评测头文件
+│   ├── lib.typ
+│   ├── main.typ
+│   ├── problem-sample.json
 │   └── typst-template/      # Typst 初始模板库
 │       ├── main.typ
 │       └── problem-sample.json
 ├── scripts/                 # 自动化脚本 
 │   ├── add_problem.py       # 向 problem.json 追加新题
 │   └── extract_new_problem.py # 自动裁剪单题 PDF
-└── workspace/               # 工作区 (由 AI 自动生成)
-    ├── balance/             # 例：具体题目目录
-    └── typst-statement/     # 例：比赛统一组卷目录
+└── typst-template/          # typst题面示例
 
 ```
 
@@ -42,7 +43,7 @@ ProbHub/
 **1. 基础环境**
 
 * Python 3.8+
-* GCC/G++ (用于编译 `std.cpp` 和 `checker.cpp`)
+* GCC/G++ (用于编译 `outmaker.cpp` 和 `checker.cpp`)
 
 **2. Python 依赖包**
 
@@ -77,13 +78,6 @@ winget install typst
 * `SimSun` / `simsun` (宋体 - 基础中文)
 * `SimSun-ExtG` (宋体扩展 - 特殊字形支持)
 
-
-
-> **字体部署提示**:
-> 如果你在 Linux 服务器或纯命令行环境（无桌面系统）下运行本项目，可以将上述字体文件 (`.ttf` / `.otf`) 统一放入一个字体文件夹（例如项目根目录下的 `fonts/`），然后在 Agent 脚本或环境中指定 Typst 的字体搜索路径：
-> `export TYPST_FONT_PATHS=./fonts`
-
-
 ---
 
 ## 使用说明
@@ -95,6 +89,8 @@ winget install typst
 3. **自动化执行**: 助手将根据 `SKILL.md` 的设定，自动建立目录、编写生成器和标程、构造 `data/` 测试集、合并 Typst 题面并最终打包为可上传到 DomJudge 的 `.zip`。
 
 **[Typst 题面示例](https://uploadfiles.nowcoder.com/files/20260503/468072_1777778993097/第十二届苏州科技大学程序设计竞赛正式赛.pdf)**
+
+注：typst-template/热身赛 中有可以添加图片、副标题的方法，有需要可手动添加。
 
 ---
 

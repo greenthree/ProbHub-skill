@@ -42,7 +42,7 @@ description: 当用户需要出算法竞赛题目、造测试数据、配置 DOM
   1. 询问用户 `subtitle`（例如“热身赛”或“正式赛”）以及 `title`（总标题）、`author`。
   2. 在工作区根目录下创建 `typst-statement` 和 `typst-statement/<subtitle>` 目录（`<subtitle>` 为用户提供的 `subtitle` 字段）：  
      `mkdir -p typst-statement/<subtitle>`
-  3. 将 `references` 下的 `lib.typ`、`problem-sample.json` 复制到 `typst-statement/`，将 `references/main.typ`复制到 `typst-statement/<subtitle>/` 目录中。
+  3. 将 `references` 下的 `lib.typ`、`problem-sample.json` 复制到 `typst-statement/`，将 `references` 下的 `main.typ`、`problem.typ` 复制到 `typst-statement/<subtitle>/` 目录中。
   4. 编辑 `typst-statement/<subtitle>/main.typ`，填入 `title`、`subtitle`、`author` 等基础信息。
   5. 按照 `problem-sample.json` 的格式，在 `typst-statement/<subtitle>/problem.json` 中初始化题目列表（空或包含已有题目）。
 
