@@ -99,8 +99,23 @@ ProbHub/
 │   └── problem-sample.json  # 题目元数据配置样例
 ├── scripts/                 # 自动化脚本 
 │   ├── add_problem.py       # 向 problem.json 追加新题
-│   └── extract_new_problem.py # 自动裁剪单题 PDF
-└── typst-template/          # Typst 题面示例
+│   ├── extract_new_problem.py # 自动裁剪单题 PDF
+│   └── local_judge.py         # 轻量化本地评测与宿命自检
+├── typst-template/          # Typst 题面示例
+│
+└── [英文目录名]/               # 示例：由 AI 顺次生成的独立题目文件夹（如 balance/）
+    ├── std.cpp                # 标程：最优解代码（宿命：100% AC）
+    ├── validator.cpp          # 格式校验：基于 testlib.h 检查输入合规性
+    ├── brute.cpp              # 强力对拍：无脑暴力正确解（宿命：AC 或 TLE，绝不能 WA）
+    ├── wrong.cpp              # 错解验证：故意写错的贪心/溢出代码（宿命：必须吃 WA/RE）
+    ├── meta.json              # 单题元数据（供 Typst 渲染题面使用）
+    ├── problem.pdf            # 由脚本自动裁剪出的单题独立题面
+    ├── domjudge-problem.ini   # DOMjudge 运行参数配置文件（如 timelimit）
+    ├── problem.yaml           # DOMjudge 题目元数据（如 name, memory limit 和特殊评测）
+    ├── data/                  # 全量测试数据集
+    │   ├── sample/            # 样例数据：存放 1.in, 1.ans（严格对应题面样例）
+    │   └── secret/            # 盲测强数据：存放 2.in, 2.ans ~ 30.ans（含极限与卡错解数据）
+    └── output_validators/     # （仅自定义题目适用）存放编译后的 checker/interactor
 
 ```
 
