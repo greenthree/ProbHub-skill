@@ -69,7 +69,8 @@ timelimit='1'
 
 ```yaml
 name: '<中文名或题目名>'
-memorylimit: 256
+limits:
+  memory: 256  # 单位 MB
 ```
 
 3. **若该题是交互题：**
@@ -94,5 +95,6 @@ memorylimit: 256
 ## Constraints (全局约束)
 
 * DOMjudge 的测试数据必须严格放在 `data/sample/` 和 `data/secret/` 目录下。
+* 如果用户有修改题面需求，判断是否需要修改数据，修改题面后注意操作 `problems.json` 进行修改并编译新的组卷 pdf，并建议用户手动剪切保存 problem.pdf。
 * 文件读写、编译、运行脚本必须主动使用命令行工具进行，遇到报错需自行 debug 修正。
 
