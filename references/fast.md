@@ -24,7 +24,7 @@ signed main()
         ofstream fout(to_string(i) + ".in");
         
         // 调用数据生成函数
-        make_data(fout);
+        inmkr(fout);
 
         fout.close();
     }
@@ -62,7 +62,7 @@ signed main()
         if (!fin.is_open()) continue;
 
         // 调用标准程序逻辑
-        solve(fin, fout);
+        _std(fin, fout);
 
         fin.close();
         fout.close();
