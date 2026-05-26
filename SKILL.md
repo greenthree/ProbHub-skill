@@ -24,6 +24,7 @@ description: 当用户需要出算法竞赛题目、造测试数据、配置 DOM
 2. 若答案不唯一，则必须在 `<英文目录名>` 下编写 `checker.cpp`。
 3. 如果是交互题，则必须编写 `interactor.cpp`。如果是通信题（Run-twice），提示用户自行编写 run 脚本，然后按正常题目处理。
 4. 编写相关 cpp 时，必须使用 `testlib.h` 规范，并确保逻辑严密。
+注：使用 `testlib.h` 的文件在 Windows MinGW 上必须加 `-static`
 
 ## 3. 数据生成与验证阶段 (Data & Sandbox)
 1. 在工作区执行：`mkdir -p <英文目录名>/data/sample` 和 `mkdir -p <英文目录名>/data/secret`。
