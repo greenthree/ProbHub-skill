@@ -98,7 +98,7 @@ ProbHub/
 │   ├── problem.typ          # Typst 单题模板
 │   └── problem-sample.json  # 题目元数据配置样例
 ├── scripts/                 # 自动化脚本 
-│   ├── add_problem.py       # 向 problem.json 追加新题
+│   ├── add_problem.py       # 向 problems.json 追加新题
 │   ├── extract_new_problem.py # 自动裁剪单题 PDF
 │   └── local_judge.py         # 轻量化本地评测与宿命自检
 ├── typst-template/          # Typst 题面示例
