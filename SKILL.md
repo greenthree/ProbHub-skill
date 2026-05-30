@@ -62,15 +62,15 @@ description: 当用户需要出算法竞赛题目、造测试数据、配置 DOM
 
 - **若已有 `typst-statement` 目录：**
   1. 询问用户需要加入哪个 `subtitle`（对应的子目录）。如果 `typst-statement/<subtitle>` 不存在，则按照上述“没有 `typst-statement` 目录”的步骤 2–5 创建该子目录及其模板内容。
-  2. 为当前题目在 `<英文目录名>` 下生成 `meta.json`，内容格式参考 `problems-sample.json` 中的单道题目元数据（题目名、题面描述等，使用 Typst 语法）。
+  2. 为当前题目在 `<英文目录名>` 下生成 `meta.json`，内容格式参考 `problems-sample.json` 中的单道题目元数据。**【致命约束】**：`meta.json` 中的 `display_name` 必须是该题目的原始中文名，后续提取脚本将严格依赖该名称进行物理页码匹配，绝不可随意删改。
   3. 执行以下命令，安全地将该题合并到对应 `subtitle` 的 `problems.json` 中：  
      `python scripts/add_problem.py "typst-statement/<subtitle>/problems.json" "<英文目录名>/meta.json"`
 
 - **自动编译与 PDF 提取（必须通过脚本执行）：**
   1. 在终端执行命令：  
      `python scripts/extract_new_problem.py "typst-statement/<subtitle>" "<英文目录名>"`
-  2. 观察脚本输出（特别是 `x` 的值）。
-  3. 如果脚本执行成功，提示用户检查 `<英文目录名>/problem.pdf`，确认题目页数和内容是否无误。如果脚本报错，你需要阅读错误日志并自行 Debug JSON 格式或 Typst 语法。
+  2. 观察脚本输出的裁剪反馈（提取的物理页码范围）。
+  3. 如果脚本执行成功，提示用户检查 `<英文目录名>/problem.pdf`，确认题目页数和内容是否无误。如果脚本报错“未找到题目信标”或编译失败，你需要阅读错误日志，检查 Typst 语法或 JSON 中的 `display_name` 匹配情况并自行 Debug。
 
 ## 5. DOMjudge 打包阶段 (Packaging)
 询问用户是否需要生成 DOMjudge 题目包。若是：
@@ -111,5 +111,5 @@ limits:
 ## Constraints (全局约束)
 
 * DOMjudge 的测试数据必须严格放在 `data/sample/` 和 `data/secret/` 目录下。
-* 如果用户有**修改题面**需求，先判断是否需要修改数据与样例，修改题面后注意不要使用脚本，直接操作 `problems.json` 进行修改并编译新的组卷 pdf，并建议用户手动剪切保存 problem.pdf。
+* 如果用户有**修改题面**需求，先判断是否需要修改数据与样例，修改题面后注意不要使用脚本，直接操作 `problems.json` 进行修改并编译新的组卷 pdf，并建议用户手动检查 problem.pdf。
 * 文件读写、编译、运行脚本必须主动使用命令行工具进行，遇到报错需自行 debug 修正。
