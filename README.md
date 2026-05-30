@@ -103,7 +103,7 @@ ProbHub/
 │   └── local_judge.py         # 轻量化本地评测与宿命自检
 ├── typst-template/          # Typst 题面示例
 │
-└── [英文目录名]/               # 示例：由 AI 顺次生成的独立题目文件夹（如 balance/）
+└── [英文目录名]/               # 示例：由 AI 顺次生成的独立题目文件夹（如 A/）
     ├── std.cpp                # 标程：最优解代码（宿命：100% AC）
     ├── validator.cpp          # 格式校验：基于 testlib.h 检查输入合规性
     ├── brute.cpp              # 强力对拍：无脑暴力正确解（宿命：AC 或 TLE，绝不能 WA）
