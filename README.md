@@ -95,8 +95,8 @@ ProbHub/
 │   ├── testlib.h            # SPJ/交互题评测头文件
 │   ├── lib.typ              # Typst 宏包依赖
 │   ├── main.typ             # Typst 组卷入口
-│   ├── problem.typ          # Typst 单题模板
-│   └── problem-sample.json  # 题目元数据配置样例
+│   ├── problems.typ          # Typst 单题模板
+│   └── problems-sample.json  # 题目元数据配置样例
 ├── scripts/                 # 自动化脚本 
 │   ├── add_problem.py       # 向 problems.json 追加新题
 │   ├── extract_new_problem.py # 自动裁剪单题 PDF
