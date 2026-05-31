@@ -294,9 +294,6 @@
 
     if problems != none {
       for (i, e) in problems.enumerate() {
-        // ================= 修复：用 [ ] 切换到标记模式，并用 # 调用函数 =================
-        [#box(width: 0pt, height: 0pt, metadata(e.problem.display_name)) <prob-boundary>]
-        // =================================================================================
         e.problem.display-name = "题目 " + str.from-unicode(int(i) + 65) + ". " + e.problem.display_name
         render-problem(e.problem, e.statement, language: problem-lang)
 

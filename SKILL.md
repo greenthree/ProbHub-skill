@@ -53,7 +53,7 @@ description: 当用户需要出算法竞赛题目、造测试数据、配置 DOM
 询问用户是否需要将此题加入组卷。如需要，检查工作区根目录是否存在 `typst-statement` 文件夹：
 
 - **若没有 `typst-statement` 目录：**
-  1. 询问用户 `subtitle`（例如“热身赛”或“正式赛”）以及 `title`（总标题）、`author`。
+  1. 询问用户 `subtitle`（例如”热身赛”或”正式赛”）以及 `title`（总标题）、`author`。
   2. 在工作区根目录下创建 `typst-statement` 和 `typst-statement/<subtitle>` 目录（`<subtitle>` 为用户提供的 `subtitle` 字段）：  
      `mkdir -p typst-statement/<subtitle>`
   3. 将 `references` 下的 `lib.typ`、`problems-sample.json`、`usts.png` 复制到 `typst-statement/`，将 `references` 下的 `main.typ`、`problems.typ` 复制到 `typst-statement/<subtitle>/` 目录中。
@@ -61,16 +61,20 @@ description: 当用户需要出算法竞赛题目、造测试数据、配置 DOM
   5. 按照 `problems-sample.json` 的格式，在 `typst-statement/<subtitle>/problems.json` 中初始化题目列表（空或包含已有题目）。
 
 - **若已有 `typst-statement` 目录：**
-  1. 询问用户需要加入哪个 `subtitle`（对应的子目录）。如果 `typst-statement/<subtitle>` 不存在，则按照上述“没有 `typst-statement` 目录”的步骤 2–5 创建该子目录及其模板内容。
-  2. 为当前题目在 `<英文目录名>` 下生成 `meta.json`，内容格式参考 `problems-sample.json` 中的单道题目元数据。**【致命约束】**：`meta.json` 中的 `display_name` 必须是该题目的原始中文名，后续提取脚本将严格依赖该名称进行物理页码匹配，绝不可随意删改。
+  1. 询问用户需要加入哪个 `subtitle`（对应的子目录）。如果 `typst-statement/<subtitle>` 不存在，则按照上述”没有 `typst-statement` 目录”的步骤 2–5 创建该子目录及其模板内容。
+  2. 为当前题目在 `<英文目录名>` 下生成 `meta.json`，内容格式参考 `problems-sample.json` 中的单道题目元数据。**【致命约束】**：`meta.json` 中的 `display_name` 必须是该题目的原始中文名。提取脚本通过扫描 PDF 文本中的”题目 X. {display_name}”标题来定位物理页码，绝不可随意删改 `display_name`。
   3. 执行以下命令，安全地将该题合并到对应 `subtitle` 的 `problems.json` 中：  
-     `python scripts/add_problem.py "typst-statement/<subtitle>/problems.json" "<英文目录名>/meta.json"`
+     `python scripts/add_problem.py “typst-statement/<subtitle>/problems.json” “<英文目录名>/meta.json”`
 
 - **自动编译与 PDF 提取（必须通过脚本执行）：**
   1. 在终端执行命令：  
-     `python scripts/extract_new_problem.py "typst-statement/<subtitle>" "<英文目录名>"`
-  2. 观察脚本输出的裁剪反馈（提取的物理页码范围）。
-  3. 如果脚本执行成功，提示用户检查 `<英文目录名>/problem.pdf`，确认题目页数和内容是否无误。如果脚本报错“未找到题目信标”或编译失败，你需要阅读错误日志，检查 Typst 语法或 JSON 中的 `display_name` 匹配情况并自行 Debug。
+     `python scripts/extract_new_problem.py “typst-statement/<subtitle>” “<英文目录名>”`
+  2. 脚本自动选择提取模式：
+     - **新增题目**（该题在 `problems.json` 中为最后一题）→ **页数差值模式**：记录编译前 `main.pdf` 的页数，编译后计算差值 `x`，提取最后 `x` 页。首次编译时自动扣除封面和空白页（2 页）。
+     - **修改旧题**（该题不是最后一题）→ **PDF 文本扫描模式**：编译后用 `pypdf` 扫描每页文本，搜索”题目 X. {题名}”标题建立页码映射，精确裁剪目标页码范围。
+  3. 观察脚本输出：会显示使用的模式、页码范围或差值信息。
+  4. 如果脚本执行成功，提示用户检查 `<英文目录名>/problem.pdf`，确认题目页数和内容是否无误。如果脚本报错”未找到题目标题”（文本扫描模式）或”页数 <= 0”（差值模式），你需要检查 Typst 语法或 `display_name` 匹配情况并自行 Debug。
+
 - **`problems.json` 编写时的一些约束：**
   1. markdown 格式需要 `- `添加无序列表时，替换为 `  $\\quad$**·**  `，有序列表的 `1. `替换为 ` $\\quad$ 1. `。
   2. 样例中换行使用 `\n`，其余部分使用 `\n\n`。
