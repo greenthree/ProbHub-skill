@@ -1,5 +1,5 @@
 # ProbHub-skill: ACM/ICPC 自动化出题工作流
-
+![ProbHub Logo](logo.svg)
 ProbHub 是一个基于大语言模型 (LLM Agent) 和现代排版/测试框架构建的算法竞赛出题环境。本项目旨在通过标准化的自动化工作流，减少造数据、调格式和配置评测包等重复性劳动。
 
 ---
@@ -45,7 +45,7 @@ npx probhub-skill
 **2. Python 依赖包**
 
 ```bash
-pip install cyaron pypdf
+pip install cyaron pypdf flask
 ```
 
 **3. Typst 编译器**

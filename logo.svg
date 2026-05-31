@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 324 90" width="324" height="90">
+    <style>
+        .logo-text { 
+            font-family: "New Computer Modern Mono", "Courier New", monospace;
+            font-weight: bold; 
+            font-size: 64px; 
+        }
+    </style>
+    
+    <rect width="324" height="90" rx="16" fill="#000000" />
+    
+    <text x="22" y="64" class="logo-text" fill="#E53935">p</text>
+    <text x="58" y="64" class="logo-text" fill="#E53935">r</text>
+    <text x="94" y="64" class="logo-text" fill="#E53935">o</text>
+    <text x="130" y="64" class="logo-text" fill="#1E88E5">b</text>
+    
+    <rect x="182" y="14" width="130" height="62" rx="10" fill="#FFA31A" />
+    
+    <text x="192" y="64" class="logo-text" fill="#000000">h</text>
+    <text x="228" y="64" class="logo-text" fill="#000000">u</text>
+    <text x="264" y="64" class="logo-text" fill="#000000">b</text>
+</svg>
