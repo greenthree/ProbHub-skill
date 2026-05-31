@@ -13,6 +13,10 @@ import subprocess
 import sys
 import os
 import time
+import io
+
+# Force UTF-8 to avoid GBK encode errors on Windows
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 
 def main():
@@ -41,7 +45,9 @@ def main():
         # macOS / Linux: start_new_session 实现 daemonize
         kwargs["start_new_session"] = True
 
-    subprocess.Popen([sys.executable, ui_script], **kwargs)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    subprocess.Popen([sys.executable, ui_script], env=env, **kwargs)
 
     # 给 Flask 一点启动时间
     time.sleep(1.5)
