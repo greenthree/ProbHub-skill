@@ -1,5 +1,6 @@
 # ProbHub-skill: ACM/ICPC 自动化出题工作流
 ![ProbHub Logo](logo.svg)
+
 ProbHub 是一个基于大语言模型 (LLM Agent) 和现代排版/测试框架构建的算法竞赛出题环境。本项目旨在通过标准化的自动化工作流，减少造数据、调格式和配置评测包等重复性劳动。
 
 ---
@@ -9,7 +10,7 @@ ProbHub 是一个基于大语言模型 (LLM Agent) 和现代排版/测试框架�
 * **Agent 驱动**: 内置 `SKILL.md`，兼容 Claude Code 等 Agent 框架，通过自然语言指令完成出题流程。
 * **数据生成**: 集成 CYaRon，支持通过 Python 脚本快速生成树、图等复杂数据结构。
 * **数据检验**: 使用沙箱（可自定义 validator）对小数据暴力对拍，全局保证卡掉暴力、错解。
-* **极速排版**: 采用 Typst 模板，替代传统 LaTeX，大幅提升题面 PDF 编译速度。
+* **极速排版**: 采用 Typst 模板，替代传统 LaTeX，大幅提升题面 PDF 编译速度，支持 WebUI 手动修改题面，后续会更新修改 lib.typ，自定义排版的功能。
 * **DOMjudge 兼容**: 自动生成 `problem.yaml`、`domjudge-problem.ini` 及基于 `testlib.h` 的验证器，一键打包 `.zip` 题库。
 
 **[点击查看：真实赛事 Typst 题面排版示例](https://github.com/greenthree/ProbHub-skill/blob/main/typst-template/%E6%AD%A3%E5%BC%8F%E8%B5%9B/main.pdf)**
