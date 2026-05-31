@@ -63,12 +63,12 @@ def is_last_problem(typst_dir, target_name):
     return last_name == target_name
 
 def extract_by_page_count(main_pdf_path, output_pdf_path, prev_pages):
-    """Extract the last X pages using page count difference (for new problems)."""
+    """Extract the last X pages using page count difference (for new problems).
+    Returns True on success, False if fallback needed (e.g. x <= 0)."""
     new_pages = get_page_count(main_pdf_path)
     print(f"[*] Page count method: before={prev_pages}, after={new_pages}")
 
     if prev_pages == 0:
-        # First problem ever
         x = new_pages - BOILERPLATE_PAGES
         print(f"[*] First problem — total {new_pages} pages, boilerplate {BOILERPLATE_PAGES}, x = {x}")
     else:
@@ -76,8 +76,8 @@ def extract_by_page_count(main_pdf_path, output_pdf_path, prev_pages):
         print(f"[*] Appended problem — x = {x}")
 
     if x <= 0:
-        print("[-] Error: problem pages <= 0. Check Typst compilation.")
-        sys.exit(1)
+        print("[*] Page count unchanged, falling back to text-scan mode...")
+        return False
 
     reader = PdfReader(main_pdf_path)
     writer = PdfWriter()
@@ -89,6 +89,7 @@ def extract_by_page_count(main_pdf_path, output_pdf_path, prev_pages):
         writer.write(f)
 
     print(f"[+] Extracted last {x} pages -> {output_pdf_path}")
+    return True
 
 def extract_by_text_scan(main_pdf_path, output_pdf_path, target_name):
     """Extract using PDF text scanning (for mid-sequence edits)."""
@@ -176,7 +177,9 @@ def main():
 
     # 4. Extract
     if last:
-        extract_by_page_count(main_pdf_path, output_pdf_path, prev_pages)
+        ok = extract_by_page_count(main_pdf_path, output_pdf_path, prev_pages)
+        if not ok:
+            extract_by_text_scan(main_pdf_path, output_pdf_path, target_name)
     else:
         extract_by_text_scan(main_pdf_path, output_pdf_path, target_name)
 

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
 import json
 import subprocess
 import webbrowser
@@ -419,17 +420,21 @@ HTML_TEMPLATE = r"""
                     if (!this.currentSubtitle) return;
                     this.saveData();
                     this.isCompiling = true;
-                    // 编译时告知后端要编译哪个 main.typ
-                    fetch('/api/compile', { 
+                    fetch('/api/compile', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ subtitle: this.currentSubtitle })
                     }).then(res => res.json()).then(data => {
                         this.isCompiling = false;
                         if(data.success) {
-                            this.showToast(`🎉 [${this.currentSubtitle}] Typst 全卷编译成功`);
+                            let msg = `[${this.currentSubtitle}] Typst compile OK`;
+                            if (data.distributed && data.distributed.length > 0) {
+                                let ok = data.distributed.filter(d => d.status === 'ok').length;
+                                msg += ` — ${ok}/${data.distributed.length} problem(s) extracted`;
+                            }
+                            this.showToast(msg);
                         } else {
-                            this.showToast('编译失败，请查看终端报错', true);
+                            this.showToast('Compile failed', true);
                         }
                     });
                 },
@@ -500,20 +505,96 @@ def save_data():
 def compile_pdf():
     payload = request.json
     subtitle = payload.get('subtitle')
-    
+
     if not subtitle:
         return jsonify({"success": False, "error": "Missing subtitle"})
-        
+
     try:
         typst_main = secure_path(subtitle, "main.typ")
         subprocess.run(["typst", "compile", "--root", ".", typst_main], check=True, text=True, encoding='utf-8')
-        return jsonify({"success": True})
+
+        # After compilation, distribute individual problem PDFs
+        dist_results = distribute_problems(subtitle)
+
+        return jsonify({"success": True, "distributed": dist_results})
     except subprocess.CalledProcessError as e:
-        print(f"[-] Typst 编译失败: {e.stderr}")
+        print(f"[-] Typst compile failed: {e.stderr}")
         return jsonify({"success": False, "error": str(e)})
     except Exception as e:
-        print(f"[-] 编译系统异常: {e}")
+        print(f"[-] Compile error: {e}")
         return jsonify({"success": False, "error": str(e)})
+
+
+def find_problem_dirs():
+    """Scan workspace root for problem directories (must contain meta.json and data/)."""
+    problem_dirs = {}
+    for entry in os.listdir("."):
+        if not os.path.isdir(entry):
+            continue
+        meta = os.path.join(entry, "meta.json")
+        data_dir = os.path.join(entry, "data")
+        if os.path.isfile(meta) and os.path.isdir(data_dir):
+            try:
+                with open(meta, "r", encoding="utf-8") as f:
+                    info = json.load(f)
+                name = info.get("problem", {}).get("display_name", "")
+                if name:
+                    problem_dirs[name] = entry
+            except Exception:
+                pass
+    return problem_dirs
+
+
+def distribute_problems(subtitle):
+    """Run extract_new_problem.py for each problem in the current subtitle."""
+    # Find the extract script (same dir as this ui.py or in skill scripts)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    extract_script = os.path.join(script_dir, "extract_new_problem.py")
+
+    # If not in workspace, look in skill scripts
+    if not os.path.exists(extract_script):
+        skill_scripts = os.path.join(
+            os.path.expanduser("~"), ".claude", "skills", "probhub", "scripts", "extract_new_problem.py"
+        )
+        if os.path.exists(skill_scripts):
+            extract_script = skill_scripts
+        else:
+            return {"error": "extract_new_problem.py not found"}
+
+    # Match problem names to directories
+    name_to_dir = find_problem_dirs()
+
+    # Read current problems.json to get active problems in order
+    typst_subdir = os.path.join(BASE_DIR, subtitle)
+    problems_json = os.path.join(typst_subdir, "problems.json")
+    if not os.path.exists(problems_json):
+        return {"error": "problems.json not found"}
+
+    with open(problems_json, "r", encoding="utf-8") as f:
+        problems = json.load(f)
+
+    results = []
+    for p in problems:
+        display_name = p.get("problem", {}).get("display_name", "")
+        if not display_name:
+            results.append({"name": "?", "status": "skipped", "reason": "no display_name"})
+            continue
+        prob_dir = name_to_dir.get(display_name)
+        if not prob_dir:
+            results.append({"name": display_name, "status": "skipped", "reason": "no matching directory"})
+            continue
+
+        typst_dir = os.path.join(BASE_DIR, subtitle)
+        try:
+            subprocess.run(
+                [sys.executable, extract_script, typst_dir, prob_dir],
+                check=True, capture_output=True, text=True, encoding="utf-8"
+            )
+            results.append({"name": display_name, "status": "ok", "dir": prob_dir})
+        except subprocess.CalledProcessError as e:
+            results.append({"name": display_name, "status": "failed", "reason": e.stderr[:200]})
+
+    return results
 
 def open_browser(): 
     webbrowser.open_new("http://127.0.0.1:33933")
