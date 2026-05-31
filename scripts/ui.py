@@ -249,6 +249,45 @@ HTML_TEMPLATE = r"""
                                 </div>
                             </div>
 
+                            <!-- Samples Section -->
+                            <div>
+                                <div class="flex items-center justify-between mb-3">
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><span>🧪</span> Samples</label>
+                                    <button @click="addSample()" class="px-3 py-1.5 text-[11px] font-medium rounded-md transition-all duration-150 border border-gold/30 text-gold hover:bg-gold/10 active:scale-[0.97]">
+                                        + 添加样例
+                                    </button>
+                                </div>
+                                <template x-if="!problems[selectedIdx].problem.samples || problems[selectedIdx].problem.samples.length === 0">
+                                    <p class="text-[12px] text-cream-subtle italic py-6 text-center border border-dashed border-white/6 rounded-lg">暂无样例，点击上方按钮添加</p>
+                                </template>
+                                <template x-if="problems[selectedIdx].problem.samples && problems[selectedIdx].problem.samples.length > 0">
+                                    <div class="space-y-3">
+                                        <template x-for="(sample, si) in problems[selectedIdx].problem.samples" :key="si">
+                                            <div class="p-4 rounded-xl border border-white/5" style="background:rgba(255,255,255,0.015);">
+                                                <div class="flex items-center justify-between mb-2.5">
+                                                    <span class="text-[11px] font-mono text-gold tracking-wide" x-text="'样例 #' + (si + 1)"></span>
+                                                    <button @click="removeSample(si)" class="text-[11px] text-cream-subtle hover:text-danger transition-colors px-2 py-0.5 rounded hover:bg-danger/10" x-show="problems[selectedIdx].problem.samples.length > 1">✕ 移除</button>
+                                                </div>
+                                                <div class="grid grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label class="block text-[10px] font-medium tracking-wide text-cream-muted uppercase mb-1">Input</label>
+                                                        <textarea x-model="sample.input" rows="3"
+                                                                  class="w-full px-3 py-2 bg-ink-input border border-white/6 rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
+                                                                  placeholder="3 5 7"></textarea>
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-[10px] font-medium tracking-wide text-cream-muted uppercase mb-1">Output</label>
+                                                        <textarea x-model="sample.output" rows="3"
+                                                                  class="w-full px-3 py-2 bg-ink-input border border-white/6 rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
+                                                                  placeholder="2"></textarea>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </template>
+                            </div>
+
                             <div>
                                 <div class="grid grid-cols-2 gap-4 mb-2">
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><span>✏️</span> Notes & Constraints</label>
@@ -332,6 +371,20 @@ HTML_TEMPLATE = r"""
                     } else {
                         delete p.statement.quote;
                     }
+                },
+
+                addSample() {
+                    let p = this.problems[this.selectedIdx];
+                    if (!p.problem) return;
+                    if (!p.problem.samples) p.problem.samples = [];
+                    p.problem.samples.push({ input: "", output: "" });
+                },
+
+                removeSample(index) {
+                    let p = this.problems[this.selectedIdx];
+                    if (!p.problem || !p.problem.samples) return;
+                    if (p.problem.samples.length <= 1) return;
+                    p.problem.samples.splice(index, 1);
                 },
 
                 renderMath(el, text) {
