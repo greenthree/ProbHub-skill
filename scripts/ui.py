@@ -159,8 +159,9 @@ HTML_TEMPLATE = r"""
                 </div>
                 <div id="sortable-list" class="space-y-1.5 flex-1 overflow-y-auto pr-0.5">
                     <template x-for="(prob, index) in problems" :key="prob.problem.display_name + index">
-                        <div @click="selectProb(index)" :class="selectedIdx === index ? 'bg-gold/10 border-gold/40 text-cream' : 'border-transparent hover:border-white/6 hover:bg-ink-elevated/50 text-cream-muted'" class="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-move border transition-all duration-150 group">
-                            <span class="text-[11px] font-mono shrink-0 opacity-50" :class="selectedIdx === index ? 'text-gold opacity-80' : ''" x-text="String.fromCharCode(65 + index)"></span>
+                        <div @click="selectProb(index)" :class="selectedIdx === index ? 'bg-gold/10 border-gold/40 text-cream' : 'border-transparent hover:border-white/6 hover:bg-ink-elevated/50 text-cream-muted'" class="flex items-center gap-2.5 px-3 py-2.5 rounded-lg cursor-move border transition-all duration-150 group">
+                            <span class="text-[11px] font-mono shrink-0 opacity-50 w-4 text-center" :class="selectedIdx === index ? 'text-gold opacity-80' : ''" x-text="String.fromCharCode(65 + index)"></span>
+                            <span class="w-1.5 h-4 rounded-full shrink-0 transition-transform duration-200" :class="selectedIdx === index ? 'scale-125' : ''" :style="'background:' + getDifficultyInfo(index).color" :title="getDifficultyInfo(index).label"></span>
                             <span class="text-[13px] font-medium truncate" x-text="prob.problem.display_name"></span>
                         </div>
                     </template>
@@ -178,7 +179,7 @@ HTML_TEMPLATE = r"""
                 <template x-if="problems[selectedIdx]">
                     <div class="space-y-8 animate-fade-in">
                         
-                        <div class="grid grid-cols-2 gap-6">
+                        <div class="grid grid-cols-[1fr_auto] gap-6 items-end">
                             <div>
                                 <label class="block text-[11px] font-medium tracking-wide text-cream-muted uppercase mb-1.5">Display Name</label>
                                 <input type="text" x-model="problems[selectedIdx].problem.display_name" class="w-full px-3.5 py-2.5 bg-ink-input border border-white/6 rounded-lg text-[14px] font-medium text-cream focus:border-gold/40 focus:outline-none transition-colors">
@@ -191,6 +192,45 @@ HTML_TEMPLATE = r"""
                                     <input type="checkbox" class="sr-only" :checked="hasQuote()" @change="toggleQuote($event.target.checked)">
                                     <span class="text-[12px] font-medium" :class="hasQuote() ? 'text-gold' : 'text-cream-subtle'">启用题面引言 (Quote)</span>
                                 </label>
+                            </div>
+                        </div>
+
+                        <!-- Difficulty Slider -->
+                        <div class="pt-5 mt-2 border-t border-white/5">
+                            <div class="flex items-center justify-between mb-3">
+                                <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">Difficulty</label>
+                                <span class="text-[12px] font-semibold px-2.5 py-0.5 rounded font-mono transition-all duration-300"
+                                      :style="'background:' + getDifficultyInfo(selectedIdx).bg + '; color:' + getDifficultyInfo(selectedIdx).color"
+                                      x-text="getDifficultyInfo(selectedIdx).label"></span>
+                            </div>
+                            <!-- Stepped Track -->
+                            <div class="relative h-12 flex items-center cursor-pointer select-none"
+                                 x-init="trackWidth = $el.offsetWidth; new ResizeObserver(() => trackWidth = $el.offsetWidth).observe($el)"
+                                 @click="setDifficultyFromTrack(selectedIdx, $event)">
+                                <div class="absolute inset-x-0 h-1.5 rounded-full bg-ink-border"></div>
+                                <div class="absolute left-0 h-1.5 rounded-full overflow-hidden transition-all duration-300"
+                                     :style="'width:' + (getDifficulty(selectedIdx) / 5 * 100) + '%'">
+                                    <div class="flex h-full" :style="'width:' + trackWidth + 'px'">
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#9b7ec4,#5a8ec0)"></div>
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#5a8ec0,#6b9b6a)"></div>
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#6b9b6a,#c8a050)"></div>
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#c8a050,#e08840)"></div>
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#e08840,#e05555)"></div>
+                                    </div>
+                                </div>
+                                <template x-for="(level, li) in difficultyLevels" :key="level.label">
+                                    <div class="absolute w-3.5 h-3.5 rounded-full transition-all duration-300 z-10"
+                                         :style="'left:calc(' + (li / 5 * 100) + '% - 7px); background:' + (getDifficulty(selectedIdx) >= li ? level.color : '#1e212b') + '; border: 2px solid ' + (getDifficulty(selectedIdx) >= li ? level.color : '#3a3d48') + ';' + (getDifficulty(selectedIdx) === li ? 'transform: scale(1.7); box-shadow: 0 0 12px ' + level.color + '99;' : '')"
+                                         @click.stop="setDifficulty(selectedIdx, li)"></div>
+                                </template>
+                            </div>
+                            <!-- Labels -->
+                            <div class="flex justify-between mt-1">
+                                <template x-for="(level, li) in difficultyLevels" :key="level.label">
+                                    <span class="text-[9px] font-medium transition-colors duration-300 select-none"
+                                          :style="getDifficulty(selectedIdx) === li ? 'color:' + level.color : 'color:#5f5e59'"
+                                          x-text="level.label"></span>
+                                </template>
                             </div>
                         </div>
 
@@ -314,6 +354,7 @@ HTML_TEMPLATE = r"""
                 problems: [],
                 selectedIdx: null,
                 isCompiling: false,
+                trackWidth: 800,
                 toast: { show: false, msg: '', isError: false },
 
                 initApp() {
@@ -355,6 +396,40 @@ HTML_TEMPLATE = r"""
                             this.selectedIdx = evt.newIndex;
                         }
                     });
+                },
+
+                // ── Difficulty ──────────────────────────────────────────────
+                difficultyLevels: [
+                    { label: 'Very Easy',    color: '#9b7ec4', bg: 'rgba(155,126,196,0.18)' },
+                    { label: 'Easy',         color: '#5a8ec0', bg: 'rgba( 90,142,192,0.18)' },
+                    { label: 'Easy-Medium',  color: '#6b9b6a', bg: 'rgba(107,155,106,0.18)' },
+                    { label: 'Medium',       color: '#c8a050', bg: 'rgba(200,160, 80,0.18)' },
+                    { label: 'Medium-Hard',  color: '#e08840', bg: 'rgba(224,136, 64,0.18)' },
+                    { label: 'Hard',         color: '#e05555', bg: 'rgba(224, 85, 85,0.18)' },
+                ],
+
+                getDifficulty(idx) {
+                    let p = this.problems[idx];
+                    if (!p || !p.problem) return 3; // default Medium
+                    return (typeof p.problem.difficulty === 'number' && p.problem.difficulty >= 0 && p.problem.difficulty <= 5)
+                        ? p.problem.difficulty : 3;
+                },
+
+                getDifficultyInfo(idx) {
+                    return this.difficultyLevels[this.getDifficulty(idx)];
+                },
+
+                setDifficulty(idx, level) {
+                    let p = this.problems[idx];
+                    if (!p.problem) p.problem = {};
+                    p.problem.difficulty = Math.max(0, Math.min(5, level));
+                },
+
+                setDifficultyFromTrack(idx, event) {
+                    let el = event.currentTarget;
+                    let rect = el.getBoundingClientRect();
+                    let ratio = (event.clientX - rect.left) / rect.width;
+                    this.setDifficulty(idx, Math.round(ratio * 5));
                 },
 
                 selectProb(index) { this.selectedIdx = index; },
