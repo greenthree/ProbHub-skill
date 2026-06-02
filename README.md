@@ -11,7 +11,7 @@ ProbHub 是一个基于大语言模型 (LLM Agent) 和现代排版/测试框架�
 * **数据生成**: 集成 CYaRon，支持通过 Python 脚本快速生成树、图等复杂数据结构。
 * **数据检验**: 使用沙箱（可自定义 validator）对小数据暴力对拍，全局保证卡掉暴力、错解。
 * **极速排版**: 采用 Typst 模板，替代传统 LaTeX，大幅提升题面 PDF 编译速度。
-* **WebUI 手动细改题面**：支持 markdown 预览、自动保存。
+* **WebUI 手动细改题面**：支持 markdown 预览、自动保存，编译后自动分发 `problem.pdf` 到各文件夹。
 * **DOMjudge 兼容**: 自动生成 `problem.yaml`、`problem.pdf`、`domjudge-problem.ini` 及基于 `testlib.h` 的验证器，一键打包 `.zip` 题库。
 
 **[点击查看：真实赛事 Typst 题面排版示例](https://github.com/greenthree/ProbHub-skill/blob/main/typst-template/%E6%AD%A3%E5%BC%8F%E8%B5%9B/main.pdf)**
