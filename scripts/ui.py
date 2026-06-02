@@ -84,7 +84,7 @@ HTML_TEMPLATE = r"""
         }
         .drag-ghost { opacity: 0.25; background: #1e212b !important; border: 1px dashed #c8a45c !important; }
         [x-cloak] { display: none !important; }
-        .ink-card { background: #13151c; border: 1px solid rgba(255,255,255,0.05); backdrop-filter: blur(12px); }
+        .ink-card { background: #13151c; border: 1px solid rgba(255,255,255,0.025); backdrop-filter: blur(12px); }
         .gold-glow:focus-within { box-shadow: 0 0 0 1px rgba(200,164,92,0.4), 0 0 12px rgba(200,164,92,0.08); }
         .toggle-track { transition: background-color 0.25s ease; }
         .toggle-dot { transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1); }
@@ -99,21 +99,21 @@ HTML_TEMPLATE = r"""
     </style>
 </head>
 <body class="bg-ink-bg text-cream antialiased relative">
-    <div x-data="probhub()" x-init="initApp()" class="max-w-7xl mx-auto px-6 py-6 relative z-10" x-cloak>
+    <div x-data="probhub()" x-init="initApp()" @input="autoSave()" class="max-w-7xl mx-auto px-6 py-6 relative z-10" x-cloak>
 
         <div class="ink-card rounded-2xl p-5 mb-5 flex justify-between items-center">
             <div class="flex items-center gap-5">
                 <svg class="h-12 w-auto select-none shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 324 90">
                     <style>.logo-text { font-family: "New Computer Modern Mono", "Courier New", monospace; font-weight: bold; font-size: 64px; }</style>
-                    <rect width="324" height="90" rx="16" fill="#000000" />
+                    <rect width="324" height="90" rx="16" fill="#0b0d12" />
                     <text x="22" y="64" class="logo-text" fill="#E53935">p</text>
                     <text x="58" y="64" class="logo-text" fill="#E53935">r</text>
                     <text x="94" y="64" class="logo-text" fill="#E53935">o</text>
                     <text x="130" y="64" class="logo-text" fill="#1E88E5">b</text>
                     <rect x="182" y="14" width="130" height="62" rx="10" fill="#FFA31A" />
-                    <text x="192" y="64" class="logo-text" fill="#000000">h</text>
-                    <text x="228" y="64" class="logo-text" fill="#000000">u</text>
-                    <text x="264" y="64" class="logo-text" fill="#000000">b</text>
+                    <text x="192" y="64" class="logo-text" fill="#0b0d12">h</text>
+                    <text x="228" y="64" class="logo-text" fill="#0b0d12">u</text>
+                    <text x="264" y="64" class="logo-text" fill="#0b0d12">b</text>
                 </svg>
                 <div class="flex flex-col gap-1">
                     <span class="text-[11px] tracking-[0.2em] uppercase text-cream-muted font-medium">Typesetting Console</span>
@@ -121,7 +121,7 @@ HTML_TEMPLATE = r"""
                         <span class="text-sm text-cream-subtle">当前排版集</span>
                         <div class="relative flex items-center" x-show="subtitles.length > 0">
                             <select x-model="currentSubtitle" @change="switchSubtitle()"
-                                    class="bg-ink-input text-gold font-mono text-[13px] border border-white/10 rounded-md pl-2.5 pr-8 py-1 outline-none focus:border-gold/40 cursor-pointer appearance-none transition-colors shadow-sm">
+                                    class="bg-ink-input text-gold font-mono text-[13px] border border-white/[0.02] rounded-md pl-2.5 pr-8 py-1 outline-none focus:border-gold/40 cursor-pointer appearance-none transition-colors shadow-sm">
                                 <template x-for="sub in subtitles" :key="sub">
                                     <option :value="sub" x-text="sub"></option>
                                 </template>
@@ -132,15 +132,30 @@ HTML_TEMPLATE = r"""
                     </div>
                 </div>
             </div>
-            
-            <div class="flex gap-3">
-                <button @click="saveData()" class="px-4 py-2 text-[13px] font-medium rounded-lg transition-all duration-200 border border-white/8 text-cream-muted hover:text-cream hover:border-white/15 hover:bg-ink-elevated active:scale-[0.97]" :disabled="!currentSubtitle">
-                    <span class="flex items-center gap-1.5">💾 保存修改</span>
+
+            <div class="flex items-center gap-3">
+                <button @click="selectedIdx = null" x-show="selectedIdx !== null"
+                        class="flex items-center gap-1.5 text-[12px] text-cream-subtle hover:text-cream transition-colors duration-200 group">
+                    <svg class="w-3.5 h-3.5 transition-transform duration-200 group-hover:-translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                    <span class="font-medium">概览</span>
                 </button>
+                <span class="text-[12px] font-medium flex items-center gap-1.5 transition-colors duration-300 select-none min-w-[80px]"
+                      :class="saveStatus === 'saved' ? 'text-success' : (saveStatus === 'error' ? 'text-danger' : (saveStatus === 'saving' ? 'text-cream-subtle' : 'text-cream-subtle/60'))">
+                    <template x-if="saveStatus === 'saved'"><span>✓ 已保存</span></template>
+                    <template x-if="saveStatus === 'saving'"><span class="animate-pulse">● 保存中</span></template>
+                    <template x-if="saveStatus === 'error'"><span class="cursor-pointer" @click.stop="doSave()">⚠ 点击重试</span></template>
+                    <template x-if="!saveStatus"><span>● 就绪</span></template>
+                </span>
                 <button @click="compilePDF()" class="px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all duration-200 bg-gradient-to-b from-[#d4b468] to-[#b8923e] text-[#1a1408] shadow-[0_0_20px_rgba(200,164,92,0.25)] hover:shadow-[0_0_28px_rgba(200,164,92,0.40)] active:scale-[0.97] disabled:opacity-50 disabled:shadow-none" :disabled="isCompiling || !currentSubtitle">
                     <span class="flex items-center gap-1.5">
-                        <span x-show="!isCompiling">📄 编译当前卷</span>
+                        <span x-show="!isCompiling">📄 编译全卷</span>
                         <span x-show="isCompiling" class="animate-pulse">⏳ 编译中...</span>
+                    </span>
+                </button>
+                <button @click="distributePDFs()" class="px-4 py-2.5 text-[13px] font-medium rounded-lg transition-all duration-200 bg-ink-elevated border border-white/[0.03] text-cream-muted hover:text-cream hover:border-white/8 hover:bg-ink-input active:scale-[0.97] disabled:opacity-40" :disabled="isDistributing || !currentSubtitle">
+                    <span class="flex items-center gap-1.5">
+                        <span x-show="!isDistributing">📦 分发 PDF</span>
+                        <span x-show="isDistributing" class="animate-pulse">⏳ 分发中...</span>
                     </span>
                 </button>
             </div>
@@ -159,10 +174,18 @@ HTML_TEMPLATE = r"""
                 </div>
                 <div id="sortable-list" class="space-y-1.5 flex-1 overflow-y-auto pr-0.5">
                     <template x-for="(prob, index) in problems" :key="prob.problem.display_name + index">
-                        <div @click="selectProb(index)" :class="selectedIdx === index ? 'bg-gold/10 border-gold/40 text-cream' : 'border-transparent hover:border-white/6 hover:bg-ink-elevated/50 text-cream-muted'" class="flex items-center gap-2.5 px-3 py-2.5 rounded-lg cursor-move border transition-all duration-150 group">
+                        <div @click="selectProb(index)" :class="selectedIdx === index ? 'bg-gold/10 border-gold/40 text-cream' : 'border-transparent hover:border-white/[0.03] hover:bg-ink-elevated/50 text-cream-muted'" class="flex flex-wrap items-center gap-x-2.5 gap-y-1 px-3 py-2.5 rounded-lg cursor-move border transition-all duration-150 group">
                             <span class="text-[11px] font-mono shrink-0 opacity-50 w-4 text-center" :class="selectedIdx === index ? 'text-gold opacity-80' : ''" x-text="String.fromCharCode(65 + index)"></span>
-                            <span class="w-1.5 h-4 rounded-full shrink-0 transition-transform duration-200" :class="selectedIdx === index ? 'scale-125' : ''" :style="'background:' + getDifficultyInfo(index).color" :title="getDifficultyInfo(index).label"></span>
-                            <span class="text-[13px] font-medium truncate" x-text="prob.problem.display_name"></span>
+                            <span class="w-1.5 h-4 rounded-full shrink-0 transition-transform duration-200" :class="selectedIdx === index ? 'scale-125' : ''" :style="'background:' + getDifficultyInfo(index).color"></span>
+                            <span class="text-[13px] font-medium truncate min-w-0 flex-1" x-text="prob.problem.display_name"></span>
+                            <span class="inline-flex flex-wrap items-center gap-1 shrink-0">
+                                <template x-for="(tag, ti) in getTags(index)" :key="ti">
+                                    <span
+                                          class="text-[9px] px-1.5 py-0.5 rounded leading-none font-medium transition-all duration-150"
+                                          :class="selectedIdx === index ? 'bg-gold/12 border border-gold/25 text-gold-light' : 'bg-ink-input/80 border border-white/[0.03] text-cream-muted'"
+                                          x-text="tag"></span>
+                                </template>
+                            </span>
                         </div>
                     </template>
                     <div x-show="problems.length === 0 && currentSubtitle" class="text-center text-sm text-cream-subtle mt-10">
@@ -172,17 +195,75 @@ HTML_TEMPLATE = r"""
             </div>
 
             <div class="flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
-                <div x-show="selectedIdx === null" class="absolute inset-0 flex flex-col items-center justify-center text-cream-subtle">
-                    <p class="font-serif text-[15px] text-cream-muted mb-1">选择一道题目开始编排</p>
+                <div x-show="selectedIdx === null" class="absolute inset-0 overflow-y-auto">
+                    <!-- Empty set: no problems loaded yet -->
+                    <div x-show="problems.length === 0" class="absolute inset-0 flex flex-col items-center justify-center">
+                        <div class="w-20 h-20 rounded-2xl bg-ink-input/40 flex items-center justify-center mb-5">
+                            <svg class="w-8 h-8 text-cream-subtle/40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                        </div>
+                        <p class="font-serif text-[15px] text-cream-muted mb-1.5">选择一道题目开始编排</p>
+                        <p class="text-xs text-cream-subtle">在左侧列表中点击题目，即可编辑题面、难度与样例</p>
+                    </div>
+
+                    <!-- Dashboard: problems exist but none selected -->
+                    <div x-show="problems.length > 0" class="p-6 space-y-8">
+                        <div class="flex items-center gap-4">
+                            <div class="w-14 h-14 rounded-2xl bg-ink-input/40 flex items-center justify-center shrink-0">
+                                <svg class="w-6 h-6 text-cream-subtle/50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                            </div>
+                            <div>
+                                <h2 class="font-serif text-[16px] font-semibold text-cream">排版集概览</h2>
+                                <p class="text-xs text-cream-subtle mt-0.5">
+                                    <span x-text="currentSubtitle"></span> · <span x-text="problems.length + ' 题'"></span>
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Difficulty Distribution -->
+                        <div>
+                            <div class="flex items-center gap-2 mb-4">
+                                <div class="w-1 h-3.5 rounded-full bg-gold"></div>
+                                <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">难度分布</h3>
+                            </div>
+                            <div class="space-y-1.5">
+                                <template x-for="(level, li) in difficultyLevels" :key="level.label">
+                                    <div class="flex items-center gap-2.5">
+                                        <span class="text-[10px] font-mono w-[72px] text-right shrink-0" :style="'color:' + level.color" x-text="level.label"></span>
+                                        <div class="flex-1 h-5 rounded-md bg-ink-input overflow-hidden">
+                                            <div class="h-full rounded-md transition-all duration-700 ease-out"
+                                                 :style="'width:' + (getDifficultyStats()[li] / Math.max(1, problems.length) * 100) + '%; background:' + level.color"></div>
+                                        </div>
+                                        <span class="text-[11px] font-mono text-cream-subtle w-4 text-right shrink-0 font-medium" x-text="getDifficultyStats()[li]"></span>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Tag Cloud -->
+                        <div x-show="getAllTags().length > 0">
+                            <div class="flex items-center gap-2 mb-4">
+                                <div class="w-1 h-3.5 rounded-full bg-gold"></div>
+                                <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">算法标签</h3>
+                                <span class="text-[10px] font-mono text-cream-subtle/60" x-text="getAllTags().length + ' 种'"></span>
+                            </div>
+                            <div class="flex flex-wrap gap-1.5">
+                                <template x-for="tag in getAllTags()" :key="tag">
+                                    <span class="text-[10px] px-2.5 py-1 rounded-md font-medium leading-none bg-ink-elevated border border-white/[0.03] text-cream-muted select-none" x-text="tag"></span>
+                                </template>
+                            </div>
+                        </div>
+
+                        <p class="text-[12px] text-cream-subtle/50 text-center pt-4">点击左侧题目开始编辑</p>
+                    </div>
                 </div>
 
                 <template x-if="problems[selectedIdx]">
                     <div class="space-y-8 animate-fade-in">
-                        
+
                         <div class="grid grid-cols-[1fr_auto] gap-6 items-end">
                             <div>
                                 <label class="block text-[11px] font-medium tracking-wide text-cream-muted uppercase mb-1.5">Display Name</label>
-                                <input type="text" x-model="problems[selectedIdx].problem.display_name" class="w-full px-3.5 py-2.5 bg-ink-input border border-white/6 rounded-lg text-[14px] font-medium text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                                <input type="text" x-model="problems[selectedIdx].problem.display_name" class="w-full px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg text-[14px] font-medium text-cream focus:border-gold/40 focus:outline-none transition-colors">
                             </div>
                             <div class="flex items-end pb-2">
                                 <label class="flex items-center gap-2.5 cursor-pointer select-none">
@@ -195,8 +276,32 @@ HTML_TEMPLATE = r"""
                             </div>
                         </div>
 
+                        <!-- Tags Editor -->
+                        <div class="pt-5 mt-2 border-t border-white/[0.02]">
+                            <div class="flex items-center justify-between mb-3">
+                                <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">Tags</label>
+                                <span class="text-[10px] font-mono text-cream-subtle/60" x-text="getTags(selectedIdx).length + ' tags'"></span>
+                            </div>
+                            <div class="flex flex-wrap items-center gap-1.5">
+                                <template x-for="(tag, ti) in getTags(selectedIdx)" :key="ti">
+                                    <span class="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md leading-none font-medium bg-gold/12 border border-gold/20 text-gold-light group/tag transition-colors">
+                                        <span x-text="tag"></span>
+                                        <button @click="removeTag(selectedIdx, ti)" class="text-gold-light/50 hover:text-danger transition-colors leading-none">&times;</button>
+                                    </span>
+                                </template>
+                                <div class="relative flex items-center">
+                                    <input type="text" x-ref="tagInput" x-model="tagDraft"
+                                           @keydown.enter.prevent="commitTag()"
+                                           @keydown.,.prevent="commitTag()"
+                                           @keydown.backspace="if(!tagDraft && getTags(selectedIdx).length) removeTag(selectedIdx, getTags(selectedIdx).length - 1)"
+                                           class="w-24 px-2.5 py-1 bg-transparent border border-dashed border-white/[0.02] rounded-md text-[10px] text-cream placeholder-cream-subtle/30 focus:border-gold/30 focus:outline-none transition-colors"
+                                           placeholder="添加标签">
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Difficulty Slider -->
-                        <div class="pt-5 mt-2 border-t border-white/5">
+                        <div class="pt-5 mt-2 border-t border-white/[0.02]">
                             <div class="flex items-center justify-between mb-3">
                                 <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">Difficulty</label>
                                 <span class="text-[12px] font-semibold px-2.5 py-0.5 rounded font-mono transition-all duration-300"
@@ -241,7 +346,7 @@ HTML_TEMPLATE = r"""
                                     <div>
                                         <label class="block text-[11px] font-medium tracking-wide text-cream-muted uppercase mb-1.5">引言内容</label>
                                         <textarea x-model="problems[selectedIdx].statement.quote.text" rows="3"
-                                                  class="w-full px-3.5 py-2.5 bg-ink-input border border-white/6 rounded-lg
+                                                  class="w-full px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg
                                                          text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed
                                                          focus:border-gold/40 focus:outline-none transition-colors resize-none"
                                                   placeholder="这是出题人最喜欢的一段话..."></textarea>
@@ -249,7 +354,7 @@ HTML_TEMPLATE = r"""
                                     <div>
                                         <label class="block text-[11px] font-medium tracking-wide text-cream-muted uppercase mb-1.5">出处</label>
                                         <input type="text" x-model="problems[selectedIdx].statement.quote.source"
-                                               class="w-full px-3.5 py-2.5 bg-ink-input border border-white/6 rounded-lg
+                                               class="w-full px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg
                                                       text-[13px] text-cream placeholder-cream-subtle/40
                                                       focus:border-gold/40 focus:outline-none transition-colors"
                                                placeholder="——《某某书籍》">
@@ -258,53 +363,53 @@ HTML_TEMPLATE = r"""
                             </div>
                         </template>
 
-                        <div class="space-y-6 pt-4 border-t border-white/5">
+                        <div class="space-y-6 pt-4 border-t border-white/[0.02]">
                             <div>
                                 <div class="grid grid-cols-2 gap-4 mb-2">
-                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><span>✏️</span> Description</label>
-                                    <label class="text-[11px] font-medium tracking-wide text-gold uppercase flex items-center gap-2"><span>👁️</span> Live Preview</label>
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Description</label>
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full opacity-0"></div> Live Preview</label>
                                 </div>
                                 <div class="grid grid-cols-2 gap-4">
-                                    <textarea x-model="problems[selectedIdx].statement.description" rows="8" class="w-full h-56 px-3.5 py-2.5 bg-ink-input border border-white/6 rounded-lg font-mono text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="w-full h-56 px-4 py-3 bg-ink-elevated border border-white/5 rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.descPreview, problems[selectedIdx]?.statement?.description)" x-ref="descPreview"></div>
+                                    <textarea x-model="problems[selectedIdx].statement.description" rows="8" class="w-full h-56 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="w-full h-56 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.descPreview, problems[selectedIdx]?.statement?.description)" x-ref="descPreview"></div>
                                 </div>
                             </div>
 
                             <div>
                                 <div class="grid grid-cols-2 gap-4 mb-2">
-                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><span>✏️</span> Input Format</label>
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Input Format</label>
                                 </div>
                                 <div class="grid grid-cols-2 gap-4">
-                                    <textarea x-model="problems[selectedIdx].statement.input" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/6 rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/5 rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.inputPreview, problems[selectedIdx]?.statement?.input)" x-ref="inputPreview"></div>
+                                    <textarea x-model="problems[selectedIdx].statement.input" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.inputPreview, problems[selectedIdx]?.statement?.input)" x-ref="inputPreview"></div>
                                 </div>
                             </div>
 
                             <div>
                                 <div class="grid grid-cols-2 gap-4 mb-2">
-                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><span>✏️</span> Output Format</label>
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Output Format</label>
                                 </div>
                                 <div class="grid grid-cols-2 gap-4">
-                                    <textarea x-model="problems[selectedIdx].statement.output" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/6 rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/5 rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.outputPreview, problems[selectedIdx]?.statement?.output)" x-ref="outputPreview"></div>
+                                    <textarea x-model="problems[selectedIdx].statement.output" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.outputPreview, problems[selectedIdx]?.statement?.output)" x-ref="outputPreview"></div>
                                 </div>
                             </div>
 
                             <!-- Samples Section -->
                             <div>
                                 <div class="flex items-center justify-between mb-3">
-                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><span>🧪</span> Samples</label>
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Samples</label>
                                     <button @click="addSample()" class="px-3 py-1.5 text-[11px] font-medium rounded-md transition-all duration-150 border border-gold/30 text-gold hover:bg-gold/10 active:scale-[0.97]">
                                         + 添加样例
                                     </button>
                                 </div>
                                 <template x-if="!problems[selectedIdx].problem.samples || problems[selectedIdx].problem.samples.length === 0">
-                                    <p class="text-[12px] text-cream-subtle italic py-6 text-center border border-dashed border-white/6 rounded-lg">暂无样例，点击上方按钮添加</p>
+                                    <p class="text-[12px] text-cream-subtle italic py-6 text-center border border-dashed border-white/[0.03] rounded-lg">暂无样例，点击上方按钮添加</p>
                                 </template>
                                 <template x-if="problems[selectedIdx].problem.samples && problems[selectedIdx].problem.samples.length > 0">
                                     <div class="space-y-3">
                                         <template x-for="(sample, si) in problems[selectedIdx].problem.samples" :key="si">
-                                            <div class="p-4 rounded-xl border border-white/5" style="background:rgba(255,255,255,0.015);">
+                                            <div class="p-4 rounded-xl border border-white/[0.02]" style="background:rgba(255,255,255,0.015);">
                                                 <div class="flex items-center justify-between mb-2.5">
                                                     <span class="text-[11px] font-mono text-gold tracking-wide" x-text="'样例 #' + (si + 1)"></span>
                                                     <button @click="removeSample(si)" class="text-[11px] text-cream-subtle hover:text-danger transition-colors px-2 py-0.5 rounded hover:bg-danger/10" x-show="problems[selectedIdx].problem.samples.length > 1">✕ 移除</button>
@@ -313,13 +418,13 @@ HTML_TEMPLATE = r"""
                                                     <div>
                                                         <label class="block text-[10px] font-medium tracking-wide text-cream-muted uppercase mb-1">Input</label>
                                                         <textarea x-model="sample.input" rows="3"
-                                                                  class="w-full px-3 py-2 bg-ink-input border border-white/6 rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
+                                                                  class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
                                                                   placeholder="3 5 7"></textarea>
                                                     </div>
                                                     <div>
                                                         <label class="block text-[10px] font-medium tracking-wide text-cream-muted uppercase mb-1">Output</label>
                                                         <textarea x-model="sample.output" rows="3"
-                                                                  class="w-full px-3 py-2 bg-ink-input border border-white/6 rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
+                                                                  class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
                                                                   placeholder="2"></textarea>
                                                     </div>
                                                 </div>
@@ -331,11 +436,11 @@ HTML_TEMPLATE = r"""
 
                             <div>
                                 <div class="grid grid-cols-2 gap-4 mb-2">
-                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><span>✏️</span> Notes & Constraints</label>
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Notes & Constraints</label>
                                 </div>
                                 <div class="grid grid-cols-2 gap-4">
-                                    <textarea x-model="problems[selectedIdx].statement.notes" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/6 rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/5 rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.notesPreview, problems[selectedIdx]?.statement?.notes)" x-ref="notesPreview"></div>
+                                    <textarea x-model="problems[selectedIdx].statement.notes" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.notesPreview, problems[selectedIdx]?.statement?.notes)" x-ref="notesPreview"></div>
                                 </div>
                             </div>
 
@@ -354,7 +459,11 @@ HTML_TEMPLATE = r"""
                 problems: [],
                 selectedIdx: null,
                 isCompiling: false,
+                isDistributing: false,
                 trackWidth: 800,
+                saveStatus: '',   // '' | 'saving' | 'saved' | 'error'
+                tagDraft: '',
+                _saveTimer: null,
                 toast: { show: false, msg: '', isError: false },
 
                 initApp() {
@@ -394,6 +503,7 @@ HTML_TEMPLATE = r"""
                             let item = this.problems.splice(evt.oldIndex, 1)[0];
                             this.problems.splice(evt.newIndex, 0, item);
                             this.selectedIdx = evt.newIndex;
+                            this.autoSave();
                         }
                     });
                 },
@@ -423,6 +533,7 @@ HTML_TEMPLATE = r"""
                     let p = this.problems[idx];
                     if (!p.problem) p.problem = {};
                     p.problem.difficulty = Math.max(0, Math.min(5, level));
+                    this.autoSave();
                 },
 
                 setDifficultyFromTrack(idx, event) {
@@ -432,7 +543,66 @@ HTML_TEMPLATE = r"""
                     this.setDifficulty(idx, Math.round(ratio * 5));
                 },
 
-                selectProb(index) { this.selectedIdx = index; },
+                // ── Tags ────────────────────────────────────────────────────
+                getTags(idx) {
+                    let p = this.problems[idx];
+                    return (p && p.problem && Array.isArray(p.problem.tags)) ? p.problem.tags : [];
+                },
+
+                startAddTag(idx) {
+                    // Legacy – kept for potential reuse; new tags are added in-editor
+                },
+
+                commitTag() {
+                    let tag = this.tagDraft.trim().replace(/,/g, '').trim();
+                    if (!tag) { this.tagDraft = ''; return; }
+                    let idx = this.selectedIdx;
+                    if (idx === null) return;
+                    let p = this.problems[idx];
+                    if (!p.problem) p.problem = {};
+                    if (!p.problem.tags) p.problem.tags = [];
+                    if (!p.problem.tags.includes(tag)) {
+                        p.problem.tags.push(tag);
+                        this.autoSave();
+                    }
+                    this.tagDraft = '';
+                },
+
+                addTag(idx, tag) {
+                    let p = this.problems[idx];
+                    if (!p.problem) p.problem = {};
+                    if (!p.problem.tags) p.problem.tags = [];
+                    if (!p.problem.tags.includes(tag)) {
+                        p.problem.tags.push(tag);
+                        this.autoSave();
+                    }
+                },
+
+                removeTag(idx, tagIdx) {
+                    let p = this.problems[idx];
+                    if (!p.problem || !p.problem.tags) return;
+                    p.problem.tags.splice(tagIdx, 1);
+                    this.autoSave();
+                },
+
+                // ── Dashboard stats ─────────────────────────────────────────
+                getDifficultyStats() {
+                    const counts = [0, 0, 0, 0, 0, 0];
+                    this.problems.forEach((p, i) => { counts[this.getDifficulty(i)]++; });
+                    return counts;
+                },
+
+                getAllTags() {
+                    const tags = new Set();
+                    this.problems.forEach(p => {
+                        if (p.problem && Array.isArray(p.problem.tags)) {
+                            p.problem.tags.forEach(t => tags.add(t));
+                        }
+                    });
+                    return [...tags].sort();
+                },
+
+                selectProb(index) { this.selectedIdx = index; this.tagDraft = ''; },
                 
                 hasQuote() {
                     if (this.selectedIdx === null || !this.problems[this.selectedIdx]) return false;
@@ -447,6 +617,7 @@ HTML_TEMPLATE = r"""
                     } else {
                         delete p.statement.quote;
                     }
+                    this.autoSave();
                 },
 
                 addSample() {
@@ -454,6 +625,7 @@ HTML_TEMPLATE = r"""
                     if (!p.problem) return;
                     if (!p.problem.samples) p.problem.samples = [];
                     p.problem.samples.push({ input: "", output: "" });
+                    this.autoSave();
                 },
 
                 removeSample(index) {
@@ -461,6 +633,7 @@ HTML_TEMPLATE = r"""
                     if (!p.problem || !p.problem.samples) return;
                     if (p.problem.samples.length <= 1) return;
                     p.problem.samples.splice(index, 1);
+                    this.autoSave();
                 },
 
                 renderMath(el, text) {
@@ -476,24 +649,38 @@ HTML_TEMPLATE = r"""
                     }
                 },
 
-                saveData() {
+                // ── Auto-save ───────────────────────────────────────────────
+                autoSave() {
+                    clearTimeout(this._saveTimer);
+                    this.saveStatus = 'saving';
+                    this._saveTimer = setTimeout(() => this._doSave(), 800);
+                },
+
+                _doSave() {
                     if (!this.currentSubtitle) return;
-                    // 保存时明确告知后端要写入的目录
+                    this.saveStatus = 'saving';
                     fetch('/api/data', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            subtitle: this.currentSubtitle,
-                            problems: this.problems
-                        })
+                        body: JSON.stringify({ subtitle: this.currentSubtitle, problems: this.problems })
                     }).then(res => res.json()).then(data => {
-                        if (data.success) this.showToast(`[${this.currentSubtitle}] 题目数据已安全写入`);
-                        else this.showToast('写入失败，请检查终端日志', true);
-                    });
+                        if (data.success) {
+                            this.saveStatus = 'saved';
+                            setTimeout(() => { if (this.saveStatus === 'saved') this.saveStatus = ''; }, 2500);
+                        } else {
+                            this.saveStatus = 'error';
+                        }
+                    }).catch(() => { this.saveStatus = 'error'; });
+                },
+
+                doSave() {
+                    clearTimeout(this._saveTimer);
+                    return this._doSave();
                 },
 
                 compilePDF() {
                     if (!this.currentSubtitle) return;
-                    this.saveData();
+                    clearTimeout(this._saveTimer);
+                    this._doSave();
                     this.isCompiling = true;
                     fetch('/api/compile', {
                         method: 'POST',
@@ -501,15 +688,34 @@ HTML_TEMPLATE = r"""
                         body: JSON.stringify({ subtitle: this.currentSubtitle })
                     }).then(res => res.json()).then(data => {
                         this.isCompiling = false;
-                        if(data.success) {
-                            let msg = `[${this.currentSubtitle}] Typst compile OK`;
+                        if (data.success) {
+                            this.showToast(`[${this.currentSubtitle}] Typst compile OK`);
+                        } else {
+                            this.showToast('Compile failed', true);
+                        }
+                    });
+                },
+
+                distributePDFs() {
+                    if (!this.currentSubtitle) return;
+                    this.isDistributing = true;
+                    fetch('/api/distribute', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ subtitle: this.currentSubtitle })
+                    }).then(res => res.json()).then(data => {
+                        this.isDistributing = false;
+                        if (data.success) {
+                            let msg = `[${this.currentSubtitle}] PDF distribution done`;
                             if (data.distributed && data.distributed.length > 0) {
                                 let ok = data.distributed.filter(d => d.status === 'ok').length;
-                                msg += ` — ${ok}/${data.distributed.length} problem(s) extracted`;
+                                let zipUpdated = data.distributed.filter(d => d.zip === 'updated').length;
+                                msg += ` — ${ok}/${data.distributed.length} PDFs extracted`;
+                                if (zipUpdated > 0) msg += `, ${zipUpdated} zip(s) updated`;
                             }
                             this.showToast(msg);
                         } else {
-                            this.showToast('Compile failed', true);
+                            this.showToast('Distribution failed', true);
                         }
                     });
                 },
@@ -569,8 +775,10 @@ def save_data():
     try:
         json_path = secure_path(subtitle, "problems.json")
         os.makedirs(os.path.dirname(json_path), exist_ok=True)
-        with open(json_path, 'w', encoding='utf-8') as f:
+        tmp_path = json_path + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, json_path)  # atomic replace
         return jsonify({"success": True})
     except Exception as e:
         print(f"[-] Save Data Error: {e}")
@@ -578,25 +786,32 @@ def save_data():
 
 @app.route('/api/compile', methods=['POST'])
 def compile_pdf():
+    """仅编译 typst，不分发 PDF。"""
     payload = request.json
     subtitle = payload.get('subtitle')
-
     if not subtitle:
         return jsonify({"success": False, "error": "Missing subtitle"})
-
     try:
         typst_main = secure_path(subtitle, "main.typ")
-        subprocess.run(["typst", "compile", "--root", ".", typst_main], check=True, text=True, encoding='utf-8')
-
-        # After compilation, distribute individual problem PDFs
-        dist_results = distribute_problems(subtitle)
-
-        return jsonify({"success": True, "distributed": dist_results})
+        subprocess.run(["typst", "compile", "--root", ".", typst_main],
+                       check=True, text=True, encoding='utf-8', errors='replace')
+        return jsonify({"success": True})
     except subprocess.CalledProcessError as e:
         print(f"[-] Typst compile failed: {e.stderr}")
         return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/distribute', methods=['POST'])
+def distribute_pdfs():
+    """仅分发单题 PDF + 注入同名 zip，不编译。"""
+    payload = request.json
+    subtitle = payload.get('subtitle')
+    if not subtitle:
+        return jsonify({"success": False, "error": "Missing subtitle"})
+    try:
+        dist_results = distribute_problems(subtitle)
+        return jsonify({"success": True, "distributed": dist_results})
     except Exception as e:
-        print(f"[-] Compile error: {e}")
         return jsonify({"success": False, "error": str(e)})
 
 
@@ -618,6 +833,27 @@ def find_problem_dirs():
             except Exception:
                 pass
     return problem_dirs
+
+
+def inject_pdf_to_zip(pdf_path, prob_dir):
+    """将 problem.pdf 注入同名的 .zip 压缩包（如果存在）。"""
+    import zipfile as zf
+    base = os.path.basename(os.path.normpath(prob_dir))
+    zip_path = os.path.join(base + ".zip")
+    if not os.path.exists(zip_path):
+        return None
+    try:
+        arcname = f"{base}/problem.pdf"
+        tmp = zip_path + ".tmp"
+        with zf.ZipFile(zip_path, "r") as zin, zf.ZipFile(tmp, "w", compression=zf.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if item.filename != arcname:
+                    zout.writestr(item, zin.read(item.filename))
+            zout.write(pdf_path, arcname)
+        os.replace(tmp, zip_path)
+        return "updated"
+    except Exception as e:
+        return f"error: {e}"
 
 
 def distribute_problems(subtitle):
@@ -663,9 +899,15 @@ def distribute_problems(subtitle):
         try:
             subprocess.run(
                 [sys.executable, extract_script, typst_dir, prob_dir],
-                check=True, capture_output=True, text=True, encoding="utf-8"
+                check=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
             )
-            results.append({"name": display_name, "status": "ok", "dir": prob_dir})
+            # Inject problem.pdf into matching .zip if it exists
+            pdf_path = os.path.join(prob_dir, "problem.pdf")
+            zip_status = inject_pdf_to_zip(pdf_path, prob_dir) if os.path.exists(pdf_path) else None
+            results.append({
+                "name": display_name, "status": "ok", "dir": prob_dir,
+                "zip": zip_status  # None=no zip, "updated"=done, "error:..."=fail
+            })
         except subprocess.CalledProcessError as e:
             results.append({"name": display_name, "status": "failed", "reason": e.stderr[:200]})
 
