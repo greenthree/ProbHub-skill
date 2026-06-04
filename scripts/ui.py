@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import re
 import subprocess
 import webbrowser
 from threading import Timer
@@ -167,7 +168,7 @@ HTML_TEMPLATE = r"""
 
         <div class="flex gap-5" style="height:calc(100vh - 140px);">
 
-            <div class="w-[300px] shrink-0 ink-card rounded-2xl p-4 flex flex-col overflow-hidden">
+            <div class="w-[220px] shrink-0 ink-card rounded-2xl p-4 flex flex-col overflow-hidden">
                 <div class="flex items-center justify-between mb-4 px-1 shrink-0">
                     <h2 class="font-serif text-[15px] font-semibold text-cream tracking-wide">题目列表</h2>
                     <span class="text-[11px] text-cream-subtle font-mono" x-text="problems.length + ' 题'"></span>
@@ -216,6 +217,58 @@ HTML_TEMPLATE = r"""
                                 <p class="text-xs text-cream-subtle mt-0.5">
                                     <span x-text="currentSubtitle"></span> · <span x-text="problems.length + ' 题'"></span>
                                 </p>
+                            </div>
+                        </div>
+
+                        <!-- Cover Settings -->
+                        <div @input.stop="autoSaveCover()">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="flex items-center gap-2">
+                                    <div class="w-1 h-3.5 rounded-full bg-gold"></div>
+                                    <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">封面设置 <span class="text-[9px] text-cream-subtle font-normal tracking-normal normal-case">（编译后可预览）</span></h3>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">比赛标题</label>
+                                    <input type="text" x-model="coverConfig.title" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">副标题</label>
+                                    <input type="text" x-model="coverConfig.subtitle" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">作者</label>
+                                    <input type="text" x-model="coverConfig.author" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">日期</label>
+                                    <input type="text" x-model="coverConfig.date" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">校徽文件</label>
+                                    <input type="text" x-model="coverConfig.logo" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">校徽宽度</label>
+                                    <input type="text" x-model="coverConfig.logo_width" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">校徽上方间距 <span class="text-cream-subtle">（可为负数）</span></label>
+                                    <input type="text" x-model="coverConfig.logo_space_above" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">校徽下方间距</label>
+                                    <input type="text" x-model="coverConfig.logo_space_below" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                </div>
+                            </div>
+                            <!-- Cover preview thumbnail -->
+                            <div class="mt-3" x-show="pdfPages.length > 0">
+                                <p class="text-[10px] font-medium text-cream-subtle mb-2">封面预览</p>
+                                <div class="rounded-lg overflow-hidden border border-white/[0.02] bg-ink-bg">
+                                    <img :src="'/api/pdf-page/' + encodeURIComponent(currentSubtitle) + '/0?t=' + pdfRefresh"
+                                         class="w-full" style="filter: brightness(0.92) contrast(0.95)">
+                                </div>
                             </div>
                         </div>
 
@@ -448,6 +501,7 @@ HTML_TEMPLATE = r"""
                     </div>
                 </template>
             </div>
+
         </div>
     </div>
 
@@ -460,10 +514,14 @@ HTML_TEMPLATE = r"""
                 selectedIdx: null,
                 isCompiling: false,
                 isDistributing: false,
+                pdfRefresh: Date.now(),
+                pdfPages: [],
                 trackWidth: 800,
                 saveStatus: '',   // '' | 'saving' | 'saved' | 'error'
                 tagDraft: '',
+                coverConfig: { title: '', subtitle: '', author: '', date: '', logo: 'usts.png', logo_width: '9cm', logo_space_above: '0em', logo_space_below: '0em' },
                 _saveTimer: null,
+                _coverSaveTimer: null,
                 toast: { show: false, msg: '', isError: false },
 
                 initApp() {
@@ -474,6 +532,7 @@ HTML_TEMPLATE = r"""
                             // 默认选择第一个
                             this.currentSubtitle = subs[0];
                             this.loadData();
+                            this.loadConfig();
                         }
                     });
                 },
@@ -490,8 +549,20 @@ HTML_TEMPLATE = r"""
                         });
                 },
 
+                loadPdfPages() {
+                    if (!this.currentSubtitle) { this.pdfPages = []; return; }
+                    fetch(`/api/pdf-pages/${encodeURIComponent(this.currentSubtitle)}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            this.pdfPages = data.pages > 0 ? Array.from({length: data.pages}, (_, i) => i) : [];
+                        });
+                },
+
                 switchSubtitle() {
                     this.loadData();
+                    this.loadConfig();
+                    this.pdfRefresh = Date.now();
+                    this.loadPdfPages();
                 },
 
                 initSortable() {
@@ -583,6 +654,30 @@ HTML_TEMPLATE = r"""
                     if (!p.problem || !p.problem.tags) return;
                     p.problem.tags.splice(tagIdx, 1);
                     this.autoSave();
+                },
+
+                // ── Cover config ────────────────────────────────────────────
+                loadConfig() {
+                    if (!this.currentSubtitle) return;
+                    fetch(`/api/config/${encodeURIComponent(this.currentSubtitle)}`)
+                        .then(res => res.json())
+                        .then(data => { if (data.success) this.coverConfig = data.config; });
+                },
+
+                autoSaveCover() {
+                    clearTimeout(this._coverSaveTimer);
+                    this._coverSaveTimer = setTimeout(() => this.saveConfig(), 800);
+                },
+
+                saveConfig() {
+                    if (!this.currentSubtitle) return;
+                    fetch(`/api/config/${encodeURIComponent(this.currentSubtitle)}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(this.coverConfig)
+                    }).then(res => res.json()).then(data => {
+                        if (data.success) { /* silent */ }
+                    });
                 },
 
                 // ── Dashboard stats ─────────────────────────────────────────
@@ -689,6 +784,8 @@ HTML_TEMPLATE = r"""
                     }).then(res => res.json()).then(data => {
                         this.isCompiling = false;
                         if (data.success) {
+                            this.pdfRefresh = Date.now();
+                            this.loadPdfPages();
                             this.showToast(`[${this.currentSubtitle}] Typst compile OK`);
                         } else {
                             this.showToast('Compile failed', true);
@@ -913,7 +1010,156 @@ def distribute_problems(subtitle):
 
     return results
 
-def open_browser(): 
+# ── Contest Config (main.typ + lib.typ) ──────────────────────────
+
+def _read_contest_config(subtitle):
+    """Parse main.typ and lib.typ, return config dict."""
+    main_path = secure_path(subtitle, "main.typ")
+    lib_path = os.path.join(BASE_DIR, "lib.typ")
+    config = {
+        "title": "", "subtitle": subtitle, "author": "", "date": "",
+        "logo": "usts.png", "logo_width": "9cm",
+        "logo_space_above": "0em", "logo_space_below": "0em",
+    }
+
+    if os.path.exists(main_path):
+        with open(main_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        for key in ("title", "subtitle", "author", "date"):
+            m = re.search(rf'{key}:\s*"([^"]*)"', text)
+            if m:
+                config[key] = m.group(1)
+
+    if os.path.exists(lib_path):
+        with open(lib_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        m = re.search(r'image\("([^"]+)"\s*(?:,\s*width:\s*([^,)]+))?', text)
+        if m:
+            config["logo"] = m.group(1)
+            if m.group(2):
+                config["logo_width"] = m.group(2).strip()
+        # Parse space above/below logo
+        # Look for v(Xem) on the line immediately before/after align(center, image(...))
+        m = re.search(r'v\(([^)]+)\)\s*(?://[^\n]*)?\s*\n\s*(?://[^\n]*\n\s*)?align\(center,\s*image\(', text)
+        if m:
+            config["logo_space_above"] = m.group(1).strip()
+        m = re.search(r'align\(center,\s*image\([^)]+\)\)\s*\n\s*v\(([^)]+)\)', text)
+        if m:
+            config["logo_space_below"] = m.group(1).strip()
+
+    return config
+
+
+def _write_contest_config(subtitle, config):
+    """Write updated values back to main.typ and lib.typ."""
+    main_path = secure_path(subtitle, "main.typ")
+    lib_path = os.path.join(BASE_DIR, "lib.typ")
+
+    if os.path.exists(main_path):
+        with open(main_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        for key in ("title", "subtitle", "author", "date"):
+            if key in config:
+                text = re.sub(rf'({key}:\s*)"[^"]*"', rf'\1"{config[key]}"', text)
+        with open(main_path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    if os.path.exists(lib_path):
+        with open(lib_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        logo = config.get("logo", "usts.png")
+        width = config.get("logo_width", "9cm")
+        space_above = config.get("logo_space_above", "0em")
+        space_below = config.get("logo_space_below", "0em")
+        # Update image path/width
+        text = re.sub(r'image\("[^"]+"\s*(?:,\s*width:\s*[^,)]+)?', f'image("{logo}", width: {width}', text)
+        # Update space above logo (v() before align(center, image())
+        text = re.sub(
+            r'v\([^)]+\)(\s*(?://[^\n]*)?\s*\n\s*(?://[^\n]*\n\s*)?align\(center,\s*image\()',
+            f'v({space_above})\\1', text
+        )
+        # Update space below logo (v() after image line)
+        text = re.sub(
+            r'(align\(center,\s*image\([^)]+\)\)\s*\n\s*)v\([^)]+\)',
+            f'\\1v({space_below})', text
+        )
+        with open(lib_path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+
+@app.route('/api/config/<subtitle>', methods=['GET'])
+def get_contest_config(subtitle):
+    try:
+        return jsonify({"success": True, "config": _read_contest_config(subtitle)})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/config/<subtitle>', methods=['POST'])
+def save_contest_config(subtitle):
+    try:
+        config = request.json
+        _write_contest_config(subtitle, config)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/pdf-pages/<subtitle>')
+def pdf_page_count(subtitle):
+    """Return the number of pages in main.pdf."""
+    import pypdf
+    pdf_path = secure_path(subtitle, "main.pdf")
+    if not os.path.exists(pdf_path):
+        return jsonify({"pages": 0})
+    try:
+        reader = pypdf.PdfReader(pdf_path)
+        return jsonify({"pages": len(reader.pages)})
+    except Exception:
+        return jsonify({"pages": 0})
+
+
+@app.route('/api/pdf-page/<subtitle>/<int:page>')
+def serve_pdf_page(subtitle, page):
+    """Render a single page of main.pdf as PNG using typst, then serve it."""
+    from flask import send_file
+    import pypdf
+
+    pdf_path = secure_path(subtitle, "main.pdf")
+    if not os.path.exists(pdf_path):
+        return "PDF not compiled", 404
+
+    # Validate page number
+    try:
+        reader = pypdf.PdfReader(pdf_path)
+        total = len(reader.pages)
+        if page < 0 or page >= total:
+            return "Page out of range", 404
+    except Exception:
+        return "Invalid PDF", 500
+
+    # Cache PNG in .preview/ directory
+    preview_dir = os.path.join(BASE_DIR, subtitle, ".preview")
+    os.makedirs(preview_dir, exist_ok=True)
+    png_path = os.path.join(preview_dir, f"page-{page + 1}.png")
+
+    # Regenerate if PNG is missing or older than PDF
+    if not os.path.exists(png_path) or os.path.getmtime(png_path) < os.path.getmtime(pdf_path):
+        typst_main = secure_path(subtitle, "main.typ")
+        subprocess.run(
+            ["typst", "compile", "--root", ".", "--format", "png",
+             f"--pages={page + 1}", typst_main, png_path],
+            check=True, capture_output=True,
+            text=True, encoding='utf-8', errors='replace'
+        )
+
+    if not os.path.exists(png_path):
+        return "Render failed", 500
+
+    return send_file(png_path, mimetype='image/png')
+
+
+def open_browser():
     webbrowser.open_new("http://127.0.0.1:33933")
 
 if __name__ == '__main__':
