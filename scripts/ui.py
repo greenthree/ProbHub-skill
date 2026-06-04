@@ -225,7 +225,7 @@ HTML_TEMPLATE = r"""
                             <div class="flex items-center justify-between mb-4">
                                 <div class="flex items-center gap-2">
                                     <div class="w-1 h-3.5 rounded-full bg-gold"></div>
-                                    <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">封面设置 <span class="text-[9px] text-cream-subtle font-normal tracking-normal normal-case">（编译后可预览）</span></h3>
+                                    <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">封面设置 <span class="text-[9px] text-cream-subtle font-normal tracking-normal normal-case">（编译后可预览 当心眼睛（）</span></h3>
                                 </div>
                             </div>
                             <div class="grid grid-cols-2 gap-3">
