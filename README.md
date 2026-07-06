@@ -22,12 +22,12 @@ ProbHub 是一个基于大语言模型 (LLM Agent) 和现代排版/测试框架�
 
 在一个干净的空文件夹中打开终端，选择以下任意一种方式即可一键初始化（自动安装依赖并注入 Claude 技能库）：
 
-**方式一：使用社区通用 Skills 框架 (推荐)**
+**方式一：使用社区通用 Skills 框架 (暂时只能下载skill.md)**
 ```bash
 npx skills add greenthree/ProbHub-skill
 ```
 
-**方式二：使用本项目的独立脚手架**
+**方式二：使用本项目的独立脚手架 (推荐)**
 
 ```bash
 npx probhub-skill
@@ -85,8 +85,16 @@ winget install typst
 
 ### 手动启动可视化排版控制台（推荐）
 
+Agent 完成底层排版后，会把 `ui.py` 和 `launch_ui.py` 放到工作区根目录。建议由用户自己在终端前台启动控制台，方便随时按 `Ctrl+C` 退出：
+
 ```powershell
 python ui.py
+```
+
+如果你希望控制台在后台运行，也可以手动执行：
+
+```powershell
+python launch_ui.py
 ```
 
 浏览器自动打开 `http://127.0.0.1:33933`。控制台支持：
