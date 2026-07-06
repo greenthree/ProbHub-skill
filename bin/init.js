@@ -19,7 +19,7 @@ if (isLocal && sourceDir === process.cwd()) {
 const baseDir = isLocal ? process.cwd() : os.homedir();
 const targetDirs = [
     path.join(baseDir, '.claude', 'skills', skillName),
-    path.join(baseDir, '.agent', 'skills', skillName),
+    path.join(baseDir, '.agents', 'skills', skillName),
 ];
 
 console.log('\n🚀 正在将 ProbHub 注入到 ' + (isLocal ? '本地项目' : '全局系统') + '的 Agent Skill 库...');
