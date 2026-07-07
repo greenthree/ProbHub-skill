@@ -485,7 +485,7 @@ def main():
                 finish(reporter, False, "WARNING: Wrong solution passes all tests! Add corner cases to break it.", 1)
 
     reporter.text("\n" + "=" * 50)
-    finish(reporter, True, "[+] All code meets expected fate", 0)
+    finish(reporter, True, "[+] 恭喜！所有代码均符合预期宿命", 0)
 
 
 if __name__ == "__main__":

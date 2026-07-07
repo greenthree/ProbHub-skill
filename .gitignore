@@ -26,3 +26,6 @@ CLAUDE.md
 node_modules/
 # package.json
 # package-lock.json
+
+# Local npm cache
+.npm-cache/
