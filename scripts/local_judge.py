@@ -355,6 +355,24 @@ def run_validator(val_bin, in_file):
         return False
 
 
+def collect_testcases(prob_dir):
+    testcases = []
+    for suite in ("sample", "secret"):
+        data_dir = os.path.join(prob_dir, "data", suite)
+        if not os.path.isdir(data_dir):
+            continue
+        for in_name in sorted([f for f in os.listdir(data_dir) if f.endswith(".in")]):
+            base_name = in_name[:-3]
+            testcases.append({
+                "suite": suite,
+                "name": base_name,
+                "case": f"{suite}/{base_name}",
+                "in_path": os.path.join(data_dir, in_name),
+                "ans_path": os.path.join(data_dir, f"{base_name}.ans"),
+            })
+    return testcases
+
+
 def finish(reporter, ok, message, code):
     reporter.event("final", ok=ok, message=message)
     reporter.text(message)
@@ -371,16 +389,23 @@ def main():
         finish(reporter, False, "Invalid arguments", 1)
 
     prob_dir = args[0]
-    data_dir = os.path.join(prob_dir, "data", "secret")
-    if not os.path.isdir(data_dir):
-        finish(reporter, False, "data/secret not found", 1)
+    sample_dir = os.path.join(prob_dir, "data", "sample")
+    secret_dir = os.path.join(prob_dir, "data", "secret")
+    if not os.path.isdir(sample_dir) and not os.path.isdir(secret_dir):
+        finish(reporter, False, "data/sample and data/secret not found", 1)
 
     time_limit, memory_limit = read_problem_limits(prob_dir)
-    in_files = sorted([f for f in os.listdir(data_dir) if f.endswith(".in")])
+    testcases = collect_testcases(prob_dir)
+    if not testcases:
+        finish(reporter, False, "No .in test cases found under data/sample or data/secret", 1)
 
     reporter.text("\n" + "=" * 50)
     reporter.text("ProbHub Validation Sandbox")
     reporter.text(f"Limits: {time_limit:g}s / {memory_limit}MB")
+    reporter.text(
+        f"Cases: {sum(1 for t in testcases if t['suite'] == 'sample')} sample / "
+        f"{sum(1 for t in testcases if t['suite'] == 'secret')} secret"
+    )
     reporter.text("=" * 50)
     reporter.event("limits", time_limit=time_limit, memory_limit=memory_limit)
 
@@ -391,13 +416,13 @@ def main():
         if compile_cpp(val_cpp, val_bin, reporter, "validator"):
             reporter.text("\nRunning validator...")
             all_ok = True
-            for inf in in_files:
-                ok = run_validator(val_bin, os.path.join(data_dir, inf))
-                reporter.event("validator", case=inf[:-3], ok=ok)
+            for testcase in testcases:
+                ok = run_validator(val_bin, testcase["in_path"])
+                reporter.event("validator", case=testcase["case"], ok=ok)
                 if not ok:
                     all_ok = False
-                    reporter.text(f"[-] FATAL: {inf} violates validator constraints! Fix the data generator.")
-                    finish(reporter, False, f"{inf} violates validator constraints", 1)
+                    reporter.text(f"[-] FATAL: {testcase['case']} violates validator constraints! Fix the data generator.")
+                    finish(reporter, False, f"{testcase['case']} violates validator constraints", 1)
             if all_ok:
                 reporter.text("[+] Validator: ALL PASS")
     elif jsonl:
@@ -422,20 +447,19 @@ def main():
             reporter.text(f"\nEvaluating: {prog_name}")
             stats = {"AC": 0, "WA": 0, "TLE": 0, "RE": 0, "MLE": 0}
 
-            for in_name in in_files:
-                base_name = in_name[:-3]
-                in_path = os.path.join(data_dir, in_name)
-                ans_path = os.path.join(data_dir, f"{base_name}.ans")
+            for testcase in testcases:
+                if not os.path.exists(testcase["ans_path"]):
+                    finish(reporter, False, f"{testcase['case']}.ans not found", 1)
 
                 status, t, memory, memory_enforced = run_testcase(
-                    bin_path, in_path, ans_path, time_limit, memory_limit
+                    bin_path, testcase["in_path"], testcase["ans_path"], time_limit, memory_limit
                 )
                 stats[status] += 1
                 reporter.event(
                     "case",
                     kind=kind,
                     program=prog_name,
-                    case=base_name,
+                    case=testcase["case"],
                     status=status,
                     time=round(t, 6),
                     time_limit=time_limit,
@@ -444,20 +468,20 @@ def main():
                     memory_enforced=memory_enforced,
                 )
                 if status != "AC" or kind == "std":
-                    reporter.text(f"  - {base_name.ljust(5)} : {status} ({t:.3f}s)")
+                    reporter.text(f"  - {testcase['case'].ljust(16)} : {status} ({t:.3f}s)")
 
             reporter.event("summary", kind=kind, program=prog_name, stats=stats)
             reporter.text(f"  Summary: {stats}")
 
             # Fate assertions
-            if kind == "std" and stats["AC"] != len(in_files):
+            if kind == "std" and stats["AC"] != len(testcases):
                 finish(reporter, False, "std not 100% AC! Fix the standard solution immediately.", 1)
             if kind == "brute":
                 if stats["WA"] > 0:
                     finish(reporter, False, "Brute force has WA! Fix the brute or std logic.", 1)
                 if stats["TLE"] + stats["MLE"] == 0:
                     finish(reporter, False, "WARNING: Brute force passes all tests without TLE/MLE. Data is too weak!", 1)
-            if kind == "wrong" and stats["AC"] == len(in_files):
+            if kind == "wrong" and stats["AC"] == len(testcases):
                 finish(reporter, False, "WARNING: Wrong solution passes all tests! Add corner cases to break it.", 1)
 
     reporter.text("\n" + "=" * 50)

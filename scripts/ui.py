@@ -263,8 +263,8 @@ HTML_TEMPLATE = r"""
             </div>
         </div>
 
-        <div x-show="toast.show" x-transition.opacity.duration.300ms class="fixed top-6 right-6 z-50 flex items-center gap-2 px-5 py-3 rounded-xl text-sm font-medium shadow-2xl border backdrop-blur-md" :class="toast.isError ? 'bg-danger/90 border-red-500/30 text-white' : 'bg-success/90 border-green-500/30 text-white'">
-            <span x-text="toast.msg"></span>
+        <div x-show="toast.show" x-transition.opacity.duration.300ms class="fixed top-6 right-6 z-50 flex items-center gap-2 max-w-xl px-5 py-3 rounded-xl text-sm font-medium leading-relaxed shadow-2xl border backdrop-blur-md" :class="toast.isError ? 'bg-danger/90 border-red-500/30 text-white' : 'bg-success/90 border-green-500/30 text-white'">
+            <span class="whitespace-normal" x-text="toast.msg"></span>
         </div>
 
         <div class="flex gap-5" style="height:calc(100vh - 140px);">
@@ -680,8 +680,12 @@ HTML_TEMPLATE = r"""
                             <p class="font-mono text-[13px] text-cream truncate" x-text="sandboxInfo?.dir || '-'"></p>
                         </div>
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
-                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Secret Data</p>
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Test Data</p>
                             <p class="font-mono text-[13px] text-cream"><span x-text="sandboxInfo?.data_count || 0"></span> cases</p>
+                            <p class="text-[10px] text-cream-subtle mt-1">
+                                <span x-text="sandboxInfo?.sample_count || 0"></span> sample /
+                                <span x-text="sandboxInfo?.secret_count || 0"></span> secret
+                            </p>
                         </div>
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
                             <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Limits</p>
@@ -1271,11 +1275,15 @@ HTML_TEMPLATE = r"""
                             this.loadPdfPages();
                             this.showToast(`[${this.currentSubtitle}] Typst compile OK`);
                         } else {
-                            this.showToast('Compile failed', true);
+                            const message = data.message || data.error || 'Typst 编译失败';
+                            const suggestion = data.suggestion ? `建议：${data.suggestion}` : '建议：查看终端中的 Typst 报错定位具体语法位置。';
+                            this.showToast(`${message}。${suggestion}`, true, 8000);
                         }
+                    }).catch(() => {
+                        this.isCompiling = false;
+                        this.showToast('编译请求失败。建议：确认 ui.py 服务仍在运行，并检查终端日志。', true, 8000);
                     });
                 },
-
                 distributePDFs() {
                     if (!this.currentSubtitle) return;
                     this.isDistributing = true;
@@ -1300,9 +1308,9 @@ HTML_TEMPLATE = r"""
                     });
                 },
 
-                showToast(msg, isError = false) {
+                showToast(msg, isError = false, duration = 3000) {
                     this.toast = { show: true, msg, isError };
-                    setTimeout(() => { this.toast.show = false; }, 3000);
+                    setTimeout(() => { this.toast.show = false; }, duration);
                 }
             }));
         });
@@ -1370,6 +1378,48 @@ def save_data():
         print(f"[-] Save Data Error: {e}")
         return jsonify({"success": False, "error": str(e)})
 
+def analyze_compile_error(output):
+    text = (output or "").strip()
+    lower = text.lower()
+    if not text:
+        return {
+            "message": "Typst 编译失败，但没有返回详细错误",
+            "suggestion": "查看启动 ui.py 的终端，确认 typst 是否正常安装并可执行。",
+        }
+    if any(marker in lower for marker in (
+        "being used by another process",
+        "os error 32",
+        "access is denied",
+        "permission denied",
+        "cannot access the file",
+        "failed to create file",
+        "failed to write",
+    )):
+        return {
+            "message": "PDF 输出文件可能正被占用，Typst 无法覆盖写入",
+            "suggestion": "先关闭正在打开 main.pdf 的 PDF 查看器或浏览器预览页，再重新编译。",
+        }
+    if "not found" in lower and "typst" in lower:
+        return {
+            "message": "未找到 typst 命令",
+            "suggestion": "确认 Typst 已安装，并且 typst 命令已加入 PATH。",
+        }
+    if any(marker in lower for marker in ("failed to load", "file not found", "no such file")):
+        return {
+            "message": "Typst 编译时找不到某个引用文件",
+            "suggestion": "检查图片、PDF、Typst include/import 路径是否存在，尤其是题面中的相对路径资源。",
+        }
+    if "error:" in lower or "expected" in lower or "unknown" in lower:
+        first_error = next((line.strip() for line in text.splitlines() if line.strip()), "Typst 语法错误")
+        return {
+            "message": first_error[:160],
+            "suggestion": "根据 Typst 报错中的文件名和行列号检查刚修改的题面、封面设置或 quote 内容。",
+        }
+    return {
+        "message": text.splitlines()[0][:160],
+        "suggestion": "查看启动 ui.py 的终端输出，定位 Typst 返回的完整错误信息。",
+    }
+
 @app.route('/api/compile', methods=['POST'])
 def compile_pdf():
     """仅编译 typst，不分发 PDF。"""
@@ -1379,13 +1429,23 @@ def compile_pdf():
         return jsonify({"success": False, "error": "Missing subtitle"})
     try:
         typst_main = secure_path(subtitle, "main.typ")
-        subprocess.run(["typst", "compile", "--root", ".", typst_main],
-                       check=True, text=True, encoding='utf-8', errors='replace')
-        return jsonify({"success": True})
+        ret = subprocess.run(
+            ["typst", "compile", "--root", ".", typst_main],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+        )
+        return jsonify({"success": True, "stdout": ret.stdout, "stderr": ret.stderr})
+    except FileNotFoundError as e:
+        detail = analyze_compile_error("typst not found")
+        return jsonify({"success": False, "error": str(e), **detail})
     except subprocess.CalledProcessError as e:
-        print(f"[-] Typst compile failed: {e.stderr}")
-        return jsonify({"success": False, "error": str(e)})
-
+        output = "\n".join(part for part in (e.stderr, e.stdout, str(e)) if part)
+        detail = analyze_compile_error(output)
+        print(f"[-] Typst compile failed:\n{output}")
+        return jsonify({"success": False, "error": str(e), "output": output[-4000:], **detail})
 
 @app.route('/api/distribute', methods=['POST'])
 def distribute_pdfs():
@@ -1554,6 +1614,8 @@ def _sandbox_problem_info(subtitle, index):
         "runnable": False,
         "limits": {"time": problem_limits(problem)[0], "memory": problem_limits(problem)[1]},
         "data_count": 0,
+        "sample_count": 0,
+        "secret_count": 0,
         "cases": [],
         "files": {"validator": False, "std": [], "brute": [], "wrong": [], "other": []},
         "script_exists": os.path.exists(script_path),
@@ -1562,10 +1624,13 @@ def _sandbox_problem_info(subtitle, index):
         info["reason"] = "no matching directory"
         return info
 
-    data_dir = os.path.join(prob_dir, "data", "secret")
-    if os.path.isdir(data_dir):
-        info["cases"] = sorted([f[:-3] for f in os.listdir(data_dir) if f.endswith(".in")])
-        info["data_count"] = len(info["cases"])
+    for suite in ("sample", "secret"):
+        data_dir = os.path.join(prob_dir, "data", suite)
+        if os.path.isdir(data_dir):
+            suite_cases = [f"{suite}/{f[:-3]}" for f in os.listdir(data_dir) if f.endswith(".in")]
+            info["cases"].extend(sorted(suite_cases))
+            info[f"{suite}_count"] = len(suite_cases)
+    info["data_count"] = len(info["cases"])
 
     for file in sorted(os.listdir(prob_dir)):
         if not file.endswith(".cpp"):
@@ -1581,7 +1646,7 @@ def _sandbox_problem_info(subtitle, index):
         else:
             info["files"]["other"].append(file)
 
-    info["runnable"] = info["script_exists"] and os.path.isdir(data_dir)
+    info["runnable"] = info["script_exists"] and info["data_count"] > 0
     return info
 
 
