@@ -5,18 +5,107 @@ import json
 import re
 import subprocess
 import webbrowser
-from threading import Timer
+import uuid
+from threading import Timer, Thread, Lock
 from flask import Flask, jsonify, request, render_template_string
 
 app = Flask(__name__)
 
 BASE_DIR = "typst-statement"
+SANDBOX_JOBS = {}
+SANDBOX_LOCK = Lock()
 
 def secure_path(subtitle, filename):
     """安全路径拼接，防止路径穿越攻击"""
     if not subtitle or '..' in subtitle or '/' in subtitle or '\\' in subtitle:
         raise ValueError("Invalid subtitle")
     return os.path.join(BASE_DIR, subtitle, filename)
+
+
+def problem_limits(problem_entry):
+    problem = (problem_entry or {}).get("problem", {})
+    try:
+        time_limit = float(problem.get("time_limit", 1))
+    except (TypeError, ValueError):
+        time_limit = 1.0
+    try:
+        memory_limit = int(float(problem.get("memory_limit", 256)))
+    except (TypeError, ValueError):
+        memory_limit = 256
+    time_limit = max(time_limit, 0.1)
+    memory_limit = max(memory_limit, 1)
+    if float(time_limit).is_integer():
+        time_limit = int(time_limit)
+    return time_limit, memory_limit
+
+
+def read_problem_limits_from_dir(prob_dir):
+    time_limit = 1.0
+    memory_limit = 256
+    has_meta_time_limit = False
+    has_meta_memory_limit = False
+
+    meta_path = os.path.join(prob_dir, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            problem = meta.get("problem", {})
+            if "time_limit" in problem:
+                time_limit = float(problem.get("time_limit"))
+                has_meta_time_limit = True
+            if "memory_limit" in problem:
+                memory_limit = int(float(problem.get("memory_limit")))
+                has_meta_memory_limit = True
+        except (TypeError, ValueError, OSError, json.JSONDecodeError):
+            pass
+
+    ini_path = os.path.join(prob_dir, "domjudge-problem.ini")
+    if not has_meta_time_limit and os.path.exists(ini_path):
+        try:
+            with open(ini_path, "r", encoding="utf-8") as f:
+                text = f.read()
+            m = re.search(r"timelimit\s*=\s*['\"]?([0-9.]+)", text)
+            if m:
+                time_limit = float(m.group(1))
+        except (TypeError, ValueError, OSError):
+            pass
+
+    yaml_path = os.path.join(prob_dir, "problem.yaml")
+    if not has_meta_memory_limit and os.path.exists(yaml_path):
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                text = f.read()
+            m = re.search(r"(?m)^\s*memory\s*:\s*([0-9]+)", text)
+            if m:
+                memory_limit = int(m.group(1))
+        except (TypeError, ValueError, OSError):
+            pass
+
+    time_limit = max(time_limit, 0.1)
+    memory_limit = max(memory_limit, 1)
+    if float(time_limit).is_integer():
+        time_limit = int(time_limit)
+    return time_limit, memory_limit
+
+
+def enrich_problem_limits(problem_entries):
+    name_to_dir = find_problem_dirs()
+    for entry in problem_entries:
+        problem = entry.setdefault("problem", {})
+        if "time_limit" in problem and "memory_limit" in problem:
+            continue
+        display_name = problem.get("display_name", "")
+        prob_dir = name_to_dir.get(display_name)
+        if prob_dir:
+            time_limit, memory_limit = read_problem_limits_from_dir(prob_dir)
+        else:
+            time_limit, memory_limit = problem_limits(entry)
+        if "time_limit" not in problem:
+            problem["time_limit"] = time_limit
+        if "memory_limit" not in problem:
+            problem["memory_limit"] = memory_limit
+    return problem_entries
 
 # ==========================================
 # 前端 UI 模板 (TailwindCSS + Alpine.js + SortableJS + Marked + MathJax)
@@ -118,7 +207,7 @@ HTML_TEMPLATE = r"""
                 </svg>
                 <div class="flex flex-col gap-1">
                     <span class="text-[11px] tracking-[0.2em] uppercase text-cream-muted font-medium">Typesetting Console</span>
-                    <div class="flex items-center gap-2">
+                    <div class="flex items-center gap-3 flex-wrap">
                         <span class="text-sm text-cream-subtle">当前排版集</span>
                         <div class="relative flex items-center" x-show="subtitles.length > 0">
                             <select x-model="currentSubtitle" @change="switchSubtitle()"
@@ -130,6 +219,18 @@ HTML_TEMPLATE = r"""
                             <svg class="w-3.5 h-3.5 text-gold/60 absolute right-2.5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                         </div>
                         <span x-show="subtitles.length === 0" class="text-[13px] text-danger font-mono bg-danger/10 px-2 py-0.5 rounded border border-danger/20">未检测到排版集</span>
+                        <div class="inline-flex items-center gap-1 p-1 rounded-lg bg-ink-input/70 border border-white/[0.02]">
+                            <button @click="activePage = 'layout'"
+                                    class="px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors"
+                                    :class="activePage === 'layout' ? 'bg-gold/12 text-gold-light' : 'text-cream-subtle hover:text-cream'">
+                                组卷排版
+                            </button>
+                            <button @click="activePage = 'sandbox'; refreshSandboxInfo()"
+                                    class="px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors"
+                                    :class="activePage === 'sandbox' ? 'bg-gold/12 text-gold-light' : 'text-cream-subtle hover:text-cream'">
+                                沙箱评测
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -195,7 +296,7 @@ HTML_TEMPLATE = r"""
                 </div>
             </div>
 
-            <div class="flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
+            <div x-show="activePage === 'layout'" class="flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
                 <div x-show="selectedIdx === null" class="absolute inset-0 overflow-y-auto">
                     <!-- Empty set: no problems loaded yet -->
                     <div x-show="problems.length === 0" class="absolute inset-0 flex flex-col items-center justify-center">
@@ -265,9 +366,10 @@ HTML_TEMPLATE = r"""
                             <!-- Cover preview thumbnail -->
                             <div class="mt-3" x-show="pdfPages.length > 0">
                                 <p class="text-[10px] font-medium text-cream-subtle mb-2">封面预览</p>
-                                <div class="rounded-lg overflow-hidden border border-white/[0.02] bg-ink-bg">
+                                <div class="rounded-lg overflow-hidden border border-white/[0.02] bg-ink-bg relative">
                                     <img :src="'/api/pdf-page/' + encodeURIComponent(currentSubtitle) + '/0?t=' + pdfRefresh"
-                                         class="w-full" style="filter: brightness(0.92) contrast(0.95)">
+                                         class="w-full block" style="filter: brightness(0.92) contrast(0.95)">
+                                    <div class="absolute inset-0 bg-black/20 pointer-events-none"></div>
                                 </div>
                             </div>
                         </div>
@@ -349,6 +451,39 @@ HTML_TEMPLATE = r"""
                                            @keydown.backspace="if(!tagDraft && getTags(selectedIdx).length) removeTag(selectedIdx, getTags(selectedIdx).length - 1)"
                                            class="w-24 px-2.5 py-1 bg-transparent border border-dashed border-white/[0.02] rounded-md text-[10px] text-cream placeholder-cream-subtle/30 focus:border-gold/30 focus:outline-none transition-colors"
                                            placeholder="添加标签">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Limits Editor -->
+                        <div class="pt-5 mt-2 border-t border-white/[0.02]">
+                            <div class="flex items-center justify-between mb-3">
+                                <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">Limits</label>
+                                <span class="text-[10px] font-mono text-cream-subtle/60">
+                                    <span x-text="getTimeLimit(selectedIdx)"></span>s /
+                                    <span x-text="getMemoryLimit(selectedIdx)"></span>MB
+                                </span>
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">时间限制</label>
+                                    <div class="flex items-center gap-2">
+                                        <input type="number" min="0.1" step="0.1"
+                                               :value="getTimeLimit(selectedIdx)"
+                                               @input.stop="setTimeLimit(selectedIdx, $event.target.value)"
+                                               class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                        <span class="text-[11px] text-cream-subtle font-mono">s</span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">内存限制</label>
+                                    <div class="flex items-center gap-2">
+                                        <input type="number" min="1" step="1"
+                                               :value="getMemoryLimit(selectedIdx)"
+                                               @input.stop="setMemoryLimit(selectedIdx, $event.target.value)"
+                                               class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                        <span class="text-[11px] text-cream-subtle font-mono">MB</span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -502,6 +637,131 @@ HTML_TEMPLATE = r"""
                 </template>
             </div>
 
+            <div x-show="activePage === 'sandbox'" class="flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
+                <div class="space-y-6 animate-fade-in">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <div class="flex items-center gap-2 mb-2">
+                                <div class="w-1 h-4 rounded-full bg-gold"></div>
+                                <h2 class="font-serif text-[18px] font-semibold text-cream">沙箱评测控制台</h2>
+                            </div>
+                            <p class="text-xs text-cream-subtle">
+                                <template x-if="selectedIdx !== null && problems[selectedIdx]">
+                                    <span>
+                                        当前题目
+                                        <span class="font-mono text-gold" x-text="String.fromCharCode(65 + selectedIdx)"></span>
+                                        · <span x-text="problems[selectedIdx].problem.display_name"></span>
+                                        <span x-show="sandboxLastRunAt" class="ml-2 text-cream-subtle/70">
+                                            上次运行 <span class="font-mono" x-text="sandboxLastRunAt"></span>
+                                        </span>
+                                    </span>
+                                </template>
+                                <template x-if="selectedIdx === null">
+                                    <span>请先在左侧选择一道题目。</span>
+                                </template>
+                            </p>
+                        </div>
+                        <button @click="runSandbox()"
+                                class="px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all duration-200 bg-gradient-to-b from-[#d4b468] to-[#b8923e] text-[#1a1408] shadow-[0_0_18px_rgba(200,164,92,0.18)] hover:shadow-[0_0_24px_rgba(200,164,92,0.30)] active:scale-[0.97] disabled:opacity-40 disabled:shadow-none"
+                                :disabled="sandboxRunning || !sandboxInfo || !sandboxInfo.runnable">
+                            <span x-show="!sandboxRunning">▶ 运行沙箱评测</span>
+                            <span x-show="sandboxRunning" class="animate-pulse">● 评测中...</span>
+                        </button>
+                    </div>
+
+                    <div x-show="!sandboxInfo || !sandboxInfo.matched" class="rounded-xl border border-white/[0.02] bg-ink-input/40 p-5 text-sm text-cream-subtle">
+                        <p x-show="selectedIdx === null">选择左侧题目后，这里会显示目录、数据和代码状态。</p>
+                        <p x-show="selectedIdx !== null && sandboxInfo && !sandboxInfo.matched">未找到匹配的题目目录，请检查该题 `meta.json` 的 `display_name`。</p>
+                    </div>
+
+                    <div x-show="sandboxInfo && sandboxInfo.matched" class="grid grid-cols-5 gap-3">
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Problem Dir</p>
+                            <p class="font-mono text-[13px] text-cream truncate" x-text="sandboxInfo?.dir || '-'"></p>
+                        </div>
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Secret Data</p>
+                            <p class="font-mono text-[13px] text-cream"><span x-text="sandboxInfo?.data_count || 0"></span> cases</p>
+                        </div>
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Limits</p>
+                            <p class="font-mono text-[13px] text-cream">
+                                <span x-text="sandboxInfo?.limits?.time || 1"></span>s /
+                                <span x-text="sandboxInfo?.limits?.memory || 256"></span>MB
+                            </p>
+                        </div>
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Validator</p>
+                            <p class="font-mono text-[13px]" :class="sandboxInfo?.files?.validator ? 'text-success' : 'text-cream-subtle'" x-text="sandboxInfo?.files?.validator ? 'validator.cpp' : 'missing'"></p>
+                        </div>
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Solutions</p>
+                            <p class="font-mono text-[13px] text-cream">
+                                <span x-text="(sandboxInfo?.files?.std || []).length"></span> std /
+                                <span x-text="(sandboxInfo?.files?.brute || []).length"></span> brute /
+                                <span x-text="(sandboxInfo?.files?.wrong || []).length"></span> wrong
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-4 gap-3" x-show="selectedIdx !== null && sandboxResult">
+                        <template x-for="card in sandboxCards()" :key="card.key">
+                            <div class="rounded-xl border p-4 transition-colors"
+                                 :class="card.ok ? 'bg-success/10 border-success/20' : (card.warn ? 'bg-gold/10 border-gold/20' : 'bg-danger/10 border-danger/25')">
+                                <div class="flex items-center justify-between mb-2">
+                                    <span class="text-[11px] uppercase tracking-wide text-cream-muted" x-text="card.title"></span>
+                                    <span class="text-[10px] font-mono px-2 py-0.5 rounded"
+                                          :class="card.ok ? 'bg-success/15 text-success' : (card.warn ? 'bg-gold/15 text-gold' : 'bg-danger/15 text-danger')"
+                                          x-text="card.status"></span>
+                                </div>
+                                <p class="text-[13px] text-cream" x-text="card.detail"></p>
+                            </div>
+                        </template>
+                    </div>
+
+                    <div x-show="selectedIdx !== null && sandboxMatrixRows().length > 0" class="rounded-xl border border-white/[0.02] overflow-hidden bg-ink-input/30">
+                        <div class="px-4 py-3 border-b border-white/[0.02] flex items-center justify-between">
+                            <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">用例矩阵</h3>
+                            <span class="text-[10px] font-mono text-cream-subtle" x-text="sandboxMatrixPrograms().length + ' programs'"></span>
+                        </div>
+                        <div class="overflow-auto max-h-[360px]">
+                            <table class="w-full text-left text-[12px]">
+                                <thead class="sticky top-0 bg-ink-card z-10">
+                                    <tr class="border-b border-white/[0.02]">
+                                        <th class="px-3 py-2 font-mono text-cream-subtle">case</th>
+                                        <template x-for="prog in sandboxMatrixPrograms()" :key="prog">
+                                            <th class="px-3 py-2 font-mono text-cream-subtle" x-text="prog"></th>
+                                        </template>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="row in sandboxMatrixRows()" :key="row.case">
+                                        <tr class="border-b border-white/[0.015]">
+                                            <td class="px-3 py-2 font-mono text-cream-muted" x-text="row.case"></td>
+                                            <template x-for="prog in sandboxMatrixPrograms()" :key="prog">
+                                                <td class="px-3 py-2">
+                                                    <span class="inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px]"
+                                                          :class="sandboxStatusClass(row.results[prog]?.status)"
+                                                          x-text="row.results[prog] ? row.results[prog].status + ' ' + row.results[prog].time.toFixed(3) + 's' : '-'"></span>
+                                                </td>
+                                            </template>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div x-show="selectedIdx !== null" class="rounded-xl border border-white/[0.02] bg-[#090b0f] overflow-hidden">
+                        <button @click="sandboxLogOpen = !sandboxLogOpen" class="w-full px-4 py-3 flex items-center justify-between text-left">
+                            <span class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">原始日志</span>
+                            <span class="text-[11px] text-cream-subtle" x-text="sandboxLogOpen ? '收起' : '展开'"></span>
+                        </button>
+                        <pre x-show="sandboxLogOpen" x-collapse class="max-h-[320px] overflow-auto px-4 pb-4 text-[11px] leading-relaxed font-mono text-cream-muted whitespace-pre-wrap" x-text="sandboxLogs || '暂无日志。'"></pre>
+                    </div>
+                </div>
+            </div>
+
         </div>
     </div>
 
@@ -512,8 +772,19 @@ HTML_TEMPLATE = r"""
                 currentSubtitle: '',
                 problems: [],
                 selectedIdx: null,
+                activePage: 'layout',
                 isCompiling: false,
                 isDistributing: false,
+                sandboxRunning: false,
+                sandboxInfo: null,
+                sandboxJobId: null,
+                sandboxJobKey: '',
+                sandboxResult: null,
+                sandboxLogs: '',
+                sandboxLastRunAt: '',
+                sandboxCache: {},
+                sandboxLogOpen: false,
+                _sandboxPollTimer: null,
                 pdfRefresh: Date.now(),
                 pdfPages: [],
                 trackWidth: 800,
@@ -545,6 +816,10 @@ HTML_TEMPLATE = r"""
                         .then(data => {
                             this.problems = data;
                             this.selectedIdx = null; // 切换集子时重置选中状态
+                            this.sandboxInfo = null;
+                            this.sandboxResult = null;
+                            this.sandboxLogs = '';
+                            this.sandboxLastRunAt = '';
                             this.$nextTick(() => { this.initSortable(); });
                         });
                 },
@@ -598,6 +873,38 @@ HTML_TEMPLATE = r"""
 
                 getDifficultyInfo(idx) {
                     return this.difficultyLevels[this.getDifficulty(idx)];
+                },
+
+                getTimeLimit(idx) {
+                    let p = this.problems[idx];
+                    let v = p && p.problem ? Number(p.problem.time_limit) : NaN;
+                    return Number.isFinite(v) && v > 0 ? v : 1;
+                },
+
+                getMemoryLimit(idx) {
+                    let p = this.problems[idx];
+                    let v = p && p.problem ? Number(p.problem.memory_limit) : NaN;
+                    return Number.isFinite(v) && v > 0 ? Math.round(v) : 256;
+                },
+
+                setTimeLimit(idx, value) {
+                    let p = this.problems[idx];
+                    if (!p) return;
+                    if (!p.problem) p.problem = {};
+                    let v = Number(value);
+                    p.problem.time_limit = Number.isFinite(v) && v > 0 ? v : 1;
+                    this.autoSave();
+                    if (this.activePage === 'sandbox') this.refreshSandboxInfo();
+                },
+
+                setMemoryLimit(idx, value) {
+                    let p = this.problems[idx];
+                    if (!p) return;
+                    if (!p.problem) p.problem = {};
+                    let v = Number(value);
+                    p.problem.memory_limit = Number.isFinite(v) && v > 0 ? Math.round(v) : 256;
+                    this.autoSave();
+                    if (this.activePage === 'sandbox') this.refreshSandboxInfo();
                 },
 
                 setDifficulty(idx, level) {
@@ -697,7 +1004,183 @@ HTML_TEMPLATE = r"""
                     return [...tags].sort();
                 },
 
-                selectProb(index) { this.selectedIdx = index; this.tagDraft = ''; },
+                // ── Sandbox ────────────────────────────────────────────────
+                sandboxKey(index = this.selectedIdx) {
+                    if (!this.currentSubtitle || index === null || index === undefined) return '';
+                    return `${this.currentSubtitle}::${index}`;
+                },
+
+                restoreSandboxCache() {
+                    const cached = this.sandboxCache[this.sandboxKey()];
+                    if (cached) {
+                        this.sandboxResult = cached.result || null;
+                        this.sandboxLogs = cached.logs || '';
+                        this.sandboxLastRunAt = cached.finishedAt || '';
+                    } else {
+                        this.sandboxResult = null;
+                        this.sandboxLogs = '';
+                        this.sandboxLastRunAt = '';
+                    }
+                },
+
+                refreshSandboxInfo() {
+                    this.restoreSandboxCache();
+                    if (!this.currentSubtitle || this.selectedIdx === null) {
+                        this.sandboxInfo = null;
+                        return;
+                    }
+                    fetch(`/api/sandbox/problem?subtitle=${encodeURIComponent(this.currentSubtitle)}&index=${this.selectedIdx}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            this.sandboxInfo = data.success ? data.info : { matched: false, reason: data.error || 'load failed' };
+                        })
+                        .catch(() => {
+                            this.sandboxInfo = { matched: false, reason: 'network error' };
+                        });
+                },
+
+                async runSandbox() {
+                    if (!this.currentSubtitle || this.selectedIdx === null) return;
+                    clearTimeout(this._saveTimer);
+                    await this._doSave();
+                    const jobKey = this.sandboxKey();
+                    this.sandboxRunning = true;
+                    this.sandboxLogOpen = true;
+                    fetch('/api/sandbox/run', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ subtitle: this.currentSubtitle, index: this.selectedIdx })
+                    }).then(res => res.json()).then(data => {
+                        if (!data.success) {
+                            this.sandboxRunning = false;
+                            this.showToast(data.error || 'Sandbox failed to start', true);
+                            return;
+                        }
+                        this.sandboxJobId = data.job_id;
+                        this.sandboxJobKey = jobKey;
+                        this.pollSandboxJob(data.job_id, jobKey);
+                    }).catch(() => {
+                        this.sandboxRunning = false;
+                        this.showToast('Sandbox failed to start', true);
+                    });
+                },
+
+                pollSandboxJob(jobId = this.sandboxJobId, jobKey = this.sandboxJobKey) {
+                    if (!jobId || !jobKey) return;
+                    fetch(`/api/sandbox/job/${jobId}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            if (!data.success) throw new Error(data.error || 'job missing');
+                            const cacheEntry = this.sandboxCache[jobKey] || {};
+                            cacheEntry.logs = data.logs || '';
+                            cacheEntry.result = data.result || null;
+                            this.sandboxCache[jobKey] = cacheEntry;
+                            if (this.sandboxKey() === jobKey) {
+                                this.sandboxLogs = cacheEntry.logs;
+                                this.sandboxResult = cacheEntry.result;
+                                this.sandboxLastRunAt = cacheEntry.finishedAt || '';
+                            }
+                            if (data.status === 'running') {
+                                this._sandboxPollTimer = setTimeout(() => this.pollSandboxJob(jobId, jobKey), 900);
+                            } else {
+                                const finishedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+                                this.sandboxCache[jobKey] = {
+                                    result: data.result || null,
+                                    logs: data.logs || '',
+                                    finishedAt,
+                                };
+                                if (this.sandboxKey() === jobKey) {
+                                    this.sandboxResult = this.sandboxCache[jobKey].result;
+                                    this.sandboxLogs = this.sandboxCache[jobKey].logs;
+                                    this.sandboxLastRunAt = finishedAt;
+                                }
+                                if (this.sandboxJobId === jobId) this.sandboxRunning = false;
+                                if (data.status === 'success') this.showToast('Sandbox finished');
+                                else this.showToast('Sandbox found issues', true);
+                                this.refreshSandboxInfo();
+                            }
+                        })
+                        .catch(() => {
+                            this.sandboxRunning = false;
+                            this.showToast('Sandbox job lost', true);
+                        });
+                },
+
+                sandboxCards() {
+                    const r = this.sandboxResult || {};
+                    const summaries = r.summaries || {};
+                    const compile = r.compiles || [];
+                    const validatorEvents = r.validator || [];
+                    const compileFailed = (kind) => compile.some(c => c.kind === kind && c.ok === false);
+                    const compileSkipped = (kind) => compile.some(c => c.kind === kind && c.ok === null);
+                    const sumFor = (kind) => Object.values(summaries).filter(s => s.kind === kind);
+                    const detailFor = (items) => items.length
+                        ? items.map(s => `${s.program}: AC ${s.stats.AC || 0}, WA ${s.stats.WA || 0}, TLE ${s.stats.TLE || 0}, MLE ${s.stats.MLE || 0}, RE ${s.stats.RE || 0}`).join(' · ')
+                        : 'No run';
+                    const std = sumFor('std');
+                    const brute = sumFor('brute');
+                    const wrong = sumFor('wrong');
+                    const validatorOk = validatorEvents.length > 0 && validatorEvents.every(v => v.ok);
+                    return [
+                        {
+                            key: 'validator', title: 'Validator',
+                            ok: validatorOk || compileSkipped('validator'), warn: compileSkipped('validator'),
+                            status: compileFailed('validator') ? 'CE' : (compileSkipped('validator') ? 'SKIP' : (validatorOk ? 'PASS' : 'FAIL')),
+                            detail: compileSkipped('validator') ? 'validator.cpp not found' : `${validatorEvents.filter(v => v.ok).length}/${validatorEvents.length} cases valid`
+                        },
+                        {
+                            key: 'std', title: 'Standard',
+                            ok: std.length > 0 && std.every(s => (s.stats.WA || 0) + (s.stats.TLE || 0) + (s.stats.MLE || 0) + (s.stats.RE || 0) === 0),
+                            warn: false,
+                            status: compileFailed('std') ? 'CE' : (std.length ? 'DONE' : 'FAIL'),
+                            detail: detailFor(std)
+                        },
+                        {
+                            key: 'brute', title: 'Brute',
+                            ok: brute.length > 0 && brute.every(s => (s.stats.WA || 0) === 0 && ((s.stats.TLE || 0) + (s.stats.MLE || 0)) > 0),
+                            warn: brute.length === 0,
+                            status: brute.length ? 'DONE' : 'SKIP',
+                            detail: detailFor(brute)
+                        },
+                        {
+                            key: 'wrong', title: 'Wrong',
+                            ok: wrong.length > 0 && wrong.some(s => (s.stats.WA || 0) + (s.stats.TLE || 0) + (s.stats.MLE || 0) + (s.stats.RE || 0) > 0),
+                            warn: wrong.length === 0,
+                            status: wrong.length ? 'DONE' : 'SKIP',
+                            detail: detailFor(wrong)
+                        },
+                    ];
+                },
+
+                sandboxMatrixPrograms() {
+                    const cases = (this.sandboxResult && this.sandboxResult.cases) || [];
+                    return [...new Set(cases.map(c => c.program))];
+                },
+
+                sandboxMatrixRows() {
+                    const cases = (this.sandboxResult && this.sandboxResult.cases) || [];
+                    const rows = {};
+                    cases.forEach(c => {
+                        if (!rows[c.case]) rows[c.case] = { case: c.case, results: {} };
+                        rows[c.case].results[c.program] = c;
+                    });
+                    return Object.values(rows).sort((a, b) => a.case.localeCompare(b.case, undefined, { numeric: true }));
+                },
+
+                sandboxStatusClass(status) {
+                    if (status === 'AC') return 'bg-success/15 text-success';
+                    if (status === 'WA') return 'bg-danger/15 text-danger';
+                    if (status === 'TLE') return 'bg-gold/15 text-gold';
+                    if (status === 'MLE') return 'bg-danger/15 text-danger';
+                    if (status === 'RE') return 'bg-danger/20 text-danger';
+                    return 'bg-ink-elevated text-cream-subtle';
+                },
+
+                selectProb(index) {
+                    this.selectedIdx = index;
+                    this.tagDraft = '';
+                    if (this.activePage === 'sandbox') this.refreshSandboxInfo();
+                },
                 
                 hasQuote() {
                     if (this.selectedIdx === null || !this.problems[this.selectedIdx]) return false;
@@ -855,7 +1338,7 @@ def get_data():
         if not os.path.exists(json_path):
             return jsonify([])
         with open(json_path, 'r', encoding='utf-8') as f:
-            return jsonify(json.load(f))
+            return jsonify(enrich_problem_limits(json.load(f)))
     except Exception as e:
         print(f"[-] Data Load Error: {e}")
         return jsonify([])
@@ -871,11 +1354,17 @@ def save_data():
         
     try:
         json_path = secure_path(subtitle, "problems.json")
+        for entry in new_data:
+            entry.setdefault("problem", {})
+            time_limit, memory_limit = problem_limits(entry)
+            entry["problem"]["time_limit"] = time_limit
+            entry["problem"]["memory_limit"] = memory_limit
         os.makedirs(os.path.dirname(json_path), exist_ok=True)
         tmp_path = json_path + '.tmp'
         with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(new_data, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, json_path)  # atomic replace
+        sync_problem_limits_to_files(new_data)
         return jsonify({"success": True})
     except Exception as e:
         print(f"[-] Save Data Error: {e}")
@@ -932,6 +1421,331 @@ def find_problem_dirs():
     return problem_dirs
 
 
+def _zip_candidate_names(base, filename):
+    return {filename, f"{base}/{filename}"}
+
+
+def _zip_preferred_arcname(infos, base, filename):
+    names = {item.filename for item in infos}
+    if filename in names:
+        return filename
+    based = f"{base}/{filename}"
+    if based in names:
+        return based
+    root_style_markers = {"problem.yaml", "domjudge-problem.ini", "problem.pdf", "data/"}
+    if any(name in root_style_markers or name.startswith("data/") for name in names):
+        return filename
+    if any(name.startswith(f"{base}/") for name in names):
+        return based
+    return filename
+
+
+def sync_problem_limits_to_files(problem_entries):
+    """Best-effort sync of per-problem limits to meta.json and DOMjudge config files."""
+    name_to_dir = find_problem_dirs()
+    for entry in problem_entries:
+        display_name = entry.get("problem", {}).get("display_name", "")
+        prob_dir = name_to_dir.get(display_name)
+        if not prob_dir:
+            continue
+        time_limit, memory_limit = problem_limits(entry)
+
+        meta_path = os.path.join(prob_dir, "meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta.setdefault("problem", {})
+                meta["problem"]["time_limit"] = time_limit
+                meta["problem"]["memory_limit"] = memory_limit
+                tmp = meta_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, meta_path)
+            except Exception as e:
+                print(f"[-] Limit sync meta failed for {prob_dir}: {e}")
+
+        ini_path = os.path.join(prob_dir, "domjudge-problem.ini")
+        try:
+            if os.path.exists(ini_path):
+                with open(ini_path, "r", encoding="utf-8") as f:
+                    text = f.read()
+                if re.search(r"(?m)^timelimit\s*=", text):
+                    text = re.sub(r"(?m)^timelimit\s*=.*$", f"timelimit='{time_limit:g}'", text)
+                else:
+                    text = (text.rstrip() + f"\ntimelimit='{time_limit:g}'\n").lstrip()
+            else:
+                text = f"timelimit='{time_limit:g}'\n"
+            with open(ini_path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except Exception as e:
+            print(f"[-] Limit sync ini failed for {prob_dir}: {e}")
+
+        yaml_path = os.path.join(prob_dir, "problem.yaml")
+        try:
+            if os.path.exists(yaml_path):
+                with open(yaml_path, "r", encoding="utf-8") as f:
+                    text = f.read()
+                if re.search(r"(?m)^\s*memory\s*:", text):
+                    text = re.sub(r"(?m)^(\s*)memory\s*:.*$", rf"\1memory: {memory_limit}", text)
+                elif re.search(r"(?m)^limits\s*:", text):
+                    text = re.sub(r"(?m)^limits\s*:\s*$", f"limits:\n  memory: {memory_limit}", text)
+                else:
+                    text = text.rstrip() + f"\nlimits:\n  memory: {memory_limit}\n"
+            else:
+                safe_name = str(display_name).replace("'", "''")
+                text = f"name: '{safe_name}'\nlimits:\n  memory: {memory_limit}\n"
+            with open(yaml_path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except Exception as e:
+            print(f"[-] Limit sync yaml failed for {prob_dir}: {e}")
+
+        zip_path = os.path.join(os.path.basename(os.path.normpath(prob_dir)) + ".zip")
+        if os.path.exists(zip_path):
+            try:
+                import zipfile as zf
+                base = os.path.basename(os.path.normpath(prob_dir))
+                replacements = {}
+                for filename in ("domjudge-problem.ini", "problem.yaml"):
+                    path = os.path.join(prob_dir, filename)
+                    if os.path.exists(path):
+                        with open(path, "rb") as f:
+                            replacements[filename] = f.read()
+                if replacements:
+                    tmp = zip_path + ".tmp"
+                    with zf.ZipFile(zip_path, "r") as zin, zf.ZipFile(tmp, "w", compression=zf.ZIP_DEFLATED) as zout:
+                        infos = zin.infolist()
+                        arc_replacements = {
+                            _zip_preferred_arcname(infos, base, filename): content
+                            for filename, content in replacements.items()
+                        }
+                        skip_names = set()
+                        for filename in replacements:
+                            skip_names.update(_zip_candidate_names(base, filename))
+                        for item in zin.infolist():
+                            if item.filename not in skip_names:
+                                zout.writestr(item, zin.read(item.filename))
+                        for arcname, content in arc_replacements.items():
+                            zout.writestr(arcname, content)
+                    os.replace(tmp, zip_path)
+            except Exception as e:
+                print(f"[-] Limit sync zip failed for {prob_dir}: {e}")
+
+
+def _load_problem_by_index(subtitle, index):
+    json_path = secure_path(subtitle, "problems.json")
+    with open(json_path, "r", encoding="utf-8") as f:
+        problems = json.load(f)
+    if index < 0 or index >= len(problems):
+        raise ValueError("Problem index out of range")
+    return problems[index]
+
+
+def _sandbox_problem_info(subtitle, index):
+    problem = _load_problem_by_index(subtitle, index)
+    display_name = problem.get("problem", {}).get("display_name", "")
+    name_to_dir = find_problem_dirs()
+    prob_dir = name_to_dir.get(display_name)
+    script_path = os.path.join("scripts", "local_judge.py")
+    info = {
+        "name": display_name,
+        "matched": bool(prob_dir),
+        "dir": prob_dir,
+        "runnable": False,
+        "limits": {"time": problem_limits(problem)[0], "memory": problem_limits(problem)[1]},
+        "data_count": 0,
+        "cases": [],
+        "files": {"validator": False, "std": [], "brute": [], "wrong": [], "other": []},
+        "script_exists": os.path.exists(script_path),
+    }
+    if not prob_dir:
+        info["reason"] = "no matching directory"
+        return info
+
+    data_dir = os.path.join(prob_dir, "data", "secret")
+    if os.path.isdir(data_dir):
+        info["cases"] = sorted([f[:-3] for f in os.listdir(data_dir) if f.endswith(".in")])
+        info["data_count"] = len(info["cases"])
+
+    for file in sorted(os.listdir(prob_dir)):
+        if not file.endswith(".cpp"):
+            continue
+        if file == "validator.cpp":
+            info["files"]["validator"] = True
+        elif file.startswith("std"):
+            info["files"]["std"].append(file)
+        elif file.startswith("brute"):
+            info["files"]["brute"].append(file)
+        elif file.startswith("wrong"):
+            info["files"]["wrong"].append(file)
+        else:
+            info["files"]["other"].append(file)
+
+    info["runnable"] = info["script_exists"] and os.path.isdir(data_dir)
+    return info
+
+
+def _empty_sandbox_result(info):
+    return {
+        "problem": info,
+        "limits": info.get("limits", {"time": 1, "memory": 256}),
+        "compiles": [],
+        "validator": [],
+        "cases": [],
+        "summaries": {},
+        "final": None,
+    }
+
+
+def _apply_sandbox_event(result, event):
+    typ = event.get("type")
+    if typ == "limits":
+        result["limits"] = {
+            "time": event.get("time_limit", 1),
+            "memory": event.get("memory_limit", 256),
+        }
+    elif typ == "compile":
+        result["compiles"].append({
+            "kind": event.get("kind"),
+            "file": event.get("file"),
+            "ok": event.get("ok"),
+            "stderr": event.get("stderr", ""),
+        })
+    elif typ == "validator":
+        result["validator"].append({"case": event.get("case"), "ok": bool(event.get("ok"))})
+    elif typ == "case":
+        result["cases"].append({
+            "kind": event.get("kind"),
+            "program": event.get("program"),
+            "case": event.get("case"),
+            "status": event.get("status"),
+            "time": float(event.get("time") or 0),
+            "memory": event.get("memory"),
+            "time_limit": event.get("time_limit"),
+            "memory_limit": event.get("memory_limit"),
+            "memory_enforced": event.get("memory_enforced"),
+        })
+    elif typ == "summary":
+        program = event.get("program") or f"{event.get('kind', 'unknown')}-summary"
+        result["summaries"][program] = {
+            "kind": event.get("kind"),
+            "program": program,
+            "stats": event.get("stats", {}),
+        }
+    elif typ == "final":
+        result["final"] = {"ok": bool(event.get("ok")), "message": event.get("message", "")}
+
+
+def _sandbox_log_line(event):
+    typ = event.get("type")
+    if typ == "limits":
+        return f"[limits] {event.get('time_limit', 1):g}s / {event.get('memory_limit', 256)}MB"
+    if typ == "compile":
+        ok = event.get("ok")
+        status = "SKIP" if ok is None else ("OK" if ok else "FAIL")
+        return f"[compile:{status}] {event.get('kind')} · {event.get('file')}"
+    if typ == "validator":
+        return f"[validator:{'OK' if event.get('ok') else 'FAIL'}] {event.get('case')}"
+    if typ == "case":
+        return f"[{event.get('kind')}] {event.get('program')} / {event.get('case')} -> {event.get('status')} ({float(event.get('time') or 0):.3f}s)"
+    if typ == "summary":
+        return f"[summary] {event.get('program')}: {event.get('stats')}"
+    if typ == "final":
+        return f"[final:{'OK' if event.get('ok') else 'FAIL'}] {event.get('message')}"
+    return json.dumps(event, ensure_ascii=False)
+
+
+def _run_sandbox_job(job_id, subtitle, index):
+    try:
+        info = _sandbox_problem_info(subtitle, index)
+        result = _empty_sandbox_result(info)
+        with SANDBOX_LOCK:
+            SANDBOX_JOBS[job_id]["result"] = result
+            SANDBOX_JOBS[job_id]["logs"] = ""
+
+        if not info.get("runnable"):
+            message = info.get("reason") or "problem is not runnable"
+            result["final"] = {"ok": False, "message": message}
+            with SANDBOX_LOCK:
+                SANDBOX_JOBS[job_id].update(status="failed", result=result, logs=message)
+            return
+
+        script_path = os.path.join("scripts", "local_judge.py")
+        proc = subprocess.Popen(
+            [sys.executable, script_path, info["dir"], "--jsonl"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        logs = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+                _apply_sandbox_event(result, event)
+                logs.append(_sandbox_log_line(event))
+            except json.JSONDecodeError:
+                logs.append(raw)
+            with SANDBOX_LOCK:
+                SANDBOX_JOBS[job_id]["logs"] = "\n".join(logs)
+                SANDBOX_JOBS[job_id]["result"] = result
+
+        return_code = proc.wait()
+        final = result.get("final") or {}
+        final_ok = bool(final.get("ok")) and return_code == 0
+        with SANDBOX_LOCK:
+            SANDBOX_JOBS[job_id]["status"] = "success" if final_ok else "failed"
+            SANDBOX_JOBS[job_id]["logs"] = "\n".join(logs)
+            SANDBOX_JOBS[job_id]["result"] = result
+    except Exception as e:
+        with SANDBOX_LOCK:
+            SANDBOX_JOBS[job_id].update(status="failed", logs=str(e), result={"final": {"ok": False, "message": str(e)}})
+
+
+@app.route('/api/sandbox/problem')
+def sandbox_problem():
+    try:
+        subtitle = request.args.get("subtitle")
+        index = int(request.args.get("index", "-1"))
+        if not subtitle:
+            return jsonify({"success": False, "error": "Missing subtitle"})
+        return jsonify({"success": True, "info": _sandbox_problem_info(subtitle, index)})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/sandbox/run', methods=['POST'])
+def sandbox_run():
+    try:
+        payload = request.json or {}
+        subtitle = payload.get("subtitle")
+        index = int(payload.get("index", -1))
+        if not subtitle:
+            return jsonify({"success": False, "error": "Missing subtitle"})
+        job_id = uuid.uuid4().hex
+        with SANDBOX_LOCK:
+            SANDBOX_JOBS[job_id] = {"status": "running", "logs": "", "result": None}
+        Thread(target=_run_sandbox_job, args=(job_id, subtitle, index), daemon=True).start()
+        return jsonify({"success": True, "job_id": job_id})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route('/api/sandbox/job/<job_id>')
+def sandbox_job(job_id):
+    with SANDBOX_LOCK:
+        job = SANDBOX_JOBS.get(job_id)
+        if not job:
+            return jsonify({"success": False, "error": "job not found"}), 404
+        return jsonify({"success": True, **job})
+
+
 def inject_pdf_to_zip(pdf_path, prob_dir):
     """将 problem.pdf 注入同名的 .zip 压缩包（如果存在）。"""
     import zipfile as zf
@@ -940,11 +1754,13 @@ def inject_pdf_to_zip(pdf_path, prob_dir):
     if not os.path.exists(zip_path):
         return None
     try:
-        arcname = f"{base}/problem.pdf"
         tmp = zip_path + ".tmp"
         with zf.ZipFile(zip_path, "r") as zin, zf.ZipFile(tmp, "w", compression=zf.ZIP_DEFLATED) as zout:
+            infos = zin.infolist()
+            arcname = _zip_preferred_arcname(infos, base, "problem.pdf")
+            skip_names = _zip_candidate_names(base, "problem.pdf")
             for item in zin.infolist():
-                if item.filename != arcname:
+                if item.filename not in skip_names:
                     zout.writestr(item, zin.read(item.filename))
             zout.write(pdf_path, arcname)
         os.replace(tmp, zip_path)
