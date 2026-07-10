@@ -6,7 +6,23 @@ description: 当用户需要出算法竞赛题目、造测试数据、配置 DOM
 # Role
 你是一个经验丰富、极其严谨的 ACM 算法竞赛出题人。你精通 testlib.h、C++、Python (CYaRon)、DOMjudge 配置以及 Typst 排版。
 
-# Workflow
+# 执行模式优先级
+
+1. 首先检查工作区是否存在 `.probhub/workspace.yaml`。
+2. 若存在，必须使用 Workspace Schema v1：
+   - `.probhub/workspace.yaml` 维护赛事配置和稳定题目顺序。
+   - `<题目>/probhub.yaml` 维护题目 ID、限制、代码矩阵和数据路径。
+   - `<题目>/problem.md` 维护描述、输入、输出和提示。
+   - `<题目>/code/` 统一存放所有 C++ 源码及本地 `.exe` 编译产物；`probhub.yaml` 中的代码路径必须写成 `code/...`。
+   - `data/sample` 是样例唯一来源。
+   - `meta.json`、Typst `problems.json`、DOMjudge 配置、PDF、ZIP 和 Manifest 均为构建产物，禁止手工维护。
+3. Schema v1 工作区优先执行 `probhub <command>`；若 npm bin 不在 PATH，优先执行工作区的 `python scripts/probhub.py <command>`；工作区没有入口时，执行本 Skill 目录中的 `scripts/probhub.py`。
+4. 修改源文件后执行 `probhub lint <ID>`，再执行 `probhub build <ID>`。
+5. 只有 `build` 返回成功且随后 `probhub status <ID>` 为 `current` 时才可交付。
+6. 当前 WebUI 尚未完成 Schema v1 写入适配。在 Schema v1 工作区中不得通过 WebUI 保存题面或排序，只能用于只读预览。
+7. 仅当 `.probhub/workspace.yaml` 不存在时，才使用下方 Legacy Workflow。
+
+# Legacy Workflow
 请严格按照以下步骤与用户交互并执行操作，每完成一个大阶段，请简要向用户报告进度并确认。
 
 ## 1. 题面确立阶段
@@ -25,32 +41,32 @@ description: 当用户需要出算法竞赛题目、造测试数据、配置 DOM
 
 ## 2. SPJ 与验证器阶段 (Checker)
 1. 思考并判断该题目的答案是否唯一（例如：要求输出任意一种方案，或存在精度误差）。
-2. 若答案不唯一，则必须在 `<英文目录名>` 下编写 `checker.cpp`。
-3. 如果是交互题，则必须编写 `interactor.cpp`。
+2. 若答案不唯一，则必须在 `<英文目录名>/code` 下编写 `checker.cpp`。
+3. 如果是交互题，则必须在 `<英文目录名>/code` 下编写 `interactor.cpp`。
 4. 如果是通信题（Run-twice），提示用户自行编写 run 脚本，然后按正常题目处理。
 5. 编写相关 cpp 时，必须使用 `testlib.h` 规范，并确保逻辑严密。
 注：使用 `testlib.h` 的文件在 Windows MinGW 上编译必须加 `-static`
 
 ## 3. 数据生成与验证阶段 (Data & Sandbox)
-1. 在工作区执行：`mkdir -p <英文目录名>/data/sample` 和 `mkdir -p <英文目录名>/data/secret`。
-2. **编写代码矩阵**：
+1. 在工作区执行：`mkdir -p <英文目录名>/code`、`mkdir -p <英文目录名>/data/sample` 和 `mkdir -p <英文目录名>/data/secret`。
+2. **在 `<英文目录名>/code/` 中编写代码矩阵**：
    - **`std.cpp`**：时间复杂度最优的标准程序。
    - **`validator.cpp`**：必须基于 `testlib.h`，严格校验输入的每个整数范围和格式（空格、换行）。
    - **`brute.cpp`**：复杂度较高的无脑暴力/朴素正确解（只求绝对正确，允许超时）。
    - **`wrong.cpp`**：典型的错解（如贪心错解、遗漏特殊情况或答案数据超过 int 范围的情况下没开 long long）。
 3. **编写数据生成器**：复杂结构读 `references/cyaron.md` 用 Python；简单结构读 `references/fast.md` 用 C++ (`inmaker.cpp` 等)。
 4. 使用生成器生成 20~30 组强弱结合的 `.in` 数据（需含样例、随机数据、极限最大数据、针对性 Corner Case 恶意卡错解的数据）。
-5. 编译运行 `std.cpp` 生成对应的 `.ans` 文件。确保样例按相同格式放入 `data/sample/`，其余强数据放入 `data/secret/`。
+5. 编译运行 `code/std.cpp` 生成对应的 `.ans` 文件。确保样例按相同格式放入 `data/sample/`，其余强数据放入 `data/secret/`。
 6. 在分析数据范围和 std 的时间复杂度后设置相应的时空限制，默认为 1s 和 256MB。时间限制应为整数秒，空间限制应为不小于 256 的 2 的整次幂 MB。
 7. **触发沙箱自检：** 执行命令：
-   `python scripts/local_judge.py <英文目录名>`
+   `python scripts/local_judge.py <英文目录名> --jsonl`
 8. **基于沙箱反馈的自我修复闭环：**
    - **Validator 报错**：数据越界或格式错误，必须修改生成器重新生成。
    - **std 未 All AC**：标程 Bug 或数据有误，修复标程。
    - **brute 出现 WA**：暴力逻辑错误或 std 逻辑有误，必须修复（brute 允许 TLE，绝不允许 WA）。
    - **brute 全局 AC (无 TLE)**：如果 brute 复杂度不高则继续，否则修改生成器，造出能让 brute 超时的数据。
    - **wrong 全局 AC**：检查 wrong 是否确定无法通过此题，必须针对错解的缺陷专门构造数据把它卡掉。
-9. 只有当终端明确输出 `[+] 恭喜！所有代码均符合预期宿命` 时，才可以进入下一阶段。绝对不允许将未通过自检的题目进行排版打包。
+9. 只有当命令退出码为 `0`，且最后一个 JSONL 事件满足 `type == "final"`、`status == "passed"`、`code == "all_expectations_met"` 时，才可以进入下一阶段。不得依赖自然语言成功提示；绝对不允许将未通过自检的题目进行排版打包。
 
 ## 4. Typst 组卷阶段 (Typesetting)
 询问用户是否需要将此题加入组卷。如需要，检查工作区根目录是否存在 `typst-statement` 文件夹：
@@ -134,14 +150,18 @@ limits:
 * 将 `references/testlib.h` 和编写好的 `checker.cpp` 放入该 validate 目录。
 * 为了确保兼容，尝试使用 `g++ checker.cpp -o checker` 编译验证无语法错误。
 
-5. **最终打包：**
-使用命令行工具将 `<英文目录名>/` 目录下的 `data/`, `output_validators/` (如有), `domjudge-problem.ini`, `problem.yaml` 打包压缩为 `<英文目录名>.zip`。**注意：** 如果 `<英文目录名>/` 下存在 `problem.pdf`，请一并加入压缩包；如果不存在则忽略，不要因此导致压缩命令报错。
+5. **最终打包与验证：**
+   - 若已完成排版，执行 `python scripts/package_problem.py <英文目录名> <英文目录名>.zip --require-pdf`。
+   - 若未生成单题 PDF，执行 `python scripts/package_problem.py <英文目录名> <英文目录名>.zip`。
+   - 随后执行 `python scripts/verify_package.py <英文目录名>.zip`（有 PDF 时附加 `--require-pdf`）。只有验证命令退出码为 `0` 时才可交付。
+   - 不得手工增量修改旧 ZIP；每次都从题目目录完整重建。
 6. **若该题是通信题：**
 提示用户在正常上传题目包后，在后台添加新的run脚本并在题目页面修改该题运行脚本。
 
 ## Constraints (全局约束)
 
 * DOMjudge 的测试数据必须严格放在 `data/sample/` 和 `data/secret/` 目录下。
-* 如果用户有**修改题面**需求，先判断是否需要修改数据与样例，修改题面后注意不要使用脚本，直接操作 `problems.json` 进行修改并编译新的组卷 pdf，并建议用户手动检查 problem.pdf。
-* 文件读写、编译、运行脚本必须主动使用命令行工具进行，遇到报错需自行 debug 修正。
-* 用户若提出修改测试数据请求，应以 `problems.json` 中的题面为准。
+* Schema v1 工作区修改题面时，只编辑 `<题目>/problem.md`；修改限制、题名、标签和代码路径时，只编辑 `<题目>/probhub.yaml`；所有题目 C++/EXE 文件放在 `<题目>/code/`；修改样例时，只编辑 `data/sample`。
+* Schema v1 工作区禁止把 `meta.json`、Typst `problems.json`、DOMjudge 配置、PDF 或 ZIP 当作事实来源。
+* Legacy 工作区才允许按旧流程操作 `meta.json` 和 `problems.json`。
+* 文件读写、编译、运行命令必须主动执行，遇到报错需自行定位并修复。

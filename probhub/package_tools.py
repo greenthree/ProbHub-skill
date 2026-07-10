@@ -1,0 +1,114 @@
+import os
+import re
+from pathlib import Path, PurePosixPath
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
+
+from .io import write_yaml
+
+FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+ROOT_FILES = ("domjudge-problem.ini", "problem.yaml", "problem.pdf")
+ROOT_DIRS = ("data", "output_validators")
+
+
+def generate_domjudge_config(problem_dir, config):
+    limits = config.get("limits") or {}
+    time_limit = limits.get("time", 1)
+    memory_limit = limits.get("memory", 256)
+    (problem_dir / "domjudge-problem.ini").write_text(
+        f"timelimit='{time_limit}'\n", encoding="utf-8"
+    )
+    domjudge = {"name": config.get("name") or config.get("display_name"), "limits": {"memory": memory_limit}}
+    judge_type = (config.get("judge") or {}).get("type", "standard")
+    if judge_type == "interactive":
+        domjudge["validation"] = "custom interactive"
+    elif judge_type in {"custom", "checker"}:
+        domjudge["validation"] = "custom"
+    write_yaml(problem_dir / "problem.yaml", domjudge)
+
+
+def collect_package_files(problem_dir):
+    problem_dir = Path(problem_dir)
+    files = []
+    for name in ROOT_FILES:
+        path = problem_dir / name
+        if path.is_file():
+            files.append((path, name))
+    for dirname in ROOT_DIRS:
+        root = problem_dir / dirname
+        if root.is_dir():
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    files.append((path, path.relative_to(problem_dir).as_posix()))
+    return sorted(files, key=lambda item: item[1])
+
+
+def build_package(problem_dir, output_path):
+    problem_dir = Path(problem_dir)
+    output_path = Path(output_path)
+    files = collect_package_files(problem_dir)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    if temp_path.exists():
+        temp_path.unlink()
+    try:
+        with ZipFile(temp_path, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+            for source, arcname in files:
+                info = ZipInfo(arcname, FIXED_TIMESTAMP)
+                info.compress_type = ZIP_DEFLATED
+                info.external_attr = 0o100644 << 16
+                archive.writestr(info, source.read_bytes(), compress_type=ZIP_DEFLATED, compresslevel=9)
+        os.replace(temp_path, output_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+    return files
+
+
+def _safe_path(name):
+    path = PurePosixPath(name)
+    return bool(name) and "\\" not in name and not path.is_absolute() and ".." not in path.parts and not re.match(r"^[A-Za-z]:", name)
+
+
+def verify_package(zip_path, require_pdf=False):
+    errors, warnings = [], []
+    stats = {"sample_cases": 0, "secret_cases": 0, "files": 0}
+    try:
+        with ZipFile(zip_path) as archive:
+            names_list = [item.filename for item in archive.infolist() if not item.is_dir()]
+            names = set(names_list)
+            stats["files"] = len(names_list)
+            duplicates = sorted(name for name in names if names_list.count(name) > 1)
+            if duplicates:
+                errors.append("duplicate entries: " + ", ".join(duplicates))
+            unsafe = sorted(name for name in names if not _safe_path(name))
+            if unsafe:
+                errors.append("unsafe paths: " + ", ".join(unsafe))
+            for required in ("problem.yaml", "domjudge-problem.ini"):
+                if required not in names:
+                    errors.append(f"missing root file: {required}")
+            if require_pdf and "problem.pdf" not in names:
+                errors.append("missing root file: problem.pdf")
+            if "problem.pdf" in names and not archive.read("problem.pdf").startswith(b"%PDF-"):
+                errors.append("problem.pdf is not a valid PDF file")
+            inputs = {name[:-3] for name in names if name.startswith("data/") and name.endswith(".in")}
+            answers = {name[:-4] for name in names if name.startswith("data/") and name.endswith(".ans")}
+            if inputs - answers:
+                errors.append("inputs without answers: " + ", ".join(sorted(inputs - answers)))
+            if answers - inputs:
+                errors.append("answers without inputs: " + ", ".join(sorted(answers - inputs)))
+            samples = [name for name in names if name.startswith("data/sample/") and name.endswith(".in")]
+            secrets = [name for name in names if name.startswith("data/secret/") and name.endswith(".in")]
+            stats.update(sample_cases=len(samples), secret_cases=len(secrets))
+            if not samples:
+                errors.append("no sample input cases")
+            if not secrets:
+                errors.append("no secret input cases")
+            if "problem.yaml" in names:
+                text = archive.read("problem.yaml").decode("utf-8", errors="replace")
+                if not re.search(r"(?m)^name\s*:", text):
+                    errors.append("problem.yaml has no root name field")
+                if not re.search(r"(?m)^\s*memory\s*:\s*\d+", text):
+                    warnings.append("problem.yaml has no numeric memory limit")
+    except (OSError, BadZipFile) as exc:
+        errors.append(f"cannot read ZIP: {exc}")
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "stats": stats}

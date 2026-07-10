@@ -6,10 +6,14 @@ import subprocess
 import sys
 import time
 
+import yaml
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REFERENCES_DIR = os.path.join(SCRIPT_DIR, "..", "references")
 DEFAULT_TIME_LIMIT = 1.0
 DEFAULT_MEMORY_LIMIT = 256
+PROTOCOL_NAME = "probhub.local_judge"
+PROTOCOL_VERSION = 1
 
 
 class Reporter:
@@ -22,18 +26,28 @@ class Reporter:
 
     def event(self, type_, **payload):
         if self.jsonl:
-            print(json.dumps({"type": type_, **payload}, ensure_ascii=False), flush=True)
+            event = {
+                "protocol": PROTOCOL_NAME,
+                "protocol_version": PROTOCOL_VERSION,
+                "type": type_,
+                **payload,
+            }
+            print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
-def compile_cpp(src_file, out_bin, reporter=None, kind=None):
+def compile_cpp(src_file, out_bin, reporter=None, kind=None, display_file=None):
     if not os.path.exists(src_file):
         return False
     reporter = reporter or Reporter(False)
-    file_name = os.path.basename(src_file)
+    file_name = display_file or os.path.basename(src_file)
     reporter.text(f"[*] Compiling {file_name}...")
     flags = ["g++", src_file, "-o", out_bin, "-O2", "-std=c++17", "-I", REFERENCES_DIR]
     if platform.system() == "Windows":
         flags.insert(4, "-static")
+        if kind == "validator":
+            # DOMjudge validators run on Linux and accept LF line endings. Emulate
+            # that behavior so Git-normalized test data is validated consistently.
+            flags.append("-DFOR_LINUX")
     try:
         ret = subprocess.run(flags, capture_output=True, text=True, encoding="utf-8", errors="replace")
         ok = ret.returncode == 0
@@ -62,22 +76,96 @@ def _safe_int(value, default):
         return default
 
 
-def read_problem_limits(prob_dir):
+def read_probhub_config(prob_dir):
+    config_path = os.path.join(prob_dir, "probhub.yaml")
+    if not os.path.isfile(config_path):
+        return None
+    try:
+        with open(config_path, "r", encoding="utf-8") as stream:
+            config = yaml.safe_load(stream) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"failed to read probhub.yaml: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ValueError("probhub.yaml must contain a mapping")
+    return config
+
+
+def _entry_file(entry):
+    if isinstance(entry, dict):
+        return entry.get("file")
+    return entry
+
+
+def _config_entries(value):
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def resolve_problem_path(prob_dir, entry):
+    relative = _entry_file(entry)
+    if not relative:
+        return None
+    return os.path.normpath(os.path.join(prob_dir, str(relative)))
+
+
+def display_problem_path(prob_dir, path):
+    try:
+        return os.path.relpath(path, prob_dir).replace(os.sep, "/")
+    except ValueError:
+        return path.replace(os.sep, "/")
+
+
+def binary_path_for_source(source_path):
+    return os.path.splitext(source_path)[0] + ".exe"
+
+
+def discover_solution_sources(prob_dir, config=None):
+    solutions = {"std": [], "brute": [], "wrong": []}
+    if config is not None:
+        configured = config.get("solutions") or {}
+        for config_key, kind in (("accepted", "std"), ("brute", "brute"), ("wrong", "wrong")):
+            for entry in _config_entries(configured.get(config_key)):
+                source_path = resolve_problem_path(prob_dir, entry)
+                if source_path:
+                    solutions[kind].append(source_path)
+        return solutions
+
+    for file_name in os.listdir(prob_dir):
+        if not file_name.endswith(".cpp") or file_name == "validator.cpp":
+            continue
+        for kind in solutions:
+            if file_name.startswith(kind):
+                solutions[kind].append(os.path.join(prob_dir, file_name))
+                break
+    return solutions
+
+
+def read_problem_limits(prob_dir, config=None):
     time_limit = DEFAULT_TIME_LIMIT
     memory_limit = DEFAULT_MEMORY_LIMIT
     has_meta_time_limit = False
     has_meta_memory_limit = False
 
+    if config is not None:
+        limits = config.get("limits") or {}
+        if "time" in limits:
+            time_limit = _safe_float(limits.get("time"), time_limit)
+            has_meta_time_limit = True
+        if "memory" in limits:
+            memory_limit = _safe_int(limits.get("memory"), memory_limit)
+            has_meta_memory_limit = True
+
     meta_path = os.path.join(prob_dir, "meta.json")
-    if os.path.exists(meta_path):
+    if (not has_meta_time_limit or not has_meta_memory_limit) and os.path.exists(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             problem = meta.get("problem", {})
-            if "time_limit" in problem:
+            if not has_meta_time_limit and "time_limit" in problem:
                 time_limit = _safe_float(problem.get("time_limit"), time_limit)
                 has_meta_time_limit = True
-            if "memory_limit" in problem:
+            if not has_meta_memory_limit and "memory_limit" in problem:
                 memory_limit = _safe_int(problem.get("memory_limit"), memory_limit)
                 has_meta_memory_limit = True
         except Exception:
@@ -293,7 +381,7 @@ def _failed_status(returncode, stderr, memory_enforced, peak_memory_mb, memory_l
 
 def run_testcase(bin_path, in_file, ans_file, time_limit=DEFAULT_TIME_LIMIT, memory_limit=DEFAULT_MEMORY_LIMIT):
     """Run a test case and return (status, elapsed_time, peak_memory_mb, memory_enforced)."""
-    temp_out = os.path.join(os.path.dirname(bin_path), "temp.out")
+    temp_out = os.path.join(os.path.dirname(bin_path), ".probhub-temp.out")
     start = time.time()
     memory_enforced = False
     peak_memory_mb = None
@@ -331,34 +419,49 @@ def run_testcase(bin_path, in_file, ans_file, time_limit=DEFAULT_TIME_LIMIT, mem
             if proc.returncode != 0:
                 status = _failed_status(proc.returncode, stderr, memory_enforced, peak_memory_mb, memory_limit)
                 return status, run_time, peak_memory_mb, memory_enforced
+
+        with open(ans_file, "r") as fa, open(temp_out, "r") as ft:
+            status = "AC" if fa.read().strip() == ft.read().strip() else "WA"
+        return status, time.time() - start, peak_memory_mb, memory_enforced
     except subprocess.TimeoutExpired:
         return "TLE", time_limit, peak_memory_mb, memory_enforced
-    except subprocess.CalledProcessError:
+    except (OSError, subprocess.CalledProcessError):
         return "RE", time.time() - start, peak_memory_mb, memory_enforced
     finally:
         _close_windows_handle(job_handle)
-
-    run_time = time.time() - start
-    with open(ans_file, "r") as fa, open(temp_out, "r") as ft:
-        if fa.read().strip() == ft.read().strip():
-            return "AC", run_time, peak_memory_mb, memory_enforced
-        return "WA", run_time, peak_memory_mb, memory_enforced
+        for _ in range(20):
+            try:
+                os.remove(temp_out)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                time.sleep(0.05)
 
 
 def run_validator(val_bin, in_file):
-    """Validate input format using testlib-style exit codes."""
+    """Validate input using Linux-style LF endings on every host."""
     try:
-        with open(in_file, "r") as fin:
-            subprocess.run([val_bin], stdin=fin, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-        return True
-    except subprocess.CalledProcessError:
-        return False
+        with open(in_file, "rb") as fin:
+            data = fin.read().replace(b"\r\n", b"\n")
+        ret = subprocess.run(
+            [val_bin],
+            input=data,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        stderr = ret.stderr.decode("utf-8", errors="replace").strip()
+        return ret.returncode == 0, stderr
+    except OSError as exc:
+        return False, str(exc)
 
 
-def collect_testcases(prob_dir):
+def collect_testcases(prob_dir, config=None):
     testcases = []
-    for suite in ("sample", "secret"):
-        data_dir = os.path.join(prob_dir, "data", suite)
+    data_config = (config or {}).get("data") or {}
+    for suite, default in (("sample", "data/sample"), ("secret", "data/secret")):
+        data_dir = os.path.join(prob_dir, data_config.get(f"{suite}_dir", default))
         if not os.path.isdir(data_dir):
             continue
         for in_name in sorted([f for f in os.listdir(data_dir) if f.endswith(".in")]):
@@ -373,10 +476,18 @@ def collect_testcases(prob_dir):
     return testcases
 
 
-def finish(reporter, ok, message, code):
-    reporter.event("final", ok=ok, message=message)
+def finish(reporter, ok, message, exit_code, result_code=None):
+    result_code = result_code or ("all_expectations_met" if ok else "validation_failed")
+    reporter.event(
+        "final",
+        ok=ok,
+        status="passed" if ok else "failed",
+        code=result_code,
+        exit_code=exit_code,
+        message=message,
+    )
     reporter.text(message)
-    sys.exit(code)
+    sys.exit(exit_code)
 
 
 def main():
@@ -389,13 +500,19 @@ def main():
         finish(reporter, False, "Invalid arguments", 1)
 
     prob_dir = args[0]
-    sample_dir = os.path.join(prob_dir, "data", "sample")
-    secret_dir = os.path.join(prob_dir, "data", "secret")
-    if not os.path.isdir(sample_dir) and not os.path.isdir(secret_dir):
-        finish(reporter, False, "data/sample and data/secret not found", 1)
+    try:
+        config = read_probhub_config(prob_dir)
+    except ValueError as exc:
+        finish(reporter, False, str(exc), 1)
 
-    time_limit, memory_limit = read_problem_limits(prob_dir)
-    testcases = collect_testcases(prob_dir)
+    data_config = (config or {}).get("data") or {}
+    sample_dir = os.path.join(prob_dir, data_config.get("sample_dir", "data/sample"))
+    secret_dir = os.path.join(prob_dir, data_config.get("secret_dir", "data/secret"))
+    if not os.path.isdir(sample_dir) and not os.path.isdir(secret_dir):
+        finish(reporter, False, "configured sample and secret data directories not found", 1)
+
+    time_limit, memory_limit = read_problem_limits(prob_dir, config)
+    testcases = collect_testcases(prob_dir, config)
     if not testcases:
         finish(reporter, False, "No .in test cases found under data/sample or data/secret", 1)
 
@@ -410,36 +527,59 @@ def main():
     reporter.event("limits", time_limit=time_limit, memory_limit=memory_limit)
 
     # 1. Compile and run Validator
-    val_cpp = os.path.join(prob_dir, "validator.cpp")
-    val_bin = os.path.join(prob_dir, "validator.exe")
-    if os.path.exists(val_cpp):
-        if compile_cpp(val_cpp, val_bin, reporter, "validator"):
+    validator_entry = ((config or {}).get("judge") or {}).get("validator") if config is not None else "validator.cpp"
+    val_cpp = resolve_problem_path(prob_dir, validator_entry)
+    if val_cpp and os.path.exists(val_cpp):
+        val_bin = binary_path_for_source(val_cpp)
+        if compile_cpp(
+            val_cpp, val_bin, reporter, "validator", display_problem_path(prob_dir, val_cpp)
+        ):
             reporter.text("\nRunning validator...")
             all_ok = True
             for testcase in testcases:
-                ok = run_validator(val_bin, testcase["in_path"])
-                reporter.event("validator", case=testcase["case"], ok=ok)
+                ok, validator_message = run_validator(val_bin, testcase["in_path"])
+                reporter.event("validator", case=testcase["case"], ok=ok, message=validator_message)
                 if not ok:
                     all_ok = False
-                    reporter.text(f"[-] FATAL: {testcase['case']} violates validator constraints! Fix the data generator.")
-                    finish(reporter, False, f"{testcase['case']} violates validator constraints", 1)
+                    detail = f" ({validator_message})" if validator_message else ""
+                    reporter.text(
+                        f"[-] FATAL: {testcase['case']} violates validator constraints{detail}! "
+                        "Fix the data generator."
+                    )
+                    finish(
+                        reporter,
+                        False,
+                        f"{testcase['case']} violates validator constraints{detail}",
+                        1,
+                    )
             if all_ok:
                 reporter.text("[+] Validator: ALL PASS")
     elif jsonl:
-        reporter.event("compile", kind="validator", file="validator.cpp", ok=None, stderr="validator.cpp not found")
+        validator_name = _entry_file(validator_entry) or "validator not configured"
+        reporter.event(
+            "compile",
+            kind="validator",
+            file=str(validator_name).replace(os.sep, "/"),
+            ok=None,
+            stderr=f"{validator_name} not found",
+        )
 
     # 2. Discover and compile all solutions
+    source_groups = discover_solution_sources(prob_dir, config)
     solutions = {"std": [], "brute": [], "wrong": []}
-    for file in os.listdir(prob_dir):
-        if file.endswith(".cpp") and file != "validator.cpp":
-            for kind in solutions.keys():
-                if file.startswith(kind):
-                    bin_name = os.path.join(prob_dir, file.replace(".cpp", ".exe"))
-                    if compile_cpp(os.path.join(prob_dir, file), bin_name, reporter, kind):
-                        solutions[kind].append((file, bin_name))
+    for kind, source_paths in source_groups.items():
+        for source_path in source_paths:
+            program_name = display_problem_path(prob_dir, source_path)
+            if not os.path.isfile(source_path):
+                reporter.event("compile", kind=kind, file=program_name, ok=False, stderr="source file not found")
+                reporter.text(f"[-] Source file not found: {program_name}")
+                continue
+            bin_name = binary_path_for_source(source_path)
+            if compile_cpp(source_path, bin_name, reporter, kind, program_name):
+                solutions[kind].append((program_name, bin_name))
 
     if not solutions["std"]:
-        finish(reporter, False, "std.cpp not found. Aborting.", 1)
+        finish(reporter, False, "accepted solution not found or failed to compile. Aborting.", 1)
 
     # 3. Evaluate all solutions
     for kind, progs in solutions.items():

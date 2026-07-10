@@ -7,6 +7,11 @@ from pypdf import PdfReader, PdfWriter
 
 BOILERPLATE_PAGES = 2  # cover + blank page
 
+
+def normalize_display_name(value):
+    """Normalize PDF-extracted title spacing for stable matching."""
+    return "".join(str(value or "").split())
+
 def get_page_count(pdf_path):
     """Return page count of a PDF, or 0 if file doesn't exist."""
     if not os.path.exists(pdf_path):
@@ -60,7 +65,7 @@ def is_last_problem(typst_dir, target_name):
     # Get display_name of the last problem
     last = problems[-1]
     last_name = last.get("problem", {}).get("display_name", "")
-    return last_name == target_name
+    return normalize_display_name(last_name) == normalize_display_name(target_name)
 
 def extract_by_page_count(main_pdf_path, output_pdf_path, prev_pages):
     """Extract the last X pages using page count difference (for new problems).
@@ -108,7 +113,7 @@ def extract_by_text_scan(main_pdf_path, output_pdf_path, target_name):
     end_page = -1
 
     for i, b in enumerate(boundaries):
-        if b["display_name"] == target_name:
+        if normalize_display_name(b["display_name"]) == normalize_display_name(target_name):
             start_page = b["page"]
             if i + 1 < len(boundaries):
                 end_page = boundaries[i + 1]["page"]

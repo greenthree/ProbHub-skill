@@ -6,6 +6,8 @@ import re
 import subprocess
 import webbrowser
 import uuid
+
+import yaml
 from threading import Timer, Thread, Lock
 from flask import Flask, jsonify, request, render_template_string
 
@@ -39,22 +41,62 @@ def problem_limits(problem_entry):
     return time_limit, memory_limit
 
 
+def read_probhub_config_from_dir(prob_dir):
+    config_path = os.path.join(prob_dir, "probhub.yaml")
+    if not os.path.isfile(config_path):
+        return None
+    try:
+        with open(config_path, "r", encoding="utf-8") as stream:
+            config = yaml.safe_load(stream) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    return config if isinstance(config, dict) else None
+
+
+def _config_entry_file(entry):
+    return entry.get("file") if isinstance(entry, dict) else entry
+
+
+def _config_entries(value):
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _normalized_config_path(entry):
+    path = _config_entry_file(entry)
+    return str(path).replace("\\", "/") if path else None
+
+
 def read_problem_limits_from_dir(prob_dir):
     time_limit = 1.0
     memory_limit = 256
     has_meta_time_limit = False
     has_meta_memory_limit = False
 
+    config = read_probhub_config_from_dir(prob_dir)
+    if config is not None:
+        limits = config.get("limits") or {}
+        try:
+            if "time" in limits:
+                time_limit = float(limits.get("time"))
+                has_meta_time_limit = True
+            if "memory" in limits:
+                memory_limit = int(float(limits.get("memory")))
+                has_meta_memory_limit = True
+        except (TypeError, ValueError):
+            pass
+
     meta_path = os.path.join(prob_dir, "meta.json")
-    if os.path.exists(meta_path):
+    if (not has_meta_time_limit or not has_meta_memory_limit) and os.path.exists(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             problem = meta.get("problem", {})
-            if "time_limit" in problem:
+            if not has_meta_time_limit and "time_limit" in problem:
                 time_limit = float(problem.get("time_limit"))
                 has_meta_time_limit = True
-            if "memory_limit" in problem:
+            if not has_meta_memory_limit and "memory_limit" in problem:
                 memory_limit = int(float(problem.get("memory_limit")))
                 has_meta_memory_limit = True
         except (TypeError, ValueError, OSError, json.JSONDecodeError):
@@ -696,7 +738,7 @@ HTML_TEMPLATE = r"""
                         </div>
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
                             <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Validator</p>
-                            <p class="font-mono text-[13px]" :class="sandboxInfo?.files?.validator ? 'text-success' : 'text-cream-subtle'" x-text="sandboxInfo?.files?.validator ? 'validator.cpp' : 'missing'"></p>
+                            <p class="font-mono text-[13px]" :class="sandboxInfo?.files?.validator ? 'text-success' : 'text-cream-subtle'" x-text="sandboxInfo?.files?.validator || 'missing'"></p>
                         </div>
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
                             <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Solutions</p>
@@ -1117,6 +1159,7 @@ HTML_TEMPLATE = r"""
                     const validatorEvents = r.validator || [];
                     const compileFailed = (kind) => compile.some(c => c.kind === kind && c.ok === false);
                     const compileSkipped = (kind) => compile.some(c => c.kind === kind && c.ok === null);
+                    const compileItem = (kind) => compile.find(c => c.kind === kind);
                     const sumFor = (kind) => Object.values(summaries).filter(s => s.kind === kind);
                     const detailFor = (items) => items.length
                         ? items.map(s => `${s.program}: AC ${s.stats.AC || 0}, WA ${s.stats.WA || 0}, TLE ${s.stats.TLE || 0}, MLE ${s.stats.MLE || 0}, RE ${s.stats.RE || 0}`).join(' · ')
@@ -1130,7 +1173,7 @@ HTML_TEMPLATE = r"""
                             key: 'validator', title: 'Validator',
                             ok: validatorOk || compileSkipped('validator'), warn: compileSkipped('validator'),
                             status: compileFailed('validator') ? 'CE' : (compileSkipped('validator') ? 'SKIP' : (validatorOk ? 'PASS' : 'FAIL')),
-                            detail: compileSkipped('validator') ? 'validator.cpp not found' : `${validatorEvents.filter(v => v.ok).length}/${validatorEvents.length} cases valid`
+                            detail: compileSkipped('validator') ? `${compileItem('validator')?.file || 'validator'} not found` : `${validatorEvents.filter(v => v.ok).length}/${validatorEvents.length} cases valid`
                         },
                         {
                             key: 'std', title: 'Standard',
@@ -1632,19 +1675,41 @@ def _sandbox_problem_info(subtitle, index):
             info[f"{suite}_count"] = len(suite_cases)
     info["data_count"] = len(info["cases"])
 
-    for file in sorted(os.listdir(prob_dir)):
-        if not file.endswith(".cpp"):
-            continue
-        if file == "validator.cpp":
-            info["files"]["validator"] = True
-        elif file.startswith("std"):
-            info["files"]["std"].append(file)
-        elif file.startswith("brute"):
-            info["files"]["brute"].append(file)
-        elif file.startswith("wrong"):
-            info["files"]["wrong"].append(file)
-        else:
-            info["files"]["other"].append(file)
+    config = read_probhub_config_from_dir(prob_dir)
+    if config is not None:
+        judge = config.get("judge") or {}
+        validator = _normalized_config_path(judge.get("validator"))
+        if validator and os.path.isfile(os.path.join(prob_dir, validator)):
+            info["files"]["validator"] = validator
+
+        solutions = config.get("solutions") or {}
+        for config_key, display_key in (("accepted", "std"), ("brute", "brute"), ("wrong", "wrong")):
+            for entry in _config_entries(solutions.get(config_key)):
+                source = _normalized_config_path(entry)
+                if source and os.path.isfile(os.path.join(prob_dir, source)):
+                    info["files"][display_key].append(source)
+
+        configured = set(sum((info["files"][key] for key in ("std", "brute", "wrong")), []))
+        if info["files"]["validator"]:
+            configured.add(info["files"]["validator"])
+        for entry in _config_entries(config.get("generators")):
+            source = _normalized_config_path(entry)
+            if source and source not in configured and os.path.isfile(os.path.join(prob_dir, source)):
+                info["files"]["other"].append(source)
+    else:
+        for file in sorted(os.listdir(prob_dir)):
+            if not file.endswith(".cpp"):
+                continue
+            if file == "validator.cpp":
+                info["files"]["validator"] = file
+            elif file.startswith("std"):
+                info["files"]["std"].append(file)
+            elif file.startswith("brute"):
+                info["files"]["brute"].append(file)
+            elif file.startswith("wrong"):
+                info["files"]["wrong"].append(file)
+            else:
+                info["files"]["other"].append(file)
 
     info["runnable"] = info["script_exists"] and info["data_count"] > 0
     return info
@@ -1698,7 +1763,12 @@ def _apply_sandbox_event(result, event):
             "stats": event.get("stats", {}),
         }
     elif typ == "final":
-        result["final"] = {"ok": bool(event.get("ok")), "message": event.get("message", "")}
+        result["final"] = {
+            "ok": bool(event.get("ok")),
+            "status": event.get("status", ""),
+            "code": event.get("code", ""),
+            "message": event.get("message", ""),
+        }
 
 
 def _sandbox_log_line(event):
