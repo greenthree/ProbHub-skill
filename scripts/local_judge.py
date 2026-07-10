@@ -1455,7 +1455,7 @@ def main():
                     )
             if all_ok:
                 reporter.text("[+] Validator: ALL PASS")
-    elif jsonl:
+    elif jsonl and (validator_entry or val_cpp):
         validator_name = _entry_file(validator_entry) or display_problem_path(prob_dir, val_cpp)
         reporter.event(
             "compile",

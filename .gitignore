@@ -36,3 +36,6 @@ __pycache__/
 
 # Local ProbHub stress counterexamples
 **/.probhub/stress/
+
+# Local WebUI submission workspaces
+**/.probhub/submissions/

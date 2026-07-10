@@ -126,14 +126,16 @@ probhub build L01 --no-cache
 
 缓存文件仍是 `<problem>/.probhub/sandbox-cache-v1.json`；文件名中的 `v1` 是本地存储名称，不代表内部缓存 Schema 永远不变。
 
-## 10. WebUI 后续基础
+## 10. WebUI 临时提交评测
 
-共享进程控制层为后续 WebUI“上传代码并仅评测该提交”提供底层基础，但该上传评测功能**尚未实现**。未来实现应遵循：
+WebUI“沙箱评测”页支持上传单个 UTF-8 `.cpp` 并只评测该提交：
 
-1. 上传源码写入每次提交独立的临时 submission workspace；
-2. 只在该临时目录编译和运行；
-3. 复用同一进程树、TLE/MLE/OLE/RE 和基础设施 FAIL 语义；
-4. 评测结束后删除提交临时文件；
-5. 不得覆盖、重命名或修改题目原有 `code/std.cpp`、`code/brute.cpp`、`code/wrong*.cpp` 等文件。
+1. 请求限制源码扩展名、UTF-8 编码和 `1 MiB` 大小；
+2. 每次提交生成唯一 task ID，源码写入 `.probhub/submissions/<task-id>/problem/code/submission.cpp`；
+3. 临时配置只保留上传解法，并以绝对只读路径引用题目现有测试数据；
+4. Custom Checker 或 Interactor 源码会复制到临时工作区后编译，原题 `code/` 不产生新的 `.exe`；
+5. 评测复用 `local_judge.py` 与共享进程控制，返回 CE/AC/WA/TLE/MLE/OLE/RE/FAIL 和逐测试点信息；
+6. 任务由后台线程监督独立子进程，HTTP 请求不会同步阻塞到评测结束；
+7. 任务结束后删除源码、临时配置、可执行文件、输出和缓存。
 
-当前 WebUI 仍只展示现有题目沙箱结果。不要在文档、接口或 UI 中把上传评测描述成已完成能力。
+上传流程不得覆盖、重命名或修改题目原有 `code/std.cpp`、`code/brute.cpp`、`code/wrong*.cpp`、Checker、Interactor、数据、答案或生成物。任务字典只保存文件名、结构化结果和日志，不保存源码正文。

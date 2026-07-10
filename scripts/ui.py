@@ -6,16 +6,37 @@ import re
 import subprocess
 import webbrowser
 import uuid
+import time
+from pathlib import Path
+from threading import BoundedSemaphore, Lock, Thread, Timer
 
 import yaml
-from threading import Timer, Thread, Lock
 from flask import Flask, jsonify, request, render_template_string
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+PACKAGE_ROOT = next(
+    (candidate for candidate in (SCRIPT_DIR, SCRIPT_DIR.parent) if (candidate / "probhub").is_dir()),
+    SCRIPT_DIR.parent,
+)
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
+LOCAL_JUDGE_SCRIPT = next(
+    (candidate for candidate in (SCRIPT_DIR / "local_judge.py", SCRIPT_DIR / "scripts" / "local_judge.py", PACKAGE_ROOT / "scripts" / "local_judge.py") if candidate.is_file()),
+    SCRIPT_DIR / "local_judge.py",
+)
+
+from probhub.submissions import MAX_SOURCE_BYTES, temporary_submission_workspace, validate_cpp_upload
+
 app = Flask(__name__)
+MAX_SUBMISSION_REQUEST_BYTES = MAX_SOURCE_BYTES + 64 * 1024
 
 BASE_DIR = "typst-statement"
 SANDBOX_JOBS = {}
 SANDBOX_LOCK = Lock()
+SUBMISSION_JOBS = {}
+SUBMISSION_LOCK = Lock()
+MAX_CONCURRENT_SUBMISSIONS = max(1, min(4, os.cpu_count() or 2))
+SUBMISSION_SLOTS = BoundedSemaphore(MAX_CONCURRENT_SUBMISSIONS)
 
 def secure_path(subtitle, filename):
     """安全路径拼接，防止路径穿越攻击"""
@@ -750,6 +771,62 @@ HTML_TEMPLATE = r"""
                         </div>
                     </div>
 
+                    <div x-show="sandboxInfo && sandboxInfo.runnable" class="rounded-xl border border-gold/20 bg-gold/[0.04] p-5 space-y-4">
+                        <div class="flex items-start justify-between gap-4">
+                            <div>
+                                <div class="flex items-center gap-2">
+                                    <h3 class="text-[13px] font-semibold text-cream">临时提交评测</h3>
+                                    <span class="px-2 py-0.5 rounded-full bg-success/10 text-success text-[10px] font-mono">isolated</span>
+                                </div>
+                                <p class="mt-1 text-[11px] text-cream-subtle">上传源码只会进入 <span class="font-mono text-gold">.probhub/submissions/&lt;task-id&gt;</span> 临时目录；不会覆盖题目原有 <span class="font-mono">code/</span> 文件。</p>
+                            </div>
+                            <span x-show="submissionLastRunAt" class="text-[10px] font-mono text-cream-subtle" x-text="submissionLastRunAt"></span>
+                        </div>
+                        <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-3 items-center">
+                            <label class="flex items-center gap-3 px-4 py-3 rounded-lg border border-dashed border-white/10 bg-ink-input/50 cursor-pointer hover:border-gold/35 transition-colors">
+                                <input x-ref="submissionFile" type="file" accept=".cpp,text/x-c++src" class="hidden" @change="handleSubmissionFile($event)">
+                                <span class="text-gold">＋</span>
+                                <span class="min-w-0">
+                                    <span class="block text-[12px] text-cream truncate" x-text="submissionFilename || '选择 UTF-8 C++ 源码（最大 1 MiB）'"></span>
+                                    <span class="block text-[10px] text-cream-subtle mt-0.5">仅接受单个 .cpp 文件</span>
+                                </span>
+                            </label>
+                            <button @click="runSubmission()"
+                                    :disabled="submissionRunning || !submissionFilename"
+                                    class="px-5 py-3 rounded-lg text-[12px] font-semibold bg-gold text-ink-deep hover:bg-gold-light disabled:opacity-40 transition-colors">
+                                <span x-show="!submissionRunning">上传并评测</span>
+                                <span x-show="submissionRunning" class="animate-pulse">评测中...</span>
+                            </button>
+                        </div>
+                        <div x-show="submissionResult || submissionRunning" class="space-y-3">
+                            <div class="flex items-center gap-3">
+                                <span class="px-3 py-1 rounded font-mono text-[12px] font-semibold" :class="sandboxStatusClass(submissionVerdict)" x-text="submissionVerdict"></span>
+                                <span class="text-[11px] text-cream-subtle" x-text="submissionRunning ? '已进入独立评测任务' : submissionStatsText()"></span>
+                                <span x-show="submissionResult?.submission?.workspace_cleaned" class="text-[10px] text-success">临时工作区已清理</span>
+                            </div>
+                            <div x-show="submissionCompile() && submissionCompile().ok === false" class="rounded-lg bg-danger/10 border border-danger/20 p-3">
+                                <p class="text-[11px] font-medium text-danger mb-2">编译失败</p>
+                                <pre class="max-h-48 overflow-auto whitespace-pre-wrap text-[10px] font-mono text-cream-muted" x-text="submissionCompile()?.stderr || 'compiler failed'"></pre>
+                            </div>
+                            <div x-show="submissionCases().length > 0" class="rounded-lg border border-white/[0.03] overflow-hidden">
+                                <div class="max-h-72 overflow-auto">
+                                    <table class="w-full text-left text-[11px]">
+                                        <thead class="sticky top-0 bg-ink-card"><tr class="text-cream-subtle"><th class="px-3 py-2">Case</th><th class="px-3 py-2">Verdict</th><th class="px-3 py-2">Time</th><th class="px-3 py-2">Memory</th><th class="px-3 py-2">Message</th></tr></thead>
+                                        <tbody class="divide-y divide-white/[0.02]">
+                                            <template x-for="item in submissionCases()" :key="item.case">
+                                                <tr><td class="px-3 py-2 font-mono text-cream" x-text="item.case"></td><td class="px-3 py-2"><span class="px-2 py-0.5 rounded font-mono" :class="sandboxStatusClass(item.status)" x-text="item.status"></span></td><td class="px-3 py-2 font-mono text-cream-muted" x-text="item.time.toFixed(3) + 's'"></td><td class="px-3 py-2 font-mono text-cream-muted" x-text="item.memory == null ? '-' : item.memory.toFixed(1) + ' MiB'"></td><td class="px-3 py-2 text-cream-subtle" x-text="item.message || '-'"></td></tr>
+                                            </template>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div x-show="submissionLogs" class="rounded-lg bg-[#090b0f] overflow-hidden">
+                                <button @click="submissionLogOpen = !submissionLogOpen" class="w-full px-3 py-2 flex justify-between text-[10px] text-cream-subtle"><span>提交日志</span><span x-text="submissionLogOpen ? '收起' : '展开'"></span></button>
+                                <pre x-show="submissionLogOpen" class="max-h-56 overflow-auto px-3 pb-3 whitespace-pre-wrap text-[10px] font-mono text-cream-muted" x-text="submissionLogs"></pre>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="grid grid-cols-4 gap-3" x-show="selectedIdx !== null && sandboxResult">
                         <template x-for="card in sandboxCards()" :key="card.key">
                             <div class="rounded-xl border p-4 transition-colors"
@@ -854,6 +931,17 @@ HTML_TEMPLATE = r"""
                 sandboxCache: {},
                 sandboxLogOpen: false,
                 _sandboxPollTimer: null,
+                submissionRunning: false,
+                submissionJobId: null,
+                submissionJobKey: '',
+                submissionFilename: '',
+                submissionResult: null,
+                submissionLogs: '',
+                submissionVerdict: 'PENDING',
+                submissionLastRunAt: '',
+                submissionLogOpen: false,
+                submissionCache: {},
+                _submissionPollTimer: null,
                 pdfRefresh: Date.now(),
                 pdfPages: [],
                 trackWidth: 800,
@@ -1094,6 +1182,7 @@ HTML_TEMPLATE = r"""
 
                 refreshSandboxInfo() {
                     this.restoreSandboxCache();
+                    this.restoreSubmissionCache();
                     if (!this.currentSubtitle || this.selectedIdx === null) {
                         this.sandboxInfo = null;
                         return;
@@ -1252,18 +1341,117 @@ HTML_TEMPLATE = r"""
                     return expectation.first_forbidden || expectation.first_expected_match || expectation.first_non_ac || null;
                 },
 
+                handleSubmissionFile(event) {
+                    const file = event.target.files && event.target.files[0];
+                    this.submissionFilename = file ? file.name : '';
+                },
+
+                restoreSubmissionCache() {
+                    const cached = this.submissionCache[this.sandboxKey()];
+                    this.submissionResult = cached?.result || null;
+                    this.submissionLogs = cached?.logs || '';
+                    this.submissionVerdict = cached?.verdict || 'PENDING';
+                    this.submissionLastRunAt = cached?.finishedAt || '';
+                },
+
+                runSubmission() {
+                    const file = this.$refs.submissionFile?.files?.[0];
+                    if (!file || !this.currentSubtitle || this.selectedIdx === null) return;
+                    const form = new FormData();
+                    form.append('subtitle', this.currentSubtitle);
+                    form.append('index', String(this.selectedIdx));
+                    form.append('source', file, file.name);
+                    const jobKey = this.sandboxKey();
+                    this.submissionRunning = true;
+                    this.submissionResult = null;
+                    this.submissionLogs = '';
+                    this.submissionVerdict = 'PENDING';
+                    this.submissionLogOpen = true;
+                    fetch('/api/submission/run', { method: 'POST', body: form })
+                        .then(async res => ({ ok: res.ok, data: await res.json() }))
+                        .then(({ ok, data }) => {
+                            if (!ok || !data.success) throw new Error(data.error || 'submission failed to start');
+                            this.submissionJobId = data.job_id;
+                            this.submissionJobKey = jobKey;
+                            this.submissionCache[jobKey] = { result: null, logs: '', verdict: 'PENDING', finishedAt: '' };
+                            this.pollSubmissionJob(data.job_id, jobKey);
+                        })
+                        .catch(error => {
+                            this.submissionRunning = false;
+                            this.submissionVerdict = 'FAIL';
+                            this.showToast(error.message || '提交失败', true, 6000);
+                        });
+                },
+
+                pollSubmissionJob(jobId = this.submissionJobId, jobKey = this.submissionJobKey) {
+                    if (!jobId || !jobKey) return;
+                    fetch(`/api/submission/job/${jobId}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            if (!data.success) throw new Error(data.error || 'submission job missing');
+                            const verdict = data.verdict || data.result?.submission?.verdict || 'PENDING';
+                            const cacheEntry = {
+                                result: data.result || null,
+                                logs: data.logs || '',
+                                verdict,
+                                finishedAt: this.submissionCache[jobKey]?.finishedAt || '',
+                            };
+                            this.submissionCache[jobKey] = cacheEntry;
+                            if (this.sandboxKey() === jobKey) {
+                                this.submissionLogs = cacheEntry.logs;
+                                this.submissionResult = cacheEntry.result;
+                                this.submissionVerdict = verdict;
+                            }
+                            if (data.status === 'queued' || data.status === 'running') {
+                                this._submissionPollTimer = setTimeout(() => this.pollSubmissionJob(jobId, jobKey), 700);
+                                return;
+                            }
+                            this.submissionRunning = false;
+                            const finishedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+                            this.submissionCache[jobKey].finishedAt = finishedAt;
+                            if (this.sandboxKey() === jobKey) this.submissionLastRunAt = finishedAt;
+                            if (data.status === 'completed') this.showToast(`提交评测完成：${verdict}`, verdict !== 'AC');
+                            else this.showToast('提交评测基础设施失败', true, 6000);
+                        })
+                        .catch(error => {
+                            this.submissionRunning = false;
+                            this.submissionVerdict = 'FAIL';
+                            this.showToast(error.message || '提交任务丢失', true, 6000);
+                        });
+                },
+
+                submissionCompile() {
+                    const items = (this.submissionResult && this.submissionResult.compiles) || [];
+                    return [...items].reverse().find(item => item.kind === 'std') || null;
+                },
+
+                submissionCases() {
+                    return ((this.submissionResult && this.submissionResult.cases) || []).filter(item => item.kind === 'std');
+                },
+
+                submissionStatsText() {
+                    const counts = {};
+                    this.submissionCases().forEach(item => { counts[item.status] = (counts[item.status] || 0) + 1; });
+                    const detail = ['AC', 'WA', 'TLE', 'MLE', 'OLE', 'RE', 'FAIL'].filter(key => counts[key]).map(key => `${key} ${counts[key]}`).join(' · ');
+                    return detail || (this.submissionCompile()?.ok === false ? '编译失败' : '暂无测试点结果');
+                },
+
                 sandboxStatusClass(status) {
                     if (status === 'AC') return 'bg-success/15 text-success';
                     if (status === 'WA') return 'bg-danger/15 text-danger';
                     if (status === 'TLE') return 'bg-gold/15 text-gold';
                     if (status === 'MLE') return 'bg-danger/15 text-danger';
-                    if (status === 'RE' || status === 'FAIL') return 'bg-danger/20 text-danger';
+                    if (status === 'OLE') return 'bg-gold/15 text-gold';
+                    if (status === 'CE' || status === 'RE' || status === 'FAIL') return 'bg-danger/20 text-danger';
                     return 'bg-ink-elevated text-cream-subtle';
                 },
 
                 selectProb(index) {
                     this.selectedIdx = index;
                     this.tagDraft = '';
+                    if (this.$refs.submissionFile) this.$refs.submissionFile.value = '';
+                    this.submissionFilename = '';
+                    this.restoreSubmissionCache();
                     if (this.activePage === 'sandbox') this.refreshSandboxInfo();
                 },
                 
@@ -1775,6 +1963,8 @@ def _apply_sandbox_event(result, event):
         result["limits"] = {
             "time": event.get("time_limit", 1),
             "memory": event.get("memory_limit", 256),
+            "output": event.get("output_limit", 64),
+            "processes": event.get("process_limit", 32),
             "judge_type": event.get("judge_type", "standard"),
             "idle_limit": event.get("idle_limit"),
             "transcript_limit": event.get("transcript_limit"),
@@ -1981,6 +2171,177 @@ def sandbox_run():
 def sandbox_job(job_id):
     with SANDBOX_LOCK:
         job = SANDBOX_JOBS.get(job_id)
+        if not job:
+            return jsonify({"success": False, "error": "job not found"}), 404
+        return jsonify({"success": True, **job})
+
+
+def _submission_verdict(result):
+    submission_compiles = [item for item in (result.get("compiles") or []) if item.get("kind") == "std"]
+    if submission_compiles and not submission_compiles[-1].get("ok"):
+        return "CE"
+    statuses = [item.get("status") for item in (result.get("cases") or []) if item.get("status")]
+    if statuses and all(status == "AC" for status in statuses):
+        return "AC"
+    for status in ("FAIL", "RE", "MLE", "OLE", "TLE", "WA"):
+        if status in statuses:
+            return status
+    return "FAIL" if result.get("final") else "PENDING"
+
+
+def _prune_submission_jobs():
+    if len(SUBMISSION_JOBS) < 100:
+        return
+    finished = sorted(
+        (
+            (job_id, job)
+            for job_id, job in SUBMISSION_JOBS.items()
+            if job.get("status") not in {"queued", "running"}
+        ),
+        key=lambda item: item[1].get("created_at", 0),
+    )
+    for job_id, _ in finished[: max(1, len(SUBMISSION_JOBS) - 99)]:
+        SUBMISSION_JOBS.pop(job_id, None)
+
+
+def _run_submission_job(job_id, subtitle, index, filename, source):
+    with SUBMISSION_SLOTS:
+        with SUBMISSION_LOCK:
+            if job_id not in SUBMISSION_JOBS:
+                return
+            SUBMISSION_JOBS[job_id]["status"] = "running"
+        result = None
+        logs = []
+        try:
+            info = _sandbox_problem_info(subtitle, index)
+            result = _empty_sandbox_result(info)
+            result["submission"] = {
+                "task_id": job_id,
+                "filename": filename,
+                "workspace_cleaned": False,
+            }
+            with SUBMISSION_LOCK:
+                SUBMISSION_JOBS[job_id]["result"] = result
+
+            if not info.get("runnable"):
+                raise ValueError(info.get("reason") or "problem is not runnable")
+
+            with temporary_submission_workspace(Path.cwd(), info["dir"], job_id, filename, source) as prepared:
+                command = [
+                    sys.executable,
+                    str(LOCAL_JUDGE_SCRIPT),
+                    str(prepared.problem_dir),
+                    "--jsonl",
+                    "--no-cache",
+                ]
+                env = os.environ.copy()
+                env["PYTHONUTF8"] = "1"
+                env["PYTHONIOENCODING"] = "utf-8"
+                proc = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=str(Path.cwd()),
+                    env=env,
+                )
+                assert proc.stdout is not None
+                try:
+                    for line in proc.stdout:
+                        raw = line.strip()
+                        if not raw:
+                            continue
+                        try:
+                            event = json.loads(raw)
+                            _apply_sandbox_event(result, event)
+                            logs.append(_sandbox_log_line(event))
+                        except json.JSONDecodeError:
+                            logs.append(raw)
+                        with SUBMISSION_LOCK:
+                            SUBMISSION_JOBS[job_id]["logs"] = "\n".join(logs)
+                            SUBMISSION_JOBS[job_id]["result"] = result
+                finally:
+                    proc.stdout.close()
+                return_code = proc.wait()
+
+            result["submission"]["workspace_cleaned"] = True
+            verdict = _submission_verdict(result)
+            result["submission"]["verdict"] = verdict
+            with SUBMISSION_LOCK:
+                SUBMISSION_JOBS[job_id].update(
+                    status="completed",
+                    verdict=verdict,
+                    returncode=return_code,
+                    logs="\n".join(logs),
+                    result=result,
+                    finished_at=time.time(),
+                )
+        except Exception as exc:
+            if result is not None and result.get("submission"):
+                result["submission"]["workspace_cleaned"] = True
+                result["submission"]["verdict"] = "FAIL"
+            with SUBMISSION_LOCK:
+                SUBMISSION_JOBS[job_id].update(
+                    status="failed",
+                    verdict="FAIL",
+                    logs=("\n".join(logs + [str(exc)])).strip(),
+                    result=result or {"final": {"ok": False, "message": str(exc)}},
+                    finished_at=time.time(),
+                )
+
+
+@app.route('/api/submission/run', methods=['POST'])
+def submission_run():
+    try:
+        if request.content_length and request.content_length > MAX_SUBMISSION_REQUEST_BYTES:
+            return jsonify({"success": False, "error": "upload is too large"}), 413
+        subtitle = request.form.get("subtitle", "")
+        index = int(request.form.get("index", "-1"))
+        upload = request.files.get("source")
+        if not subtitle:
+            return jsonify({"success": False, "error": "Missing subtitle"}), 400
+        if upload is None:
+            return jsonify({"success": False, "error": "Missing source file"}), 400
+        filename = upload.filename or ""
+        source = upload.stream.read(MAX_SOURCE_BYTES + 1)
+        validate_cpp_upload(filename, source)
+        # Resolve the selected problem before accepting the job. This prevents
+        # retaining uploads for invalid or non-runnable selections.
+        info = _sandbox_problem_info(subtitle, index)
+        if not info.get("runnable"):
+            return jsonify({"success": False, "error": info.get("reason") or "problem is not runnable"}), 400
+
+        job_id = uuid.uuid4().hex
+        with SUBMISSION_LOCK:
+            _prune_submission_jobs()
+            SUBMISSION_JOBS[job_id] = {
+                "status": "queued",
+                "verdict": "PENDING",
+                "logs": "",
+                "result": None,
+                "filename": filename,
+                "created_at": time.time(),
+            }
+        Thread(
+            target=_run_submission_job,
+            args=(job_id, subtitle, index, filename, source),
+            daemon=True,
+        ).start()
+        return jsonify({"success": True, "job_id": job_id, "status": "queued"})
+    except (TypeError, ValueError) as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route('/api/submission/job/<job_id>')
+def submission_job(job_id):
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        return jsonify({"success": False, "error": "invalid job id"}), 400
+    with SUBMISSION_LOCK:
+        job = SUBMISSION_JOBS.get(job_id)
         if not job:
             return jsonify({"success": False, "error": "job not found"}), 404
         return jsonify({"success": True, **job})

@@ -185,7 +185,9 @@ probhub build L01 --skip-judge
 
 # 7. WebUI 与交付限制
 
-- 当前 Schema v1 WebUI 只用于只读预览和现有沙箱展示，不得通过 WebUI 保存题面或排序。上传代码并仅评测临时提交、且不覆盖题目 `code/` 的功能尚未实现；共享进程控制层只是该功能的基础。
+- Schema v1 WebUI 的临时提交评测只接受 UTF-8 `.cpp`，源码必须进入 `.probhub/submissions/<task-id>/` 独立目录；评测结束后清理，不得覆盖或修改题目原有 `code/`、数据、配置、答案和构建产物。
+- WebUI 上传提交时直接使用“沙箱评测”页；以编译事件、逐测试点事件和最终 verdict 为准，不得把上传代码加入 `solutions.accepted` 或写回 `probhub.yaml`。
+- 当前 WebUI 其他题面编辑和排序能力仍属于 Legacy 界面；Schema v1 的规范源文件应继续通过 Core/CLI 维护。
 - 不得手工增量修改旧 ZIP；必须由 Core 完整重建并验证。
 - 不得提交 `.exe`、沙箱缓存、临时输出或 Typst/WebUI 预览缓存。
 - 遇到错误必须自行定位、修复并重跑相应验证。
