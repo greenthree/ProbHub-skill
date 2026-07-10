@@ -155,7 +155,41 @@ probhub judge [ID...] [--no-cache]
 1. 编译并运行 Validator。
 2. 编译 `solutions.accepted`、`solutions.brute`、`solutions.wrong`。
 3. 对 `data/sample` 和 `data/secret` 逐点评测。
-4. 验证 accepted 全 AC、brute 不 WA 且被复杂度数据限制、wrong 至少被一个测试点击杀。
+4. 按 `judge.type` 使用标准比较、Checker 或 Interactor。
+5. 根据每个程序的结构化 `expected` 宿命验证状态、目标数据组与禁止状态；未配置时保持 accepted 全 AC、brute 不 WA 且至少 TLE/MLE、wrong 至少一个非 AC 的默认语义。
+
+支持的评测类型：
+
+```yaml
+# 普通题
+judge:
+  type: standard
+  validator: code/validator.cpp
+
+# standard 默认逐行比较；忽略整个输出首尾空白及每行末尾的空格/Tab。
+# 行内空格数量、非首行的行首空白和换行结构仍然必须一致。
+
+# 特判/浮点题
+judge:
+  type: custom
+  validator: code/validator.cpp
+  checker: code/checker.cpp
+
+# 交互题
+judge:
+  type: interactive
+  validator: code/validator.cpp
+  interactor: code/interactor.cpp
+  interactive:
+    idle_limit: 1.0
+    transcript_limit: 65536
+```
+
+交互题 JSONL 额外包含双向 `transcript` 事件和 `timeout_kind: idle|total`；修改交互选项会自动使逐点缓存失效。
+
+Checker/Interactor 的参数协议、testlib 模板和状态映射见 `references/checker-interactor.md`。
+
+数据逻辑分组、`solutions.*[].expected`、默认宿命和首个击杀用例字段见 `references/data-groups-expectations.md`。仅修改分组或宿命会复用逐点缓存，并重新计算断言。
 
 成功最终事件：
 

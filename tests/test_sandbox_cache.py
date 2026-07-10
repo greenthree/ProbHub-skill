@@ -48,6 +48,49 @@ class SandboxCacheTests(unittest.TestCase):
             changed_case = MODULE.testcase_cache_key(first, input_file, answer_file, 1, 256)
             self.assertNotEqual(first_case, changed_case)
 
+            checker_case = MODULE.testcase_cache_key(
+                first,
+                input_file,
+                answer_file,
+                1,
+                256,
+                judge_type="custom",
+                judge_fingerprint="checker-v1",
+            )
+            changed_checker_case = MODULE.testcase_cache_key(
+                first,
+                input_file,
+                answer_file,
+                1,
+                256,
+                judge_type="custom",
+                judge_fingerprint="checker-v2",
+            )
+            self.assertNotEqual(checker_case, changed_checker_case)
+            self.assertNotEqual(first_case, checker_case)
+
+            interactive_short_idle = MODULE.testcase_cache_key(
+                first,
+                input_file,
+                answer_file,
+                1,
+                256,
+                judge_type="interactive",
+                judge_fingerprint="interactor-v1",
+                judge_options_fingerprint="idle=0.2;transcript=4096",
+            )
+            interactive_long_idle = MODULE.testcase_cache_key(
+                first,
+                input_file,
+                answer_file,
+                1,
+                256,
+                judge_type="interactive",
+                judge_fingerprint="interactor-v1",
+                judge_options_fingerprint="idle=1.0;transcript=4096",
+            )
+            self.assertNotEqual(interactive_short_idle, interactive_long_idle)
+
     def test_refresh_mode_bypasses_reads_and_replaces_cache(self):
         with tempfile.TemporaryDirectory() as temp:
             problem = Path(temp) / "A"

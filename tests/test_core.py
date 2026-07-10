@@ -105,6 +105,54 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(status["state"], "stale")
             self.assertIn("source_hash", status["stale_fields"])
 
+    def test_lint_validates_custom_checker_and_interactor_configuration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            root, workspace = load_workspace(root)
+            entry = problem_entries(workspace)[0]
+            config_path = problem / "probhub.yaml"
+
+            _, config = load_problem(root, entry)
+            config["judge"] = {
+                "type": "custom",
+                "validator": "code/validator.cpp",
+                "checker": "code/checker.cpp",
+            }
+            write_yaml(config_path, config)
+            result = lint_workspace(root, workspace)
+            self.assertFalse(result["ok"])
+            self.assertIn("checker not found: code/checker.cpp", result["problems"][0]["errors"])
+
+            (problem / "code/checker.cpp").write_text("int main(){}\n", encoding="utf-8")
+            self.assertTrue(lint_workspace(root, workspace)["ok"])
+
+            config["judge"] = {
+                "type": "interactive",
+                "validator": "code/validator.cpp",
+                "interactor": "code/interactor.cpp",
+            }
+            write_yaml(config_path, config)
+            result = lint_workspace(root, workspace)
+            self.assertFalse(result["ok"])
+            self.assertIn("interactor not found: code/interactor.cpp", result["problems"][0]["errors"])
+
+            (problem / "code/interactor.cpp").write_text("int main(){}\n", encoding="utf-8")
+            self.assertTrue(lint_workspace(root, workspace)["ok"])
+
+            config["judge"]["interactive"] = {"idle_limit": 0, "transcript_limit": -1}
+            write_yaml(config_path, config)
+            result = lint_workspace(root, workspace)
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "judge.interactive.idle_limit must be positive",
+                result["problems"][0]["errors"],
+            )
+            self.assertIn(
+                "judge.interactive.transcript_limit must be a non-negative integer",
+                result["problems"][0]["errors"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
