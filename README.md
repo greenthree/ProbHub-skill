@@ -13,7 +13,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 - **Agent 驱动出题**：内置 [SKILL.md](SKILL.md)，让 Claude Code、Codex 或兼容 Agent 按固定流程完成出题任务。
 - **严谨数据闭环**：自动组织 `std.cpp`、`validator.cpp`、`brute.cpp`、`wrong.cpp`，支持数据逻辑分组、结构化宿命和首个击杀用例，避免用偶然 RE/TLE 误判错解已被正确卡掉。
 - **可复现差分测试**：`probhub stress` 按 seed 反复生成小数据，对拍 accepted 与 brute，并保存首个可 replay 的反例。
-- **时空限制自检**：`local_judge.py` 支持读取 `meta.json`、`domjudge-problem.ini`、`problem.yaml` 中的时间和内存限制，并报告 TLE/MLE/RE/WA/AC。
+- **跨平台资源控制**：共享 `probhub/process_control.py` 为普通程序、Checker、Validator、编译器、Interactor 和 stress 提供完整进程树清理、时间/内存/输出/进程数限制，并报告 TLE/MLE/OLE/RE/WA/AC。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 微调题面**：提供 Flask 控制台，支持题目排序、Markdown 预览、样例编辑、引言 Quote、时空限制编辑、全卷编译和 PDF 分发。
 - **可重复构建 Core**：Workspace Schema v1、源文件哈希、构建 Manifest、过期检测和统一 `probhub` CLI。
@@ -231,7 +231,8 @@ python scripts/local_judge.py <problem_dir> --jsonl
 - `judge.type: standard` 的普通题按行比较，允许每行末尾多余的空格或 Tab；行内空格和内部换行仍严格检查。
 - `judge.type: custom` 时，使用 `code/checker.cpp` 按 DOMjudge/testlib 协议判定输出。
 - `judge.type: interactive` 时，将选手程序与 `code/interactor.cpp` 双向连接，执行总时间/空闲超时，并记录有大小上限的双向 Transcript。
-- 每个测试点的时间和内存状态，以及 Checker/Interactor 判定信息。
+- 每个测试点的时间、内存、输出和进程数状态，以及 Checker/Interactor 判定信息；选手输出超过限制时报告 `OLE`。
+- 普通程序、Checker、Validator、编译器、Interactor 与 stress 统一使用完整进程树控制；即使父进程正常退出，残留后代也会被清理。
 - `data.groups` 与 `solutions.*[].expected` 定义的数据组击杀矩阵、目标/禁止状态和首个相关用例；详见 `references/data-groups-expectations.md`。
 
 ### 沙箱增量缓存
@@ -240,7 +241,7 @@ python scripts/local_judge.py <problem_dir> --jsonl
 
 - C++ 编译缓存按源码、相关头文件、编译参数、编译器和平台指纹失效。
 - Validator 结果按验证器指纹和输入文件内容失效。
-- 程序逐点结果按程序指纹、输入、答案、时限、内存和平台失效。
+- 程序逐点结果按程序指纹、输入、答案、时限、内存、输出上限、进程数上限、平台和沙箱策略失效。
 - 修改单个数据点时，只重新验证和运行受影响的测试点；没有相关改动时，重复沙箱通常只需读取缓存。
 
 缓存文件是本地产物，不应提交。需要排查非确定性程序或强制完整重跑并刷新缓存时使用：
@@ -250,7 +251,27 @@ probhub judge L01 --no-cache
 probhub build L01 --no-cache
 ```
 
-JSONL 的 `compile`、`validator`、`case` 事件包含 `cached` 字段，结束前会输出 `type=cache` 的命中统计。WebUI 使用同一协议展示缓存状态。
+JSONL 的 `compile`、`validator`、`case` 事件包含 `cached` 字段，结束前会输出 `type=cache` 的命中统计。WebUI 使用同一协议展示缓存状态。资源控制语义变化时缓存 Schema 会升级，旧结果不会绕过新的 OLE、进程树或进程数规则。
+
+### 进程与资源控制
+
+题目级资源限制写在 `probhub.yaml`：
+
+```yaml
+limits:
+  time: 1       # 秒
+  memory: 256   # MiB
+  output: 64    # MiB，默认 64
+  processes: 32 # 整棵进程树，默认 32
+```
+
+- `limits.output` 限制一次受控运行写出的 stdout 与 stderr 总量；超过后立即终止完整进程树、截断已保存的诊断文件，并把选手程序判为 `OLE`。Checker、Validator、Generator、编译器或 Interactor 自身超限属于题目基础设施失败。
+- `limits.processes` 限制整棵进程树。普通父进程即使先正常退出，ProbHub 仍会清理遗留后代。
+- Windows 使用 Job Object 约束进程树、总内存和活动进程数；无法建立 Job 时 fail closed，不会降级为无保护执行。
+- Linux/Unix 使用独立进程组、`RLIMIT_AS` 和低频 `/proc` 进程树监控；超时、超限、异常和正常退出路径都会清理后代。
+- 编译器、Validator、Checker 和 stress 工具使用独立的内部诊断上限，但共享相同的进程树控制。
+
+完整状态语义、平台差异、截断行为和缓存规则见 [`references/process-control.md`](references/process-control.md)。
 
 ### 差分测试（stress）
 
@@ -277,17 +298,17 @@ probhub stress L01 --replay latest
 
 - `standard` 题沿用普通沙箱的逐行比较规则，允许整个输出首尾空白和每行行尾空格/Tab。
 - `custom` 题把 accepted 输出作为 jury answer、brute 输出作为 contestant output，交给 `judge.checker` 判定。
-- 首个不匹配、程序异常或工具失败会停止测试，并写入 `<problem>/.probhub/stress/`；结果包含可直接执行的 `replay_command`。
+- 首个不匹配、程序异常或工具失败会停止测试，并写入 `<problem>/.probhub/stress/`；结果包含可直接执行的 `replay_command`。Generator、Validator、accepted、brute、Checker 和编译器都使用同一进程树控制，输出超限会被截断并记录为 `OLE` 或基础设施失败。
 - `interactive` 暂不支持 stress。
 - 全部轮次或 replay 通过时退出码为 `0`；反例、基础设施失败、配置或编译错误为 `1`；Ctrl+C 为 `130`。
 
 完整 Schema、Generator 协议、反例目录、失败分类与 replay 语义见 [`references/stress.md`](references/stress.md)。
 
-时空限制读取优先级：
+资源限制读取优先级：
 
-1. `<problem_dir>/probhub.yaml` 中的 `limits.time` 和 `limits.memory`
-2. Legacy 工作区的 `meta.json`、`domjudge-problem.ini` 与 `problem.yaml`
-3. 默认 `1s / 256MB`
+1. `<problem_dir>/probhub.yaml` 中的 `limits.time`、`limits.memory`、`limits.output` 和 `limits.processes`
+2. Legacy 工作区的 `meta.json`、`domjudge-problem.ini` 与 `problem.yaml` 提供时间和内存；输出与进程数仍使用默认值
+3. 默认 `1s / 256MiB / 64MiB output / 32 processes`
 
 ---
 
@@ -355,6 +376,18 @@ python launch_ui.py
 - 将每题 `problem.pdf` 分发回题目目录，并同步注入已有 zip。
 - 运行本地沙箱并展示逐点结果。
 
+WebUI 支持在“沙箱评测”页上传单个 UTF-8 `.cpp` 文件并直接评测：
+
+- 源码大小上限为 `1 MiB`，每次提交使用唯一 task ID；
+- 源码、临时配置、编译产物和输出只写入 `.probhub/submissions/<task-id>/`；
+- 评测复用普通题、Custom Checker 和交互题的同一套 Core 与进程控制；
+- 页面展示编译诊断、逐测试点 AC/WA/TLE/MLE/OLE/RE 和汇总结果；
+- 排队中或运行中的任务可以取消；取消请求先通知评测 Core，超时后再强制清理监督进程及其后代进程树；
+- 任务结束或取消后自动删除临时工作区；服务启动和接受新提交时也会清理超过 24 小时的安全 UUID 遗留目录；
+- 题目原有 `code/`、数据、配置、答案和构建产物不会被覆盖。
+
+WebUI 的上传任务由后台线程监督独立评测子进程。`CANCELLING` 表示正在协作停止，`CANCELLED` 表示进程树与临时工作区已完成清理。请勿把上传源码写入题目目录或将临时提交目录加入版本控制。
+
 ---
 
 ## DOMjudge 打包约定
@@ -419,6 +452,7 @@ ProbHub-skill/
 │   ├── cli.md                # Workspace Schema v1 完整 CLI 手册
 │   ├── checker-interactor.md # Checker 与交互题协议和模板
 │   ├── stress.md             # 差分测试 Schema、协议、反例与 replay
+│   ├── process-control.md    # 进程树、资源限制、OLE 与平台语义
 │   ├── legacy-workflow.md    # 无 Schema v1 时按需加载的旧工作流
 │   ├── cyaron.md             # CYaRon 快速参考
 │   ├── fast.md               # 简单 C++ 数据生成模板
@@ -427,6 +461,8 @@ ProbHub-skill/
 │   ├── main.typ              # Typst 主入口模板
 │   ├── problems.typ          # Typst 题目列表入口
 │   └── problems-sample.json  # 单题元数据样例
+├── probhub/
+│   └── process_control.py     # 跨平台共享进程与资源控制
 ├── scripts/
 │   ├── add_problem.py
 │   ├── extract_new_problem.py

@@ -4,7 +4,6 @@ import os
 import platform
 import secrets
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -15,6 +14,7 @@ from pathlib import Path
 from .errors import ProbHubError
 from .io import write_json
 from .output_compare import compare_standard_output
+from .process_control import DEFAULT_PROCESS_LIMIT, run_managed_to_files
 
 
 DEFAULT_ROUNDS = 1000
@@ -98,6 +98,16 @@ def _stress_config(problem_dir, config):
     tool_timeout = _positive_number(
         stress.get("tool_timeout", DEFAULT_TOOL_TIMEOUT), "stress.tool_timeout"
     )
+    limits = config.get("limits") or {}
+    output_limit = limits.get("output", 64)
+    process_limit = limits.get("processes", DEFAULT_PROCESS_LIMIT)
+    memory_limit = limits.get("memory", 256)
+    if not _is_int(output_limit) or output_limit <= 0:
+        raise ProbHubError("limits.output must be a positive integer before running stress")
+    if not _is_int(process_limit) or process_limit <= 0:
+        raise ProbHubError("limits.processes must be a positive integer before running stress")
+    if not _is_int(memory_limit) or memory_limit <= 0:
+        raise ProbHubError("limits.memory must be a positive integer before running stress")
     return {
         "judge_type": judge_type,
         "generator_rel": str(generator_rel) if generator_rel else None,
@@ -114,6 +124,9 @@ def _stress_config(problem_dir, config):
         "rounds": configured_rounds,
         "time_limit": time_limit,
         "tool_timeout": tool_timeout,
+        "memory_limit": memory_limit,
+        "output_limit": output_limit,
+        "process_limit": process_limit,
     }
 
 
@@ -138,17 +151,22 @@ def _compile_cpp(source, output, role):
         command.append("-static")
         if role == "validator":
             command.append("-DFOR_LINUX")
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        raise ProbHubError(
-            f"stress {role} failed to compile: {source}\n{result.stderr.strip()}"
+    with tempfile.TemporaryDirectory(prefix="probhub-stress-compile-") as temp:
+        stdout_path = Path(temp) / "compiler.out"
+        stderr_path = Path(temp) / "compiler.stderr"
+        result = run_managed_to_files(
+            command,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            timeout=60.0,
+            memory_limit_mb=2048,
+            output_limit_bytes=8 * 1024 * 1024,
+            process_limit=DEFAULT_PROCESS_LIMIT,
         )
+        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+    if result["reason"] != "completed" or result["returncode"] != 0:
+        detail = stderr.strip() or result["message"] or result["reason"]
+        raise ProbHubError(f"stress {role} failed to compile: {source}\n{detail}")
     return command
 
 
@@ -185,53 +203,79 @@ def _prepare_program(source, build_dir, role):
     }
 
 
-def _run(command, input_data, timeout, cwd):
-    started = time.perf_counter()
+def _run(
+    command,
+    input_data,
+    timeout,
+    cwd,
+    memory_limit=256,
+    output_limit=64,
+    process_limit=DEFAULT_PROCESS_LIMIT,
+):
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     try:
-        result = subprocess.run(
-            command,
-            input=input_data,
-            capture_output=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=env,
-        )
-        elapsed = time.perf_counter() - started
-        stderr = result.stderr or b""
-        if result.returncode != 0:
-            message = stderr.decode("utf-8", errors="replace").strip()
-            return {
-                "status": "RE",
-                "returncode": result.returncode,
-                "time": elapsed,
-                "stdout": result.stdout or b"",
-                "stderr": stderr,
-                "message": message or f"process exited with code {result.returncode}",
-            }
-        return {
-            "status": "AC",
-            "returncode": 0,
-            "time": elapsed,
-            "stdout": result.stdout or b"",
-            "stderr": stderr,
-            "message": "",
+        with tempfile.TemporaryDirectory(prefix="probhub-stress-run-") as temp:
+            stdout_path = Path(temp) / "stdout"
+            stderr_path = Path(temp) / "stderr"
+            result = run_managed_to_files(
+                command,
+                input_data=input_data,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=timeout,
+                memory_limit_mb=memory_limit,
+                output_limit_bytes=int(output_limit * 1024 * 1024),
+                process_limit=process_limit,
+                cwd=cwd,
+                env=env,
+            )
+            stdout = stdout_path.read_bytes() if stdout_path.is_file() else b""
+            stderr = stderr_path.read_bytes() if stderr_path.is_file() else b""
+        reason = result["reason"]
+        status_by_reason = {
+            "time_limit": "TLE",
+            "output_limit": "OLE",
+            "memory_limit": "MLE",
+            "process_limit": "RE",
         }
-    except subprocess.TimeoutExpired as exc:
+        status = status_by_reason.get(reason)
+        if status is None:
+            if result["returncode"] == 0:
+                status = "AC"
+            elif (
+                result["memory_enforced"]
+                and result["memory"] is not None
+                and result["memory"] >= memory_limit * 0.98
+            ):
+                status = "MLE"
+            else:
+                status = "RE"
+        message = result["message"]
+        if not message and status == "RE":
+            decoded = stderr.decode("utf-8", errors="replace").strip()
+            message = decoded or f"process exited with code {result['returncode']}"
         return {
-            "status": "TLE",
-            "returncode": None,
-            "time": timeout,
-            "stdout": exc.stdout or b"",
-            "stderr": exc.stderr or b"",
-            "message": "time limit exceeded",
+            "status": status,
+            "reason": reason,
+            "returncode": result["returncode"],
+            "time": result["time"],
+            "memory": result["memory"],
+            "memory_enforced": result["memory_enforced"],
+            "process_limit_enforced": result["process_limit_enforced"],
+            "stdout": stdout,
+            "stderr": stderr,
+            "message": message or "",
         }
     except OSError as exc:
         return {
             "status": "RE",
+            "reason": "start_error",
             "returncode": None,
-            "time": time.perf_counter() - started,
+            "time": 0.0,
+            "memory": None,
+            "memory_enforced": False,
+            "process_limit_enforced": False,
             "stdout": b"",
             "stderr": str(exc).encode("utf-8", errors="replace"),
             "message": str(exc),
@@ -248,36 +292,48 @@ def _feedback_message(feedback_dir, fallback=""):
     return (fallback or "").strip()
 
 
-def _compare_custom(checker_command, input_path, answer_path, brute_output, timeout, cwd):
+def _compare_custom(
+    checker_command,
+    input_path,
+    answer_path,
+    brute_output,
+    timeout,
+    cwd,
+    memory_limit,
+    output_limit,
+    process_limit,
+):
     feedback_dir = Path(tempfile.mkdtemp(prefix="feedback-", dir=cwd))
     try:
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        try:
-            result = subprocess.run(
-                [*checker_command, str(input_path), str(answer_path), str(feedback_dir)],
-                input=brute_output,
-                capture_output=True,
-                timeout=timeout,
-                cwd=cwd,
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            return {"status": "FAIL", "match": False, "message": "checker timed out", "stderr": b""}
-        except OSError as exc:
-            return {"status": "FAIL", "match": False, "message": str(exc), "stderr": b""}
-        stderr = result.stderr or b""
+        result = _run(
+            [*checker_command, str(input_path), str(answer_path), str(feedback_dir)],
+            brute_output,
+            timeout,
+            cwd,
+            memory_limit,
+            min(output_limit, 8),
+            process_limit,
+        )
+        stderr = result.get("stderr") or b""
         message = _feedback_message(
             feedback_dir, stderr.decode("utf-8", errors="replace")
         )
-        if result.returncode in {0, 42}:
+        if result.get("reason") != "completed":
+            return {
+                "status": "FAIL",
+                "execution_status": result.get("status"),
+                "match": False,
+                "message": message or f"checker {result.get('message') or result.get('reason')}",
+                "stderr": stderr,
+            }
+        if result["returncode"] in {0, 42}:
             return {"status": "AC", "match": True, "message": message, "stderr": stderr}
-        if result.returncode in {1, 2, 43}:
+        if result["returncode"] in {1, 2, 43}:
             return {"status": "WA", "match": False, "message": message, "stderr": stderr}
         return {
             "status": "FAIL",
             "match": False,
-            "message": message or f"checker exited with code {result.returncode}",
+            "message": message or f"checker exited with code {result['returncode']}",
             "stderr": stderr,
         }
     finally:
@@ -297,6 +353,9 @@ def _comparison(configured, commands, round_dir, input_data, accepted_output, br
             brute_output,
             configured["tool_timeout"],
             round_dir,
+            configured["memory_limit"],
+            configured["output_limit"],
+            configured["process_limit"],
         )
     matched, message = compare_standard_output(
         accepted_output.decode("utf-8", errors="replace"),
@@ -319,6 +378,9 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
             None,
             configured["tool_timeout"],
             problem_dir,
+            configured["memory_limit"],
+            configured["output_limit"],
+            configured["process_limit"],
         )
         input_data = generator["stdout"]
         if generator["status"] != "AC":
@@ -333,7 +395,8 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
             }
 
     validator = _run(
-        commands["validator"], input_data, configured["tool_timeout"], problem_dir
+        commands["validator"], input_data, configured["tool_timeout"], problem_dir,
+        configured["memory_limit"], configured["output_limit"], configured["process_limit"]
     )
     if validator["status"] != "AC":
         return {
@@ -348,7 +411,8 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
         }
 
     accepted = _run(
-        commands["accepted"], input_data, configured["time_limit"], problem_dir
+        commands["accepted"], input_data, configured["time_limit"], problem_dir,
+        configured["memory_limit"], configured["output_limit"], configured["process_limit"]
     )
     if accepted["status"] != "AC":
         return {
@@ -363,7 +427,10 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
             "generator_args": generator_args,
         }
 
-    brute = _run(commands["brute"], input_data, configured["time_limit"], problem_dir)
+    brute = _run(
+        commands["brute"], input_data, configured["time_limit"], problem_dir,
+        configured["memory_limit"], configured["output_limit"], configured["process_limit"]
+    )
     if brute["status"] != "AC":
         return {
             "ok": False,
@@ -560,6 +627,9 @@ def _public_run(result):
         public["time"] = round(float(result.get("time", 0)), 6)
     if "match" in result:
         public["match"] = bool(result.get("match"))
+    for key in ("reason", "memory", "memory_enforced", "process_limit_enforced", "execution_status"):
+        if key in result:
+            public[key] = result.get(key)
     return public
 
 

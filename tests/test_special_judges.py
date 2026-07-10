@@ -42,7 +42,7 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
             "schema_version": 1,
             "id": "A",
             "name": "Special",
-            "limits": {"time": 2, "memory": 256},
+            "limits": {"time": 2, "memory": 256, "output": 1, "processes": 8},
             "judge": {"validator": "code/validator.cpp", **judge},
             "solutions": {
                 "accepted": ["code/std.cpp"],
@@ -71,6 +71,33 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
         )
         events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         return result, events
+
+
+    def test_standard_output_limit_returns_ole(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {"type": "standard"},
+                """
+                #include <iostream>
+                int main(){ for (int i = 0; i < 2000000; ++i) std::cout << 'x'; }
+                """,
+                """
+                #include <iostream>
+                int main(){ std::cout << 0 << '\n'; }
+                """,
+                {},
+            )
+            result, events = self.run_judge(problem)
+            self.assertNotEqual(result.returncode, 0)
+            case = next(
+                event for event in events
+                if event.get("type") == "case" and event.get("kind") == "std"
+            )
+            self.assertEqual(case["status"], "OLE", case)
+            limits = next(event for event in events if event.get("type") == "limits")
+            self.assertEqual(limits["output_limit"], 1)
+            self.assertEqual(limits["process_limit"], 8)
 
     def test_custom_checker_accepts_non_unique_output_and_kills_wrong_solution(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -203,6 +230,98 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
             transcript = next(event for event in events if event.get("type") == "transcript")
             self.assertTrue(transcript["entries"])
             self.assertEqual(transcript["entries"][0]["direction"], "interactor_to_solution")
+
+    def test_interactive_judge_cancellation_cleans_both_processes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            solution_pid_file = temp / "solution.pid"
+            interactor_pid_file = temp / "interactor.pid"
+            problem = self.write_problem(
+                temp,
+                {
+                    "type": "interactive",
+                    "interactor": "code/interactor.cpp",
+                    "interactive": {"idle_limit": 30, "transcript_limit": 4096},
+                },
+                f'''
+                #include <chrono>
+                #include <fstream>
+                #include <thread>
+                #ifdef _WIN32
+                #include <process.h>
+                #define PROBHUB_GETPID _getpid
+                #else
+                #include <unistd.h>
+                #define PROBHUB_GETPID getpid
+                #endif
+                int main() {{
+                    std::ofstream("{solution_pid_file.as_posix()}") << PROBHUB_GETPID() << std::flush;
+                    std::this_thread::sleep_for(std::chrono::seconds(30));
+                }}
+                ''',
+                "int main(){return 0;}",
+                {
+                    "interactor.cpp": f'''
+                    #include "testlib.h"
+                    #include <chrono>
+                    #include <fstream>
+                    #include <thread>
+                    #ifdef _WIN32
+                    #include <process.h>
+                    #define PROBHUB_GETPID _getpid
+                    #else
+                    #include <unistd.h>
+                    #define PROBHUB_GETPID getpid
+                    #endif
+                    int main(int argc, char** argv) {{
+                        registerInteraction(argc, argv);
+                        std::ofstream("{interactor_pid_file.as_posix()}") << PROBHUB_GETPID() << std::flush;
+                        std::this_thread::sleep_for(std::chrono::seconds(30));
+                    }}
+                    ''',
+                },
+            )
+            config_path = problem / "probhub.yaml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["limits"]["time"] = 30
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+            cancel_file = temp / "cancel.requested"
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PROBHUB_CANCEL_FILE"] = str(cancel_file)
+            proc = subprocess.Popen(
+                [sys.executable, str(LOCAL_JUDGE), str(problem), "--jsonl", "--no-cache", "--cancellable"],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+            )
+            output = ""
+            try:
+                deadline = time.time() + 30
+                while time.time() < deadline and not (solution_pid_file.is_file() and interactor_pid_file.is_file()):
+                    time.sleep(0.05)
+                self.assertTrue(solution_pid_file.is_file(), "interactive solution did not start")
+                self.assertTrue(interactor_pid_file.is_file(), "interactor did not start")
+                solution_pid = int(solution_pid_file.read_text(encoding="utf-8"))
+                interactor_pid = int(interactor_pid_file.read_text(encoding="utf-8"))
+                cancel_file.touch()
+                output, _ = proc.communicate(timeout=15)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            events = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+            self.assertEqual(proc.returncode, 130, output)
+            self.assertEqual(events[-1].get("status"), "cancelled", events[-1])
+            for pid in (solution_pid, interactor_pid):
+                deadline = time.time() + 5
+                while JUDGE_MODULE._process_alive(pid) and time.time() < deadline:
+                    time.sleep(0.05)
+                self.assertFalse(JUDGE_MODULE._process_alive(pid), f"interactive process {pid} survived cancellation")
 
     def test_process_tree_termination_kills_spawned_descendant(self):
         with tempfile.TemporaryDirectory() as temp:

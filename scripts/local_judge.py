@@ -21,17 +21,44 @@ if PACKAGE_ROOT in sys.path:
 sys.path.insert(0, PACKAGE_ROOT)
 
 from probhub.output_compare import compare_standard_output, normalize_standard_output
+from probhub.process_control import (
+    DEFAULT_PROCESS_LIMIT,
+    ProcessCancelled,
+    cancellation_requested,
+    close_windows_handle as _close_windows_handle,
+    process_alive as _process_alive,
+    process_tree_metrics,
+    run_managed_to_files,
+    spawn_managed,
+    terminate_process as _terminate_process,
+    unix_preexec_memory_limit as _unix_preexec_memory_limit,
+    wait_managed,
+    windows_assign_job as _windows_assign_job,
+    windows_assign_job as _windows_assign_job_memory_limit,
+    windows_query_job_peak_memory as _windows_query_job_peak_memory,
+)
 
 REFERENCES_DIR = os.path.join(PACKAGE_ROOT, "references")
 DEFAULT_TIME_LIMIT = 1.0
 DEFAULT_MEMORY_LIMIT = 256
+DEFAULT_OUTPUT_LIMIT = 64
 PROTOCOL_NAME = "probhub.local_judge"
 PROTOCOL_VERSION = 1
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 CACHE_FILENAME = "sandbox-cache-v1.json"
 CACHE_LIMITS = {"validator": 4000, "case": 12000}
 _COMPILER_IDENTITY = None
 _FILE_DIGEST_CACHE = {}
+
+
+def _cancel_signal_handler(_signum, _frame):
+    raise ProcessCancelled("execution cancelled")
+
+
+def install_cancellation_handlers():
+    signal.signal(signal.SIGTERM, _cancel_signal_handler)
+    if platform.system() == "Windows" and hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _cancel_signal_handler)
 
 
 def _hash_parts(*parts):
@@ -298,20 +325,41 @@ def compile_cpp(
             # that behavior so Git-normalized test data is validated consistently.
             flags.append("-DFOR_LINUX")
     try:
-        ret = subprocess.run(flags, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        ok = ret.returncode == 0
+        with tempfile.TemporaryDirectory(prefix="probhub-compile-") as temp:
+            stdout_path = os.path.join(temp, "compiler.out")
+            stderr_path = os.path.join(temp, "compiler.stderr")
+            ret = run_managed_to_files(
+                flags,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=60.0,
+                memory_limit_mb=2048,
+                output_limit_bytes=8 * 1024 * 1024,
+                process_limit=DEFAULT_PROCESS_LIMIT,
+            )
+            try:
+                stderr = open(stderr_path, "r", encoding="utf-8", errors="replace").read()
+            except OSError:
+                stderr = ""
+        ok = ret["reason"] == "completed" and ret["returncode"] == 0
+        if ret["reason"] != "completed":
+            stderr = (stderr + "\n" + (ret["message"] or ret["reason"])).strip()
         reporter.event(
             "compile",
             kind=kind or "unknown",
             file=file_name,
             ok=ok,
-            stderr=ret.stderr,
+            stderr=stderr,
             cached=False,
         )
         if not ok:
             if cache:
                 cache.delete("compile", cache_key)
-            reporter.text(f"[-] Compile failed:\n{ret.stderr}")
+            try:
+                os.remove(out_bin)
+            except FileNotFoundError:
+                pass
+            reporter.text(f"[-] Compile failed:\n{stderr}")
             return False
         if cache:
             cache.set(
@@ -398,16 +446,16 @@ def _expected_defaults(kind):
         return {
             "status": ["AC"],
             "all": True,
-            "forbid": ["WA", "TLE", "MLE", "RE", "FAIL"],
+            "forbid": ["WA", "TLE", "MLE", "OLE", "RE", "FAIL"],
         }
     if kind == "brute":
         return {
-            "status": ["TLE", "MLE"],
+            "status": ["TLE", "MLE", "OLE"],
             "all": False,
             "forbid": ["WA", "FAIL"],
         }
     return {
-        "status": ["WA", "TLE", "MLE", "RE"],
+        "status": ["WA", "TLE", "MLE", "OLE", "RE"],
         "all": False,
         "forbid": ["FAIL"],
     }
@@ -558,174 +606,11 @@ def read_problem_limits(prob_dir, config=None):
     return max(time_limit, 0.1), max(memory_limit, 1)
 
 
-def _unix_preexec_memory_limit(memory_limit_mb):
-    if platform.system() == "Windows":
-        return None
-    try:
-        import resource
-    except Exception:
-        return None
-
-    def apply_limit():
-        limit_bytes = int(memory_limit_mb * 1024 * 1024)
-        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
-
-    return apply_limit
-
-
-def _windows_assign_job(proc, memory_limit_mb=None):
-    if platform.system() != "Windows":
-        return None
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        SIZE_T = ctypes.c_size_t
-        ULONG_PTR = ctypes.c_size_t
-
-        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_int64),
-                ("PerJobUserTimeLimit", ctypes.c_int64),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", SIZE_T),
-                ("MaximumWorkingSetSize", SIZE_T),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ULONG_PTR),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class IO_COUNTERS(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_uint64),
-                ("WriteOperationCount", ctypes.c_uint64),
-                ("OtherOperationCount", ctypes.c_uint64),
-                ("ReadTransferCount", ctypes.c_uint64),
-                ("WriteTransferCount", ctypes.c_uint64),
-                ("OtherTransferCount", ctypes.c_uint64),
-            ]
-
-        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                ("IoInfo", IO_COUNTERS),
-                ("ProcessMemoryLimit", SIZE_T),
-                ("JobMemoryLimit", SIZE_T),
-                ("PeakProcessMemoryUsed", SIZE_T),
-                ("PeakJobMemoryUsed", SIZE_T),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel32.SetInformationJobObject.argtypes = [
-            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD
-        ]
-        kernel32.SetInformationJobObject.restype = wintypes.BOOL
-        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
-            return None
-
-        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
-        if memory_limit_mb is not None:
-            info.BasicLimitInformation.LimitFlags |= 0x00000200  # JOB_MEMORY
-            info.JobMemoryLimit = int(memory_limit_mb * 1024 * 1024)
-        ok = kernel32.SetInformationJobObject(
-            job, 9, ctypes.byref(info), ctypes.sizeof(info)
-        )
-        if not ok:
-            kernel32.CloseHandle(job)
-            return None
-
-        ok = kernel32.AssignProcessToJobObject(job, int(proc._handle))
-        if not ok:
-            kernel32.CloseHandle(job)
-            return None
-        return job
-    except Exception:
-        return None
-
-
-def _windows_assign_job_memory_limit(proc, memory_limit_mb):
-    return _windows_assign_job(proc, memory_limit_mb)
-
-
-def _windows_query_job_peak_memory(handle):
-    if not handle or platform.system() != "Windows":
-        return None
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        SIZE_T = ctypes.c_size_t
-        ULONG_PTR = ctypes.c_size_t
-
-        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_int64),
-                ("PerJobUserTimeLimit", ctypes.c_int64),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", SIZE_T),
-                ("MaximumWorkingSetSize", SIZE_T),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ULONG_PTR),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class IO_COUNTERS(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_uint64),
-                ("WriteOperationCount", ctypes.c_uint64),
-                ("OtherOperationCount", ctypes.c_uint64),
-                ("ReadTransferCount", ctypes.c_uint64),
-                ("WriteTransferCount", ctypes.c_uint64),
-                ("OtherTransferCount", ctypes.c_uint64),
-            ]
-
-        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                ("IoInfo", IO_COUNTERS),
-                ("ProcessMemoryLimit", SIZE_T),
-                ("JobMemoryLimit", SIZE_T),
-                ("PeakProcessMemoryUsed", SIZE_T),
-                ("PeakJobMemoryUsed", SIZE_T),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.QueryInformationJobObject.argtypes = [
-            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p
-        ]
-        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
-        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        ok = kernel32.QueryInformationJobObject(
-            handle, 9, ctypes.byref(info), ctypes.sizeof(info), None
-        )
-        if not ok:
-            return None
-        peak_bytes = int(info.PeakJobMemoryUsed or info.PeakProcessMemoryUsed or 0)
-        return round(peak_bytes / 1024 / 1024, 2) if peak_bytes else None
-    except Exception:
-        return None
-
-
-def _close_windows_handle(handle):
-    if handle and platform.system() == "Windows":
-        try:
-            import ctypes
-            from ctypes import wintypes
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            kernel32.CloseHandle.restype = wintypes.BOOL
-            kernel32.CloseHandle(handle)
-        except Exception:
-            pass
+def read_problem_output_limit(prob_dir, config=None):
+    limits = (config or {}).get("limits") or {}
+    output_limit = _safe_int(limits.get("output"), DEFAULT_OUTPUT_LIMIT)
+    process_limit = _safe_int(limits.get("processes"), DEFAULT_PROCESS_LIMIT)
+    return max(output_limit, 1), max(process_limit, 1)
 
 
 def _looks_like_memory_error(stderr):
@@ -818,58 +703,56 @@ def run_program_to_file(
     output_file,
     time_limit=DEFAULT_TIME_LIMIT,
     memory_limit=DEFAULT_MEMORY_LIMIT,
+    output_limit=DEFAULT_OUTPUT_LIMIT,
+    process_limit=DEFAULT_PROCESS_LIMIT,
 ):
-    """Run one contestant process and write stdout to output_file."""
-    start = time.time()
-    memory_enforced = False
-    peak_memory_mb = None
-    job_handle = None
-    proc = None
+    """Run one contestant process with tree-wide time, memory and output controls."""
     stderr_path = output_file + ".stderr"
     try:
-        with open(in_file, "rb") as fin, open(output_file, "wb") as fout, open(stderr_path, "wb") as ferr:
-            kwargs = {
-                "stdin": fin,
-                "stdout": fout,
-                "stderr": ferr,
-                "preexec_fn": _unix_preexec_memory_limit(memory_limit),
-            }
-            if platform.system() == "Windows":
-                kwargs.pop("preexec_fn", None)
-            else:
-                kwargs["start_new_session"] = True
-            proc = subprocess.Popen([bin_path], **kwargs)
-            if platform.system() == "Windows":
-                job_handle = _windows_assign_job_memory_limit(proc, memory_limit)
-                memory_enforced = job_handle is not None
-            else:
-                memory_enforced = kwargs.get("preexec_fn") is not None
-            try:
-                proc.wait(timeout=time_limit)
-            except subprocess.TimeoutExpired:
-                peak_memory_mb = _windows_query_job_peak_memory(job_handle)
-                _terminate_process(proc, job_handle)
-                job_handle = None
-                return "TLE", time_limit, peak_memory_mb, memory_enforced, "time limit exceeded"
-
-            run_time = time.time() - start
-            peak_memory_mb = _windows_query_job_peak_memory(job_handle)
-            if proc.returncode != 0:
-                try:
-                    stderr = open(stderr_path, "r", encoding="utf-8", errors="replace").read().strip()
-                except OSError:
-                    stderr = ""
-                status = _failed_status(proc.returncode, stderr, memory_enforced, peak_memory_mb, memory_limit)
-                return status, run_time, peak_memory_mb, memory_enforced, stderr
-            return "AC", run_time, peak_memory_mb, memory_enforced, ""
+        result = run_managed_to_files(
+            [bin_path],
+            input_path=in_file,
+            stdout_path=output_file,
+            stderr_path=stderr_path,
+            timeout=time_limit,
+            memory_limit_mb=memory_limit,
+            output_limit_bytes=int(output_limit * 1024 * 1024),
+            process_limit=process_limit,
+        )
+        try:
+            stderr = open(stderr_path, "r", encoding="utf-8", errors="replace").read().strip()
+        except OSError:
+            stderr = ""
+        reason = result["reason"]
+        if reason == "time_limit":
+            return "TLE", result["time"], result["memory"], result["memory_enforced"], result["message"]
+        if reason == "output_limit":
+            return "OLE", result["time"], result["memory"], result["memory_enforced"], result["message"]
+        if reason == "memory_limit":
+            return "MLE", result["time"], result["memory"], result["memory_enforced"], result["message"]
+        if reason == "process_limit":
+            return "RE", result["time"], result["memory"], result["memory_enforced"], result["message"]
+        if result["returncode"] != 0:
+            status = _failed_status(
+                result["returncode"], stderr, result["memory_enforced"], result["memory"], memory_limit
+            )
+            return status, result["time"], result["memory"], result["memory_enforced"], stderr
+        return "AC", result["time"], result["memory"], result["memory_enforced"], ""
     except OSError as exc:
-        return "RE", time.time() - start, peak_memory_mb, memory_enforced, str(exc)
+        return "RE", 0.0, None, False, str(exc)
     finally:
-        _close_windows_handle(job_handle)
         try:
             os.remove(stderr_path)
         except FileNotFoundError:
             pass
+
+
+def _temporary_output_path(bin_path):
+    descriptor, path = tempfile.mkstemp(
+        prefix=".probhub-output-", suffix=".out", dir=os.path.dirname(bin_path)
+    )
+    os.close(descriptor)
+    return path
 
 
 def run_standard_testcase(
@@ -878,11 +761,13 @@ def run_standard_testcase(
     ans_file,
     time_limit=DEFAULT_TIME_LIMIT,
     memory_limit=DEFAULT_MEMORY_LIMIT,
+    output_limit=DEFAULT_OUTPUT_LIMIT,
+    process_limit=DEFAULT_PROCESS_LIMIT,
 ):
-    output_file = os.path.join(os.path.dirname(bin_path), ".probhub-temp.out")
+    output_file = _temporary_output_path(bin_path)
     try:
         status, elapsed, memory, memory_enforced, message = run_program_to_file(
-            bin_path, in_file, output_file, time_limit, memory_limit
+            bin_path, in_file, output_file, time_limit, memory_limit, output_limit, process_limit
         )
         if status != "AC":
             return status, elapsed, memory, memory_enforced, message
@@ -932,37 +817,55 @@ def run_custom_testcase(
     ans_file,
     time_limit=DEFAULT_TIME_LIMIT,
     memory_limit=DEFAULT_MEMORY_LIMIT,
+    output_limit=DEFAULT_OUTPUT_LIMIT,
+    process_limit=DEFAULT_PROCESS_LIMIT,
 ):
     """Run a DOMjudge/testlib-style output validator.
 
     The validator receives <input> <answer> <feedback-dir> as argv and reads
     contestant output from stdin, matching DOMjudge's custom validation protocol.
     """
-    output_file = os.path.join(os.path.dirname(bin_path), ".probhub-temp.out")
+    output_file = _temporary_output_path(bin_path)
     feedback_dir = tempfile.mkdtemp(prefix=".probhub-feedback-", dir=os.path.dirname(bin_path))
     try:
         status, elapsed, memory, memory_enforced, message = run_program_to_file(
-            bin_path, in_file, output_file, time_limit, memory_limit
+            bin_path, in_file, output_file, time_limit, memory_limit, output_limit, process_limit
         )
         if status != "AC":
             return status, elapsed, memory, memory_enforced, message
+        checker_stdout = output_file + ".checker.out"
+        checker_stderr = output_file + ".checker.stderr"
         try:
-            with open(output_file, "rb") as contestant_output:
-                checker = subprocess.run(
-                    [checker_bin, in_file, ans_file, feedback_dir],
-                    stdin=contestant_output,
-                    capture_output=True,
-                    text=False,
-                    timeout=max(5.0, float(time_limit)),
-                )
-            stderr = checker.stderr.decode("utf-8", errors="replace")
+            checker = run_managed_to_files(
+                [checker_bin, in_file, ans_file, feedback_dir],
+                input_path=output_file,
+                stdout_path=checker_stdout,
+                stderr_path=checker_stderr,
+                timeout=max(5.0, float(time_limit)),
+                memory_limit_mb=memory_limit,
+                output_limit_bytes=min(int(output_limit * 1024 * 1024), 8 * 1024 * 1024),
+                process_limit=process_limit,
+            )
+            try:
+                stderr = open(checker_stderr, "r", encoding="utf-8", errors="replace").read()
+            except OSError:
+                stderr = ""
             checker_message = _feedback_message(feedback_dir, stderr)
-            checker_status, checker_message = _checker_result(checker.returncode, checker_message)
+            if checker["reason"] != "completed":
+                detail = checker["message"] or checker["reason"].replace("_", " ")
+                return "FAIL", elapsed, memory, memory_enforced, f"checker {detail}"
+            checker_status, checker_message = _checker_result(
+                checker["returncode"], checker_message
+            )
             return checker_status, elapsed, memory, memory_enforced, checker_message
-        except subprocess.TimeoutExpired:
-            return "FAIL", elapsed, memory, memory_enforced, "checker timed out"
         except OSError as exc:
             return "FAIL", elapsed, memory, memory_enforced, f"checker failed to start: {exc}"
+        finally:
+            for file_name in (checker_stdout, checker_stderr):
+                try:
+                    os.remove(file_name)
+                except FileNotFoundError:
+                    pass
     finally:
         for _ in range(20):
             try:
@@ -974,7 +877,7 @@ def run_custom_testcase(
                 time.sleep(0.05)
         shutil.rmtree(feedback_dir, ignore_errors=True)
 
-def _pump_interactive_stream(source, destination, direction, transcript, activity):
+def _pump_interactive_stream(source, destination, direction, transcript, activity, traffic):
     """Forward bytes while recording a bounded transcript and last activity time."""
     try:
         while True:
@@ -982,6 +885,10 @@ def _pump_interactive_stream(source, destination, direction, transcript, activit
             if not chunk:
                 break
             activity["last"] = time.monotonic()
+            traffic[direction] = traffic.get(direction, 0) + len(chunk)
+            if traffic[direction] > traffic["limit"]:
+                traffic["exceeded"] = direction
+                break
             if transcript["bytes"] < transcript["limit"]:
                 remaining = transcript["limit"] - transcript["bytes"]
                 saved = chunk[:remaining]
@@ -1028,6 +935,8 @@ def run_interactive_testcase(
     memory_limit=DEFAULT_MEMORY_LIMIT,
     idle_limit=None,
     transcript_limit=65536,
+    output_limit=DEFAULT_OUTPUT_LIMIT,
+    process_limit=DEFAULT_PROCESS_LIMIT,
 ):
     """Connect contestant and interactor with transcript, idle and total deadlines."""
     start = time.time()
@@ -1035,6 +944,8 @@ def run_interactive_testcase(
     idle_limit = max(float(idle_limit if idle_limit is not None else min(time_limit, 2.0)), 0.1)
     transcript = {"entries": [], "bytes": 0, "limit": max(int(transcript_limit), 0), "truncated": False}
     activity = {"last": monotonic_start}
+    traffic = {"limit": int(output_limit * 1024 * 1024), "exceeded": None}
+    last_resource_sample = monotonic_start
     solution = None
     interactor = None
     solution_job = None
@@ -1068,8 +979,10 @@ def run_interactive_testcase(
 
             solution = subprocess.Popen([bin_path], **solution_kwargs)
             if platform.system() == "Windows":
-                solution_job = _windows_assign_job_memory_limit(solution, memory_limit)
-                memory_enforced = solution_job is not None
+                solution_job = _windows_assign_job_memory_limit(solution, memory_limit, process_limit)
+                if solution_job is None:
+                    raise OSError("Windows Job Object containment is unavailable for solution")
+                memory_enforced = True
             else:
                 memory_enforced = solution_kwargs.get("preexec_fn") is not None
             interactor = subprocess.Popen(
@@ -1077,17 +990,19 @@ def run_interactive_testcase(
                 **interactor_kwargs,
             )
             if platform.system() == "Windows":
-                interactor_job = _windows_assign_job(interactor)
+                interactor_job = _windows_assign_job(interactor, None, process_limit)
+                if interactor_job is None:
+                    raise OSError("Windows Job Object containment is unavailable for interactor")
 
             threads = [
                 threading.Thread(
                     target=_pump_interactive_stream,
-                    args=(solution.stdout, interactor.stdin, "solution_to_interactor", transcript, activity),
+                    args=(solution.stdout, interactor.stdin, "solution_to_interactor", transcript, activity, traffic),
                     daemon=True,
                 ),
                 threading.Thread(
                     target=_pump_interactive_stream,
-                    args=(interactor.stdout, solution.stdin, "interactor_to_solution", transcript, activity),
+                    args=(interactor.stdout, solution.stdin, "interactor_to_solution", transcript, activity, traffic),
                     daemon=True,
                 ),
             ]
@@ -1096,7 +1011,50 @@ def run_interactive_testcase(
 
             deadline = monotonic_start + float(time_limit)
             while solution.poll() is None or interactor.poll() is None:
+                if cancellation_requested():
+                    raise ProcessCancelled("execution cancelled")
                 now = time.monotonic()
+                resource_status = None
+                resource_message = ""
+                exceeded = traffic.get("exceeded")
+                if exceeded == "solution_to_interactor":
+                    resource_status, resource_message = "OLE", "interactive output limit exceeded"
+                elif exceeded == "interactor_to_solution":
+                    resource_status, resource_message = "FAIL", "interactor output limit exceeded"
+                try:
+                    if os.path.getsize(solution_stderr) > traffic["limit"]:
+                        resource_status, resource_message = "OLE", "interactive stderr limit exceeded"
+                    if os.path.getsize(interactor_stderr) > traffic["limit"]:
+                        resource_status, resource_message = "FAIL", "interactor stderr limit exceeded"
+                except OSError:
+                    pass
+                if platform.system() != "Windows" and now - last_resource_sample >= 0.05:
+                    last_resource_sample = now
+                    solution_count, solution_memory = process_tree_metrics(solution.pid)
+                    if solution_memory is not None:
+                        peak_memory_mb = max(peak_memory_mb or 0.0, solution_memory)
+                    if solution_memory is not None and solution_memory >= memory_limit:
+                        resource_status, resource_message = "MLE", "memory limit exceeded"
+                    elif solution_count is not None and solution_count > process_limit:
+                        resource_status, resource_message = "RE", "process limit exceeded"
+                    interactor_count, _ = process_tree_metrics(interactor.pid)
+                    if interactor_count is not None and interactor_count > process_limit:
+                        resource_status, resource_message = "FAIL", "interactor process limit exceeded"
+                if resource_status:
+                    _terminate_process(solution, solution_job)
+                    solution_job = None
+                    _terminate_process(interactor, interactor_job)
+                    interactor_job = None
+                    for thread in threads:
+                        thread.join(timeout=1)
+                    return _interactive_result(
+                        resource_status,
+                        time.time() - start,
+                        peak_memory_mb,
+                        memory_enforced,
+                        resource_message,
+                        transcript,
+                    )
                 timeout_kind = None
                 if now >= deadline:
                     timeout_kind = "total"
@@ -1191,6 +1149,8 @@ def run_testcase(
     ans_file,
     time_limit=DEFAULT_TIME_LIMIT,
     memory_limit=DEFAULT_MEMORY_LIMIT,
+    output_limit=DEFAULT_OUTPUT_LIMIT,
+    process_limit=DEFAULT_PROCESS_LIMIT,
     judge_type="standard",
     judge_bin=None,
     idle_limit=None,
@@ -1198,7 +1158,7 @@ def run_testcase(
 ):
     if judge_type == "custom":
         status, elapsed, memory, memory_enforced, message = run_custom_testcase(
-            bin_path, judge_bin, in_file, ans_file, time_limit, memory_limit
+            bin_path, judge_bin, in_file, ans_file, time_limit, memory_limit, output_limit, process_limit
         )
         return status, elapsed, memory, memory_enforced, message, {}
     if judge_type == "interactive":
@@ -1211,26 +1171,39 @@ def run_testcase(
             memory_limit,
             idle_limit=idle_limit,
             transcript_limit=transcript_limit,
+            output_limit=output_limit,
+            process_limit=process_limit,
         )
     status, elapsed, memory, memory_enforced, message = run_standard_testcase(
-        bin_path, in_file, ans_file, time_limit, memory_limit
+        bin_path, in_file, ans_file, time_limit, memory_limit, output_limit, process_limit
     )
     return status, elapsed, memory, memory_enforced, message, {}
 
-def run_validator(val_bin, in_file):
-    """Validate input using Linux-style LF endings on every host."""
+def run_validator(val_bin, in_file, timeout=5.0):
+    """Validate LF-normalized input under the shared process-tree controller."""
     try:
         with open(in_file, "rb") as fin:
             data = fin.read().replace(b"\r\n", b"\n")
-        ret = subprocess.run(
-            [val_bin],
-            input=data,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        stderr = ret.stderr.decode("utf-8", errors="replace").strip()
-        return ret.returncode == 0, stderr
+        with tempfile.TemporaryDirectory(prefix="probhub-validator-") as temp:
+            stdout_path = os.path.join(temp, "validator.out")
+            stderr_path = os.path.join(temp, "validator.stderr")
+            result = run_managed_to_files(
+                [val_bin],
+                input_data=data,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=timeout,
+                memory_limit_mb=512,
+                output_limit_bytes=8 * 1024 * 1024,
+                process_limit=DEFAULT_PROCESS_LIMIT,
+            )
+            try:
+                stderr = open(stderr_path, "r", encoding="utf-8", errors="replace").read().strip()
+            except OSError:
+                stderr = ""
+            if result["reason"] != "completed":
+                return False, result["message"] or result["reason"].replace("_", " ")
+            return result["returncode"] == 0, stderr
     except OSError as exc:
         return False, str(exc)
 
@@ -1383,11 +1356,14 @@ def finish(reporter, ok, message, exit_code, result_code=None):
 def main():
     jsonl = "--jsonl" in sys.argv
     no_cache = "--no-cache" in sys.argv
-    args = [arg for arg in sys.argv[1:] if arg not in {"--jsonl", "--no-cache"}]
+    cancellable = "--cancellable" in sys.argv
+    args = [arg for arg in sys.argv[1:] if arg not in {"--jsonl", "--no-cache", "--cancellable"}]
     reporter = Reporter(jsonl)
+    if cancellable:
+        install_cancellation_handlers()
 
     if len(args) != 1:
-        reporter.text("Usage: python scripts/local_judge.py <problem_dir> [--jsonl] [--no-cache]")
+        reporter.text("Usage: python scripts/local_judge.py <problem_dir> [--jsonl] [--no-cache] [--cancellable]")
         finish(reporter, False, "Invalid arguments", 1)
 
     prob_dir = args[0]
@@ -1405,13 +1381,17 @@ def main():
         finish(reporter, False, "configured sample and secret data directories not found", 1)
 
     time_limit, memory_limit = read_problem_limits(prob_dir, config)
+    output_limit, process_limit = read_problem_output_limit(prob_dir, config)
     testcases = collect_testcases(prob_dir, config)
     if not testcases:
         finish(reporter, False, "No .in test cases found under data/sample or data/secret", 1)
 
     reporter.text("\n" + "=" * 50)
     reporter.text("ProbHub Validation Sandbox")
-    reporter.text(f"Limits: {time_limit:g}s / {memory_limit}MB")
+    reporter.text(
+        f"Limits: {time_limit:g}s / {memory_limit}MB / {output_limit}MB output / "
+        f"{process_limit} processes"
+    )
     reporter.text(
         f"Cases: {sum(1 for t in testcases if t['suite'] == 'sample')} sample / "
         f"{sum(1 for t in testcases if t['suite'] == 'secret')} secret"
@@ -1427,11 +1407,15 @@ def main():
         judge_type,
         f"{idle_limit:.9g}",
         transcript_limit,
+        output_limit,
+        process_limit,
     )
     reporter.event(
         "limits",
         time_limit=time_limit,
         memory_limit=memory_limit,
+        output_limit=output_limit,
+        process_limit=process_limit,
         judge_type=judge_type,
         idle_limit=idle_limit if judge_type == "interactive" else None,
         transcript_limit=transcript_limit if judge_type == "interactive" else None,
@@ -1488,7 +1472,7 @@ def main():
                     )
             if all_ok:
                 reporter.text("[+] Validator: ALL PASS")
-    elif jsonl:
+    elif jsonl and (validator_entry or val_cpp):
         validator_name = _entry_file(validator_entry) or display_problem_path(prob_dir, val_cpp)
         reporter.event(
             "compile",
@@ -1556,7 +1540,7 @@ def main():
     for kind, progs in solutions.items():
         for prog_name, bin_path, fingerprint, expected in progs:
             reporter.text(f"\nEvaluating: {prog_name}")
-            stats = {"AC": 0, "WA": 0, "TLE": 0, "RE": 0, "MLE": 0, "FAIL": 0}
+            stats = {"AC": 0, "WA": 0, "TLE": 0, "RE": 0, "MLE": 0, "OLE": 0, "FAIL": 0}
             case_results = []
 
             for testcase in testcases:
@@ -1589,6 +1573,8 @@ def main():
                         testcase["ans_path"],
                         time_limit,
                         memory_limit,
+                        output_limit,
+                        process_limit,
                         judge_type=judge_type,
                         judge_bin=judge_bin,
                         idle_limit=idle_limit,
@@ -1704,4 +1690,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ProcessCancelled:
+        reporter = Reporter("--jsonl" in sys.argv)
+        reporter.event(
+            "final",
+            ok=False,
+            status="cancelled",
+            code="cancelled",
+            exit_code=130,
+            message="Submission judging cancelled",
+        )
+        reporter.text("Submission judging cancelled")
+        sys.exit(130)
