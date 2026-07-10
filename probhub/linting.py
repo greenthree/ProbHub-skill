@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from pathlib import Path
 
@@ -9,7 +10,20 @@ from .workspace import load_problem, problem_entries
 DEFAULT_FORBIDDEN = ("TODO", "FIXME", "114514", "待补充")
 
 
+def _problem_relative_path(problem_dir, value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    problem_dir = Path(problem_dir).resolve()
+    candidate = (problem_dir / value).resolve()
+    try:
+        candidate.relative_to(problem_dir)
+    except ValueError:
+        return None
+    return candidate
+
+
 def problem_source_paths(problem_dir, config):
+    problem_dir = Path(problem_dir).resolve()
     paths = [problem_dir / "probhub.yaml", problem_dir / ((config.get("statement") or {}).get("source", "problem.md"))]
     judge = config.get("judge") or {}
     for key in ("validator", "checker", "interactor"):
@@ -26,11 +40,23 @@ def problem_source_paths(problem_dir, config):
             path = entry.get("file") if isinstance(entry, dict) else entry
             if path:
                 paths.append(problem_dir / path)
+    stress = config.get("stress") or {}
+    if isinstance(stress, dict):
+        for key in ("generator", "accepted", "brute"):
+            candidate = _problem_relative_path(problem_dir, stress.get(key))
+            if candidate:
+                paths.append(candidate)
     return paths
 
 
 def compute_source_hash(problem_dir, config):
-    return hash_paths(problem_dir, [path.relative_to(problem_dir) for path in problem_source_paths(problem_dir, config) if path.exists()])[0]
+    problem_dir = Path(problem_dir).resolve()
+    relative_paths = [
+        path.relative_to(problem_dir)
+        for path in problem_source_paths(problem_dir, config)
+        if path.exists()
+    ]
+    return hash_paths(problem_dir, relative_paths)[0]
 
 
 def compute_workspace_hash(root, workspace):
@@ -169,6 +195,60 @@ def lint_problem(root, workspace, entry):
             referenced_groups.update(str(group) for group in groups)
             if "all" in expected and not isinstance(expected.get("all"), bool):
                 errors.append(f"expected.all must be boolean for {solution_file}")
+
+    stress = config.get("stress")
+    if stress is not None:
+        if not isinstance(stress, dict):
+            errors.append("stress must be a mapping")
+        else:
+            if judge_type == "interactive":
+                errors.append("stress is not supported for interactive judging")
+            generator = stress.get("generator")
+            if not generator:
+                errors.append("stress.generator is required")
+            else:
+                generator_path = _problem_relative_path(problem_dir, generator)
+                if generator_path is None:
+                    errors.append(f"stress.generator must stay inside the problem directory: {generator}")
+                elif not generator_path.is_file():
+                    errors.append(f"stress generator not found: {generator}")
+            for role, solution_kind in (("accepted", "accepted"), ("brute", "brute")):
+                override = stress.get(role)
+                if override:
+                    override_path = _problem_relative_path(problem_dir, override)
+                    if override_path is None:
+                        errors.append(
+                            f"stress.{role} must stay inside the problem directory: {override}"
+                        )
+                    elif not override_path.is_file():
+                        errors.append(f"stress {role} not found: {override}")
+                else:
+                    entries = solutions.get(solution_kind) or []
+                    entries = entries if isinstance(entries, list) else [entries]
+                    if not any((item.get("file") if isinstance(item, dict) else item) for item in entries):
+                        errors.append(f"stress requires a {solution_kind} solution")
+            args = stress.get("args", ["{seed}"])
+            args = [args] if isinstance(args, str) else args
+            if not isinstance(args, list):
+                errors.append("stress.args must be a string or list")
+            else:
+                for arg in args:
+                    try:
+                        str(arg).format(seed=1, round=1)
+                    except (KeyError, ValueError):
+                        errors.append(f"invalid stress.args template: {arg}")
+            rounds = stress.get("rounds", 1000)
+            if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds <= 0:
+                errors.append("stress.rounds must be a positive integer")
+            for field in ("time_limit", "tool_timeout"):
+                value = stress.get(field)
+                if field in stress and (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                    or value <= 0
+                ):
+                    errors.append(f"stress.{field} must be a positive finite number")
 
     data = config.get("data") or {}
     groups = data.get("groups") or []

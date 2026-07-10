@@ -227,7 +227,78 @@ probhub judge L01 --no-cache
 
 缓存事件包含 `mode`、`compile_hits/misses`、`validator_hits/misses`、`case_hits/misses`。
 
-## 9. `typeset`
+## 9. `stress`
+
+```powershell
+probhub stress ID... [--rounds N] [--seed S]
+probhub stress ID --replay latest
+probhub stress ID --replay <反例目录或输入文件>
+```
+
+`stress` 使用题目 `probhub.yaml` 中的 `stress` 配置，逐轮执行 Generator → Validator → accepted → brute → 输出比较。首个失败会停止并保存到 `<problem>/.probhub/stress/`。
+
+最小配置：
+
+```yaml
+stress:
+  generator: code/stress_generator.cpp
+```
+
+常用完整配置：
+
+```yaml
+stress:
+  generator: code/stress_generator.cpp
+  args: ["{seed}", "{round}"]
+  rounds: 1000
+  time_limit: 5
+  tool_timeout: 5
+  accepted: code/std.cpp
+  brute: code/brute.cpp
+```
+
+- `generator` 必需；每轮向 stdout 写一个完整测试点，stderr 仅写诊断。
+- `args` 默认为 `["{seed}"]`，支持 `{seed}` 和从 1 开始的 `{round}`。
+- 未传 `--seed` 时随机选择非负 master seed；本轮 seed 为 `master_seed + round - 1`。
+- `--rounds` 覆盖配置中的 `rounds`；两者都必须为正整数。
+- `accepted` / `brute` 可省略，默认取 `solutions.accepted` / `solutions.brute` 第一项。
+- `time_limit` 控制 accepted/brute；`tool_timeout` 控制 Generator、Validator 和 Checker。
+
+比较规则：
+
+- `judge.type: standard`：accepted 是期望输出，brute 是实际输出；忽略整个输出首尾空白和每行末尾空格/Tab，其余严格。
+- `judge.type: custom`：accepted 输出作为 jury answer，brute 输出作为 contestant output，使用 `judge.checker` 和现有 DOMjudge/testlib 协议。
+- `judge.type: interactive`：暂不支持，lint 和命令都会失败。
+
+示例：
+
+```powershell
+probhub stress L01 --rounds 10000 --seed 12345
+probhub stress L01 L03 --rounds 2000
+probhub --json stress L01 --rounds 10000 --seed 12345
+```
+
+Replay：
+
+```powershell
+probhub stress L01 --replay latest
+probhub stress L01 --replay "L01/.probhub/stress/<artifact>"
+probhub stress L01 --replay "L01/.probhub/stress/<artifact>/input.in"
+```
+
+`--replay` 要求恰好一个题目 ID，且路径必须位于该题的 `.probhub/stress/` 内。它使用保存的输入重新运行当前 Validator、accepted、brute 和 Checker，不重新运行或编译 Generator，也不覆盖原反例。
+
+结果与退出：
+
+- `status: passed`：全部轮次匹配或 replay 通过，退出码 `0`。
+- `status: counterexample`：输出不匹配或 accepted/brute RE/TLE，保存反例并退出 `1`。
+- `status: infrastructure`：Generator、Validator 或 Checker 失败，保存诊断并退出 `1`。
+- Schema、路径、编译或参数错误：输出 `ok: false` 和 `error`，退出 `1`。
+- Ctrl+C：退出 `130`。
+
+多题执行只有全部题目通过才返回 `0`。完整字段、Generator 示例、Checker 调用、反例文件和失败 reason 见 `references/stress.md`。
+
+## 10. `typeset`
 
 ```powershell
 probhub typeset [ID...]
@@ -241,7 +312,7 @@ probhub typeset [ID...]
 
 它不会运行沙箱、构建 ZIP 或写 Manifest。
 
-## 10. `package`
+## 11. `package`
 
 ```powershell
 probhub package [ID...]
@@ -258,7 +329,7 @@ probhub package L01 --allow-missing-pdf
 
 `package` 不自动执行 lint、judge 或 typeset。正式流程优先使用 `build`。
 
-## 11. `build`
+## 12. `build`
 
 ```powershell
 probhub build [ID...] [--skip-judge] [--no-cache]
@@ -284,7 +355,7 @@ probhub build L01 --skip-judge   # 跳过沙箱，仅用于已有可信评测的
 
 不要把 `--skip-judge` 作为首次构建或正式正确性证明。
 
-## 12. `verify-package`
+## 13. `verify-package`
 
 ```powershell
 probhub verify-package L01.zip
@@ -301,13 +372,14 @@ probhub verify-package L01.zip --require-pdf
 
 正式题目包使用 `--require-pdf`。
 
-## 13. 推荐流程
+## 14. 推荐流程
 
 ### 单题开发
 
 ```powershell
 probhub lint L01
 probhub judge L01
+probhub stress L01 --rounds 10000 --seed 12345  # 已配置 stress 时
 probhub build L01
 probhub status L01
 ```
@@ -326,6 +398,7 @@ probhub build L01
 
 ```powershell
 probhub judge L01
+probhub stress L01 --rounds 10000 --seed 12345  # 已配置 stress 时
 probhub build L01
 ```
 
@@ -339,7 +412,7 @@ probhub status L01
 probhub verify-package L01.zip --require-pdf
 ```
 
-## 14. 常见问题
+## 15. 常见问题
 
 ### `probhub` 未识别
 

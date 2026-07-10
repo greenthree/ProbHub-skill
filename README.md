@@ -12,6 +12,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 
 - **Agent 驱动出题**：内置 [SKILL.md](SKILL.md)，让 Claude Code、Codex 或兼容 Agent 按固定流程完成出题任务。
 - **严谨数据闭环**：自动组织 `std.cpp`、`validator.cpp`、`brute.cpp`、`wrong.cpp`，支持数据逻辑分组、结构化宿命和首个击杀用例，避免用偶然 RE/TLE 误判错解已被正确卡掉。
+- **可复现差分测试**：`probhub stress` 按 seed 反复生成小数据，对拍 accepted 与 brute，并保存首个可 replay 的反例。
 - **时空限制自检**：`local_judge.py` 支持读取 `meta.json`、`domjudge-problem.ini`、`problem.yaml` 中的时间和内存限制，并报告 TLE/MLE/RE/WA/AC。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 微调题面**：提供 Flask 控制台，支持题目排序、Markdown 预览、样例编辑、引言 Quote、时空限制编辑、全卷编译和 PDF 分发。
@@ -130,6 +131,7 @@ probhub lint L01
 probhub status
 probhub judge L01
 probhub judge L01 --no-cache  # 强制完整重跑并刷新缓存
+probhub stress L01 --rounds 10000 --seed 12345
 probhub typeset L01
 probhub package L01
 probhub build L01
@@ -161,6 +163,8 @@ L01/data/secret/           # 隐藏数据唯一来源
 - `problem.yaml` 与 `domjudge-problem.ini`
 - `problem.pdf`、全卷 PDF 和 DOMjudge ZIP
 - `.probhub/build-manifest.json`
+
+本地诊断目录 `.probhub/stress/` 保存差分反例，不属于正式构建产物，也不应提交。
 
 `probhub build` 会依次执行 lint、沙箱、元数据生成、Typst 编译、单题 PDF 提取、DOMjudge 打包、包验证和 Manifest 写入。`probhub status` 会比较源文件、数据、PDF 和 ZIP 哈希，报告 `current`、`stale` 或 `never-built`。
 
@@ -247,6 +251,37 @@ probhub build L01 --no-cache
 ```
 
 JSONL 的 `compile`、`validator`、`case` 事件包含 `cached` 字段，结束前会输出 `type=cache` 的命中统计。WebUI 使用同一协议展示缓存状态。
+
+### 差分测试（stress）
+
+在题目的 `probhub.yaml` 中配置小数据生成器：
+
+```yaml
+stress:
+  generator: code/stress_generator.cpp
+  args: ["{seed}", "{round}"]
+  rounds: 1000
+  time_limit: 5
+  tool_timeout: 5
+  # accepted/brute 可省略，默认取 solutions 中的第一项
+  accepted: code/std.cpp
+  brute: code/brute.cpp
+```
+
+生成器每轮把一个完整测试点写到 stdout；stderr 只用于日志。第 `round` 轮 seed 为 `master_seed + round - 1`，其中 round 从 1 开始。常用命令：
+
+```powershell
+probhub stress L01 --rounds 10000 --seed 12345
+probhub stress L01 --replay latest
+```
+
+- `standard` 题沿用普通沙箱的逐行比较规则，允许整个输出首尾空白和每行行尾空格/Tab。
+- `custom` 题把 accepted 输出作为 jury answer、brute 输出作为 contestant output，交给 `judge.checker` 判定。
+- 首个不匹配、程序异常或工具失败会停止测试，并写入 `<problem>/.probhub/stress/`；结果包含可直接执行的 `replay_command`。
+- `interactive` 暂不支持 stress。
+- 全部轮次或 replay 通过时退出码为 `0`；反例、基础设施失败、配置或编译错误为 `1`；Ctrl+C 为 `130`。
+
+完整 Schema、Generator 协议、反例目录、失败分类与 replay 语义见 [`references/stress.md`](references/stress.md)。
 
 时空限制读取优先级：
 
@@ -383,6 +418,7 @@ ProbHub-skill/
 ├── references/
 │   ├── cli.md                # Workspace Schema v1 完整 CLI 手册
 │   ├── checker-interactor.md # Checker 与交互题协议和模板
+│   ├── stress.md             # 差分测试 Schema、协议、反例与 replay
 │   ├── legacy-workflow.md    # 无 Schema v1 时按需加载的旧工作流
 │   ├── cyaron.md             # CYaRon 快速参考
 │   ├── fast.md               # 简单 C++ 数据生成模板

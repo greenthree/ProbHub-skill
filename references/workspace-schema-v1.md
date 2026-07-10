@@ -56,6 +56,12 @@ solutions:
         status: WA
         groups: [greedy-counterexample]
 generators: [code/inmaker.cpp]
+stress:
+  generator: code/stress_generator.cpp
+  args: ["{seed}", "{round}"]
+  rounds: 1000
+  time_limit: 5
+  tool_timeout: 5
 data:
   sample_dir: data/sample
   secret_dir: data/secret
@@ -107,6 +113,27 @@ judge:
 
 `validator` 始终校验输入。`checker` 和 `interactor` 使用 ProbHub 附带的 DOMjudge/testlib 协议；完整参数、退出状态与模板见 `references/checker-interactor.md`。Core 会从规范源码生成 `output_validators/validate/validate.cpp` 和 `testlib.h`，不得手工维护生成目录。
 
+### Stress differential testing
+
+`stress` 是可选的单题差分测试配置：
+
+```yaml
+stress:
+  generator: code/stress_generator.cpp  # 必需
+  args: ["{seed}", "{round}"]           # 默认 ["{seed}"]，也可写单个字符串
+  rounds: 1000                          # 默认 1000
+  time_limit: 5                         # accepted/brute；默认 max(limits.time * 2, 5)
+  tool_timeout: 5                       # generator/validator/checker；默认 5
+  accepted: code/std.cpp                # 可选，默认 solutions.accepted 第一项
+  brute: code/brute.cpp                 # 可选，默认 solutions.brute 第一项
+```
+
+`generator` 每轮向 stdout 写一个完整测试点；stderr 仅用于诊断。参数模板支持 `{seed}` 和从 1 开始的 `{round}`，本轮 seed 为 `master_seed + round - 1`。所有 stress 路径都相对题目目录，且不得逃逸到题目目录外。
+
+执行顺序是 Generator → Validator → accepted → brute → 比较。`standard` 使用普通逐行比较；`custom` 把 accepted 输出作为 jury answer、brute 输出作为 contestant output 交给 `judge.checker`。`interactive` 当前不支持 stress。
+
+首个失败保存在 `<problem>/.probhub/stress/` 并可用 `probhub stress <ID> --replay latest` 重放。完整命令、Generator 协议、反例文件和退出语义见 `references/stress.md`。
+
 ### Data groups and solution expectations
 
 `solutions` 可继续使用字符串列表，也可使用带 `file`、`expected.status`、`expected.groups`、`expected.all` 和 `expected.forbid` 的结构化条目。`data.groups` 使用 glob 将测试点映射到逻辑组，并可通过 `targets` 指定需要被该组击杀的程序。完整语义、默认宿命和 JSONL 字段见 `references/data-groups-expectations.md`。
@@ -125,12 +152,15 @@ All problem-local C++ sources and locally compiled executables live under `code/
 │   ├── wrong*.cpp
 │   ├── validator.cpp
 │   ├── inmaker.cpp
+│   ├── stress_generator.cpp
 │   └── *.exe              # local build output, ignored by Git
 ├── data/
 │   ├── sample/
 │   └── secret/
 └── .probhub/
-    └── build-manifest.json
+    ├── build-manifest.json
+    ├── sandbox-cache-v1.json
+    └── stress/              # ignored local counterexamples
 ```
 
 `checker.cpp`, `interactor.cpp`, auxiliary solutions, and diagnostic C++ programs also belong in `code/`. Generated DOMjudge validator files remain under `output_validators/` because that directory is part of the package format rather than the source-code workspace.
@@ -175,3 +205,5 @@ Do not edit generated artifacts to make source changes.
 ## Local sandbox cache
 
 `<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results. Relevant source, header, input, answer, limit, compiler, platform, or cache-schema changes invalidate entries automatically. Use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run and refresh the cache.
+
+`<problem>/.probhub/stress/` is a separate ignored diagnostic directory containing replayable counterexamples and `latest.json`; stress does not reuse the sandbox cache. Do not package or commit either local artifact.

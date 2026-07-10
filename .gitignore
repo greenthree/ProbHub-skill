@@ -33,3 +33,6 @@ node_modules/
 # Python cache
 __pycache__/
 *.pyc
+
+# Local ProbHub stress counterexamples
+**/.probhub/stress/
