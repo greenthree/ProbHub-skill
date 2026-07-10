@@ -1,3 +1,3 @@
 """ProbHub deterministic contest-problem build core."""
 
-__version__ = "0.3.0-dev.1"
+__version__ = "0.3.0"

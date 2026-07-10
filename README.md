@@ -123,6 +123,7 @@ probhub new L05 --name "新题"
 probhub lint L01
 probhub status
 probhub judge L01
+probhub judge L01 --no-cache  # 强制完整重跑并刷新缓存
 probhub typeset L01
 probhub package L01
 probhub build L01
@@ -156,6 +157,8 @@ L01/data/secret/           # 隐藏数据唯一来源
 - `.probhub/build-manifest.json`
 
 `probhub build` 会依次执行 lint、沙箱、元数据生成、Typst 编译、单题 PDF 提取、DOMjudge 打包、包验证和 Manifest 写入。`probhub status` 会比较源文件、数据、PDF 和 ZIP 哈希，报告 `current`、`stale` 或 `never-built`。
+
+完整命令语法、单题/多题操作、缓存语义与故障处理见 [`references/cli.md`](references/cli.md)。无 `.probhub/workspace.yaml` 的旧工作区流程已独立整理到 [`references/legacy-workflow.md`](references/legacy-workflow.md)，Schema v1 工作区不要混用。
 
 ---
 
@@ -217,7 +220,23 @@ python scripts/local_judge.py <problem_dir> --jsonl
 - `solutions.wrong` 指向的程序是否不能全 AC。
 - 每个测试点的时间和内存状态。
 
-WebUI 使用同一 JSONL 协议读取编译、逐点、汇总和最终事件。
+### 沙箱增量缓存
+
+沙箱会把本地缓存写入 `<problem>/.probhub/sandbox-cache-v1.json`：
+
+- C++ 编译缓存按源码、相关头文件、编译参数、编译器和平台指纹失效。
+- Validator 结果按验证器指纹和输入文件内容失效。
+- 程序逐点结果按程序指纹、输入、答案、时限、内存和平台失效。
+- 修改单个数据点时，只重新验证和运行受影响的测试点；没有相关改动时，重复沙箱通常只需读取缓存。
+
+缓存文件是本地产物，不应提交。需要排查非确定性程序或强制完整重跑并刷新缓存时使用：
+
+```powershell
+probhub judge L01 --no-cache
+probhub build L01 --no-cache
+```
+
+JSONL 的 `compile`、`validator`、`case` 事件包含 `cached` 字段，结束前会输出 `type=cache` 的命中统计。WebUI 使用同一协议展示缓存状态。
 
 时空限制读取优先级：
 
@@ -352,6 +371,8 @@ ProbHub-skill/
 ├── bin/
 │   └── init.js               # npm 脚手架入口
 ├── references/
+│   ├── cli.md                # Workspace Schema v1 完整 CLI 手册
+│   ├── legacy-workflow.md    # 无 Schema v1 时按需加载的旧工作流
 │   ├── cyaron.md             # CYaRon 快速参考
 │   ├── fast.md               # 简单 C++ 数据生成模板
 │   ├── testlib.h             # testlib 头文件

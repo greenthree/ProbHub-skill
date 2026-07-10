@@ -49,5 +49,27 @@ class LocalJudgeLayoutTests(unittest.TestCase):
             self.assertEqual([case["case"] for case in cases], ["sample/1"])
 
 
+    def test_legacy_workspace_prefers_code_directory_when_present(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "A"
+            code = problem / "code"
+            code.mkdir(parents=True)
+            for name in ("validator.cpp", "std.cpp", "brute.cpp", "wrong_case.cpp"):
+                (code / name).write_text("int main(){}\n", encoding="utf-8")
+
+            sources = MODULE.discover_solution_sources(problem)
+            self.assertEqual(
+                {kind: [Path(path).relative_to(problem).as_posix() for path in paths] for kind, paths in sources.items()},
+                {
+                    "std": ["code/std.cpp"],
+                    "brute": ["code/brute.cpp"],
+                    "wrong": ["code/wrong_case.cpp"],
+                },
+            )
+            self.assertEqual(
+                Path(MODULE.discover_validator_source(problem)).relative_to(problem).as_posix(),
+                "code/validator.cpp",
+            )
+
 if __name__ == "__main__":
     unittest.main()

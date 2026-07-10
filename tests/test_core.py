@@ -4,7 +4,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from probhub.cli import main as cli_main
+from probhub.cli import build_parser, main as cli_main
 from probhub.hashing import hash_file
 from probhub.io import write_json, write_yaml
 from probhub.linting import compute_data_hash, compute_source_hash, lint_workspace, problem_status
@@ -71,6 +71,11 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(config["generators"], ["code/inmaker.cpp"])
             _, workspace = load_workspace(root)
             self.assertEqual([entry["id"] for entry in problem_entries(workspace)], ["A", "B"])
+
+    def test_judge_and_build_accept_no_cache(self):
+        parser = build_parser()
+        self.assertTrue(parser.parse_args(["judge", "A", "--no-cache"]).no_cache)
+        self.assertTrue(parser.parse_args(["build", "A", "--no-cache"]).no_cache)
 
     def test_lint_metadata_and_stale_detection(self):
         with tempfile.TemporaryDirectory() as temp:
