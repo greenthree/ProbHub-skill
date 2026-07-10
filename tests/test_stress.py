@@ -191,6 +191,8 @@ class StressTests(unittest.TestCase):
             entry = problem_entries(workspace)[0]
             _, config = load_problem(root, entry)
             first_hash = compute_source_hash(problem, config)
+            aliased_problem = problem / ".." / problem.name
+            self.assertEqual(first_hash, compute_source_hash(aliased_problem, config))
             with (problem / "code/generator.py").open("a", encoding="utf-8") as stream:
                 stream.write("# changed\n")
             self.assertNotEqual(first_hash, compute_source_hash(problem, config))

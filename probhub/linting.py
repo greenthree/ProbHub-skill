@@ -23,6 +23,7 @@ def _problem_relative_path(problem_dir, value):
 
 
 def problem_source_paths(problem_dir, config):
+    problem_dir = Path(problem_dir).resolve()
     paths = [problem_dir / "probhub.yaml", problem_dir / ((config.get("statement") or {}).get("source", "problem.md"))]
     judge = config.get("judge") or {}
     for key in ("validator", "checker", "interactor"):
@@ -49,7 +50,13 @@ def problem_source_paths(problem_dir, config):
 
 
 def compute_source_hash(problem_dir, config):
-    return hash_paths(problem_dir, [path.relative_to(problem_dir) for path in problem_source_paths(problem_dir, config) if path.exists()])[0]
+    problem_dir = Path(problem_dir).resolve()
+    relative_paths = [
+        path.relative_to(problem_dir)
+        for path in problem_source_paths(problem_dir, config)
+        if path.exists()
+    ]
+    return hash_paths(problem_dir, relative_paths)[0]
 
 
 def compute_workspace_hash(root, workspace):
