@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import re
+import signal
 import subprocess
 import webbrowser
 import uuid
@@ -25,7 +26,13 @@ LOCAL_JUDGE_SCRIPT = next(
     SCRIPT_DIR / "local_judge.py",
 )
 
-from probhub.submissions import MAX_SOURCE_BYTES, temporary_submission_workspace, validate_cpp_upload
+from probhub.process_control import snapshot_process_tree, terminate_external_process_tree
+from probhub.submissions import (
+    MAX_SOURCE_BYTES,
+    cleanup_stale_submission_workspaces,
+    temporary_submission_workspace,
+    validate_cpp_upload,
+)
 
 app = Flask(__name__)
 MAX_SUBMISSION_REQUEST_BYTES = MAX_SOURCE_BYTES + 64 * 1024
@@ -34,9 +41,19 @@ BASE_DIR = "typst-statement"
 SANDBOX_JOBS = {}
 SANDBOX_LOCK = Lock()
 SUBMISSION_JOBS = {}
+SUBMISSION_PROCESSES = {}
+SUBMISSION_CANCEL_FILES = {}
 SUBMISSION_LOCK = Lock()
+SUBMISSION_RESULT_TTL = 60 * 60
+SUBMISSION_FORCE_CANCEL_AFTER = 3.0
 MAX_CONCURRENT_SUBMISSIONS = max(1, min(4, os.cpu_count() or 2))
 SUBMISSION_SLOTS = BoundedSemaphore(MAX_CONCURRENT_SUBMISSIONS)
+
+try:
+    cleanup_stale_submission_workspaces(Path.cwd())
+except OSError:
+    pass
+
 
 def secure_path(subtitle, filename):
     """安全路径拼接，防止路径穿越攻击"""
@@ -791,12 +808,16 @@ HTML_TEMPLATE = r"""
                                     <span class="block text-[10px] text-cream-subtle mt-0.5">仅接受单个 .cpp 文件</span>
                                 </span>
                             </label>
-                            <button @click="runSubmission()"
-                                    :disabled="submissionRunning || !submissionFilename"
-                                    class="px-5 py-3 rounded-lg text-[12px] font-semibold bg-gold text-ink-deep hover:bg-gold-light disabled:opacity-40 transition-colors">
-                                <span x-show="!submissionRunning">上传并评测</span>
-                                <span x-show="submissionRunning" class="animate-pulse">评测中...</span>
-                            </button>
+                            <div class="flex items-center gap-2">
+                                <button @click="cancelSubmission()" x-show="submissionRunning"
+                                        class="px-4 py-3 rounded-lg text-[12px] font-semibold border border-danger/30 text-danger hover:bg-danger/10 transition-colors">取消</button>
+                                <button @click="runSubmission()"
+                                        :disabled="submissionRunning || !submissionFilename"
+                                        class="px-5 py-3 rounded-lg text-[12px] font-semibold bg-gold text-ink-deep hover:bg-gold-light disabled:opacity-40 transition-colors">
+                                    <span x-show="!submissionRunning">上传并评测</span>
+                                    <span x-show="submissionRunning" class="animate-pulse">评测中...</span>
+                                </button>
+                            </div>
                         </div>
                         <div x-show="submissionResult || submissionRunning" class="space-y-3">
                             <div class="flex items-center gap-3">
@@ -1383,13 +1404,24 @@ HTML_TEMPLATE = r"""
                         });
                 },
 
+                cancelSubmission() {
+                    if (!this.submissionJobId || !this.submissionRunning) return;
+                    this.submissionVerdict = 'CANCELLING';
+                    fetch(`/api/submission/job/${this.submissionJobId}/cancel`, { method: 'POST' })
+                        .then(res => res.json())
+                        .then(data => {
+                            if (!data.success) throw new Error(data.error || 'cancel failed');
+                        })
+                        .catch(error => this.showToast(error.message || '取消失败', true, 6000));
+                },
+
                 pollSubmissionJob(jobId = this.submissionJobId, jobKey = this.submissionJobKey) {
                     if (!jobId || !jobKey) return;
                     fetch(`/api/submission/job/${jobId}`)
                         .then(res => res.json())
                         .then(data => {
                             if (!data.success) throw new Error(data.error || 'submission job missing');
-                            const verdict = data.verdict || data.result?.submission?.verdict || 'PENDING';
+                            const verdict = data.status === 'cancelling' ? 'CANCELLING' : (data.verdict || data.result?.submission?.verdict || 'PENDING');
                             const cacheEntry = {
                                 result: data.result || null,
                                 logs: data.logs || '',
@@ -1402,7 +1434,7 @@ HTML_TEMPLATE = r"""
                                 this.submissionResult = cacheEntry.result;
                                 this.submissionVerdict = verdict;
                             }
-                            if (data.status === 'queued' || data.status === 'running') {
+                            if (data.status === 'queued' || data.status === 'running' || data.status === 'cancelling') {
                                 this._submissionPollTimer = setTimeout(() => this.pollSubmissionJob(jobId, jobKey), 700);
                                 return;
                             }
@@ -1411,6 +1443,7 @@ HTML_TEMPLATE = r"""
                             this.submissionCache[jobKey].finishedAt = finishedAt;
                             if (this.sandboxKey() === jobKey) this.submissionLastRunAt = finishedAt;
                             if (data.status === 'completed') this.showToast(`提交评测完成：${verdict}`, verdict !== 'AC');
+                            else if (data.status === 'cancelled') this.showToast('提交评测已取消');
                             else this.showToast('提交评测基础设施失败', true, 6000);
                         })
                         .catch(error => {
@@ -1442,6 +1475,7 @@ HTML_TEMPLATE = r"""
                     if (status === 'TLE') return 'bg-gold/15 text-gold';
                     if (status === 'MLE') return 'bg-danger/15 text-danger';
                     if (status === 'OLE') return 'bg-gold/15 text-gold';
+                    if (status === 'CANCELLING' || status === 'CANCELLED') return 'bg-ink-elevated text-cream-subtle';
                     if (status === 'CE' || status === 'RE' || status === 'FAIL') return 'bg-danger/20 text-danger';
                     return 'bg-ink-elevated text-cream-subtle';
                 },
@@ -2190,13 +2224,21 @@ def _submission_verdict(result):
 
 
 def _prune_submission_jobs():
+    now = time.time()
+    expired = [
+        job_id for job_id, job in SUBMISSION_JOBS.items()
+        if job.get("status") not in {"queued", "running", "cancelling"}
+        and now - float(job.get("finished_at") or job.get("created_at") or now) >= SUBMISSION_RESULT_TTL
+    ]
+    for job_id in expired:
+        SUBMISSION_JOBS.pop(job_id, None)
     if len(SUBMISSION_JOBS) < 100:
         return
     finished = sorted(
         (
             (job_id, job)
             for job_id, job in SUBMISSION_JOBS.items()
-            if job.get("status") not in {"queued", "running"}
+            if job.get("status") not in {"queued", "running", "cancelling"}
         ),
         key=lambda item: item[1].get("created_at", 0),
     )
@@ -2204,14 +2246,51 @@ def _prune_submission_jobs():
         SUBMISSION_JOBS.pop(job_id, None)
 
 
+def _force_cancel_submission(job_id, proc, known_pids):
+    time.sleep(SUBMISSION_FORCE_CANCEL_AFTER)
+    with SUBMISSION_LOCK:
+        job = SUBMISSION_JOBS.get(job_id)
+        still_cancelling = bool(job and job.get("status") in {"running", "cancelling"})
+    if still_cancelling and proc.poll() is None:
+        terminate_external_process_tree(proc, known_pids)
+
+
+def _request_submission_cancel(job_id, proc, cancel_file):
+    if cancel_file is not None:
+        try:
+            Path(cancel_file).touch(exist_ok=True)
+        except OSError:
+            pass
+    if proc is None or proc.poll() is not None:
+        return
+    known_pids = snapshot_process_tree(proc.pid)
+    try:
+        if os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            proc.terminate()
+    except (OSError, ValueError):
+        pass
+    Thread(
+        target=_force_cancel_submission,
+        args=(job_id, proc, known_pids),
+        daemon=True,
+    ).start()
+
+
 def _run_submission_job(job_id, subtitle, index, filename, source):
     with SUBMISSION_SLOTS:
         with SUBMISSION_LOCK:
-            if job_id not in SUBMISSION_JOBS:
+            job = SUBMISSION_JOBS.get(job_id)
+            if not job:
                 return
-            SUBMISSION_JOBS[job_id]["status"] = "running"
+            if job.get("cancel_requested"):
+                job.update(status="cancelled", verdict="CANCELLED", finished_at=time.time())
+                return
+            job["status"] = "running"
         result = None
         logs = []
+        return_code = None
         try:
             info = _sandbox_problem_info(subtitle, index)
             result = _empty_sandbox_result(info)
@@ -2226,27 +2305,55 @@ def _run_submission_job(job_id, subtitle, index, filename, source):
             if not info.get("runnable"):
                 raise ValueError(info.get("reason") or "problem is not runnable")
 
+            with SUBMISSION_LOCK:
+                if SUBMISSION_JOBS[job_id].get("cancel_requested"):
+                    result["submission"].update(workspace_cleaned=True, verdict="CANCELLED")
+                    SUBMISSION_JOBS[job_id].update(
+                        status="cancelled",
+                        verdict="CANCELLED",
+                        result=result,
+                        finished_at=time.time(),
+                    )
+                    return
+
             with temporary_submission_workspace(Path.cwd(), info["dir"], job_id, filename, source) as prepared:
+                cancel_file = prepared.root / "cancel.requested"
+                with SUBMISSION_LOCK:
+                    if SUBMISSION_JOBS[job_id].get("cancel_requested"):
+                        raise RuntimeError("submission cancelled before judge startup")
                 command = [
                     sys.executable,
                     str(LOCAL_JUDGE_SCRIPT),
                     str(prepared.problem_dir),
                     "--jsonl",
                     "--no-cache",
+                    "--cancellable",
                 ]
                 env = os.environ.copy()
                 env["PYTHONUTF8"] = "1"
                 env["PYTHONIOENCODING"] = "utf-8"
-                proc = subprocess.Popen(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=str(Path.cwd()),
-                    env=env,
-                )
+                env["PROBHUB_CANCEL_FILE"] = str(cancel_file)
+                popen_options = {
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.STDOUT,
+                    "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                    "cwd": str(Path.cwd()),
+                    "env": env,
+                }
+                if os.name == "nt":
+                    popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                else:
+                    popen_options["start_new_session"] = True
+                proc = subprocess.Popen(command, **popen_options)
+                with SUBMISSION_LOCK:
+                    SUBMISSION_PROCESSES[job_id] = proc
+                    SUBMISSION_CANCEL_FILES[job_id] = cancel_file
+                    cancel_requested = bool(SUBMISSION_JOBS[job_id].get("cancel_requested"))
+                if cancel_requested:
+                    _request_submission_cancel(job_id, proc, cancel_file)
+
                 assert proc.stdout is not None
                 try:
                     for line in proc.stdout:
@@ -2267,11 +2374,14 @@ def _run_submission_job(job_id, subtitle, index, filename, source):
                 return_code = proc.wait()
 
             result["submission"]["workspace_cleaned"] = True
-            verdict = _submission_verdict(result)
+            with SUBMISSION_LOCK:
+                cancel_requested = bool(SUBMISSION_JOBS[job_id].get("cancel_requested"))
+            cancelled = cancel_requested or (result.get("final") or {}).get("status") == "cancelled"
+            verdict = "CANCELLED" if cancelled else _submission_verdict(result)
             result["submission"]["verdict"] = verdict
             with SUBMISSION_LOCK:
                 SUBMISSION_JOBS[job_id].update(
-                    status="completed",
+                    status="cancelled" if cancelled else "completed",
                     verdict=verdict,
                     returncode=return_code,
                     logs="\n".join(logs),
@@ -2279,17 +2389,26 @@ def _run_submission_job(job_id, subtitle, index, filename, source):
                     finished_at=time.time(),
                 )
         except Exception as exc:
+            with SUBMISSION_LOCK:
+                cancel_requested = bool(SUBMISSION_JOBS.get(job_id, {}).get("cancel_requested"))
+            status = "cancelled" if cancel_requested else "failed"
+            verdict = "CANCELLED" if cancel_requested else "FAIL"
             if result is not None and result.get("submission"):
                 result["submission"]["workspace_cleaned"] = True
-                result["submission"]["verdict"] = "FAIL"
+                result["submission"]["verdict"] = verdict
             with SUBMISSION_LOCK:
-                SUBMISSION_JOBS[job_id].update(
-                    status="failed",
-                    verdict="FAIL",
-                    logs=("\n".join(logs + [str(exc)])).strip(),
-                    result=result or {"final": {"ok": False, "message": str(exc)}},
-                    finished_at=time.time(),
-                )
+                if job_id in SUBMISSION_JOBS:
+                    SUBMISSION_JOBS[job_id].update(
+                        status=status,
+                        verdict=verdict,
+                        logs=("\n".join(logs + ([] if cancel_requested else [str(exc)]))).strip(),
+                        result=result or {"final": {"ok": False, "message": str(exc)}},
+                        finished_at=time.time(),
+                    )
+        finally:
+            with SUBMISSION_LOCK:
+                SUBMISSION_PROCESSES.pop(job_id, None)
+                SUBMISSION_CANCEL_FILES.pop(job_id, None)
 
 
 @app.route('/api/submission/run', methods=['POST'])
@@ -2316,6 +2435,11 @@ def submission_run():
         job_id = uuid.uuid4().hex
         with SUBMISSION_LOCK:
             _prune_submission_jobs()
+            protected = [
+                current_id for current_id, job in SUBMISSION_JOBS.items()
+                if job.get("status") in {"queued", "running", "cancelling"}
+            ]
+            cleanup_stale_submission_workspaces(Path.cwd(), protected_task_ids=protected)
             SUBMISSION_JOBS[job_id] = {
                 "status": "queued",
                 "verdict": "PENDING",
@@ -2323,6 +2447,7 @@ def submission_run():
                 "result": None,
                 "filename": filename,
                 "created_at": time.time(),
+                "cancel_requested": False,
             }
         Thread(
             target=_run_submission_job,
@@ -2345,6 +2470,24 @@ def submission_job(job_id):
         if not job:
             return jsonify({"success": False, "error": "job not found"}), 404
         return jsonify({"success": True, **job})
+
+
+@app.route('/api/submission/job/<job_id>/cancel', methods=['POST'])
+def submission_cancel(job_id):
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        return jsonify({"success": False, "error": "invalid job id"}), 400
+    with SUBMISSION_LOCK:
+        job = SUBMISSION_JOBS.get(job_id)
+        if not job:
+            return jsonify({"success": False, "error": "job not found"}), 404
+        if job.get("status") not in {"queued", "running", "cancelling"}:
+            return jsonify({"success": True, "status": job.get("status"), "verdict": job.get("verdict")})
+        job["cancel_requested"] = True
+        job["status"] = "cancelling"
+        proc = SUBMISSION_PROCESSES.get(job_id)
+        cancel_file = SUBMISSION_CANCEL_FILES.get(job_id)
+    _request_submission_cancel(job_id, proc, cancel_file)
+    return jsonify({"success": True, "status": "cancelling"})
 
 
 def inject_pdf_to_zip(pdf_path, prob_dir):

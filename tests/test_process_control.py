@@ -1,11 +1,20 @@
 import os
 import sys
+import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 
-from probhub.process_control import process_alive, run_managed_to_files
+from probhub.process_control import (
+    CANCEL_FILE_ENV,
+    ProcessCancelled,
+    process_alive,
+    run_managed_to_files,
+    snapshot_process_tree,
+    terminate_external_process_tree,
+)
 
 
 class ProcessControlTests(unittest.TestCase):
@@ -79,6 +88,77 @@ class ProcessControlTests(unittest.TestCase):
             self.assertEqual(result["returncode"], 0, result)
             self.assertTrue(pid_file.is_file(), "child did not start")
             self.wait_until_dead(int(pid_file.read_text(encoding="utf-8")))
+
+
+    def test_cancel_file_stops_managed_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pid_file = root / "cancelled.pid"
+            cancel_file = root / "cancel.requested"
+            code = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            previous = os.environ.get(CANCEL_FILE_ENV)
+            os.environ[CANCEL_FILE_ENV] = str(cancel_file)
+            timer = threading.Timer(0.3, lambda: cancel_file.touch())
+            timer.start()
+            try:
+                with self.assertRaises(ProcessCancelled):
+                    self.run_command(root, code, timeout=10)
+            finally:
+                timer.cancel()
+                timer.join()
+                if previous is None:
+                    os.environ.pop(CANCEL_FILE_ENV, None)
+                else:
+                    os.environ[CANCEL_FILE_ENV] = previous
+            self.assertTrue(pid_file.is_file(), "managed process did not start")
+            self.wait_until_dead(int(pid_file.read_text(encoding="utf-8")))
+
+    def test_external_force_cancel_kills_detached_descendant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pid_file = root / "detached.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            if os.name == "nt":
+                parent = (
+                    "import subprocess,sys,time;"
+                    f"subprocess.Popen([sys.executable, '-c', {child!r}], creationflags=subprocess.CREATE_NEW_PROCESS_GROUP);"
+                    "time.sleep(30)"
+                )
+                options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            else:
+                parent = (
+                    "import subprocess,sys,time;"
+                    f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True);"
+                    "time.sleep(30)"
+                )
+                options = {"start_new_session": True}
+            proc = subprocess.Popen(
+                [sys.executable, "-c", parent],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **options,
+            )
+            try:
+                deadline = time.time() + 5
+                while time.time() < deadline and not pid_file.is_file():
+                    time.sleep(0.05)
+                self.assertTrue(pid_file.is_file(), "detached child did not start")
+                child_pid = int(pid_file.read_text(encoding="utf-8"))
+                known_pids = snapshot_process_tree(proc.pid)
+                terminate_external_process_tree(proc, known_pids)
+                self.wait_until_dead(child_pid)
+            finally:
+                if proc.poll() is None:
+                    terminate_external_process_tree(proc)
 
 
 if __name__ == "__main__":

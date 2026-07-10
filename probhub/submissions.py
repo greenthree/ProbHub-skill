@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,57 @@ def validate_cpp_upload(filename: str, source: bytes, max_bytes: int = MAX_SOURC
     except UnicodeDecodeError as exc:
         raise ValueError("source file must be UTF-8 encoded") from exc
 
+
+
+def cleanup_stale_submission_workspaces(
+    workspace_root: str | Path,
+    max_age_seconds: float = 24 * 60 * 60,
+    now: float | None = None,
+    protected_task_ids=(),
+):
+    """Remove only stale UUID-named task directories under the submission root."""
+    workspace_root = Path(workspace_root).resolve()
+    configured_root = workspace_root / ".probhub" / "submissions"
+    if configured_root.is_symlink() or not configured_root.is_dir():
+        return []
+    submissions_root = configured_root.resolve()
+    try:
+        submissions_root.relative_to(workspace_root)
+    except ValueError:
+        return []
+
+    protected = {str(task_id) for task_id in protected_task_ids}
+    current = time.time() if now is None else float(now)
+    removed = []
+    for task_root in list(submissions_root.iterdir()):
+        if (
+            task_root.name in protected
+            or not _TASK_ID_RE.fullmatch(task_root.name)
+            or task_root.is_symlink()
+            or not task_root.is_dir()
+        ):
+            continue
+        resolved = task_root.resolve()
+        try:
+            resolved.relative_to(submissions_root)
+        except ValueError:
+            continue
+        try:
+            age = current - task_root.stat().st_mtime
+        except OSError:
+            continue
+        if age < float(max_age_seconds):
+            continue
+        try:
+            shutil.rmtree(resolved)
+        except OSError:
+            continue
+        removed.append(task_root.name)
+    try:
+        submissions_root.rmdir()
+    except OSError:
+        pass
+    return removed
 
 def _resolve_inside(base: Path, value: str | Path, label: str) -> Path:
     base = base.resolve()

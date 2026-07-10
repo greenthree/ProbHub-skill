@@ -136,6 +136,8 @@ WebUI“沙箱评测”页支持上传单个 UTF-8 `.cpp` 并只评测该提交�
 4. Custom Checker 或 Interactor 源码会复制到临时工作区后编译，原题 `code/` 不产生新的 `.exe`；
 5. 评测复用 `local_judge.py` 与共享进程控制，返回 CE/AC/WA/TLE/MLE/OLE/RE/FAIL 和逐测试点信息；
 6. 任务由后台线程监督独立子进程，HTTP 请求不会同步阻塞到评测结束；
-7. 任务结束后删除源码、临时配置、可执行文件、输出和缓存。
+7. 排队中和运行中的任务均可取消：先创建取消标记并通知监督进程，3 秒后仍未退出则强制终止已知进程组与后代进程树；
+8. `local_judge.py --cancellable` 会在编译、普通运行和交互循环中检查取消标记，交互题取消时同时清理选手与 Interactor；
+9. 任务结束或取消后删除源码、临时配置、可执行文件、输出和缓存；启动服务及接受新任务时清理超过 24 小时的 UUID 遗留目录。
 
-上传流程不得覆盖、重命名或修改题目原有 `code/std.cpp`、`code/brute.cpp`、`code/wrong*.cpp`、Checker、Interactor、数据、答案或生成物。任务字典只保存文件名、结构化结果和日志，不保存源码正文。
+遗留清理只处理 `.probhub/submissions/` 内名称严格为 32 位小写十六进制的非符号链接目录，并跳过活动任务、陌生名称和符号链接。上传流程不得覆盖、重命名或修改题目原有 `code/std.cpp`、`code/brute.cpp`、`code/wrong*.cpp`、Checker、Interactor、数据、答案或生成物。任务字典只保存文件名、结构化结果和日志，不保存源码正文。

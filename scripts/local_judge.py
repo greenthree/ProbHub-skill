@@ -23,6 +23,8 @@ sys.path.insert(0, PACKAGE_ROOT)
 from probhub.output_compare import compare_standard_output, normalize_standard_output
 from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
+    ProcessCancelled,
+    cancellation_requested,
     close_windows_handle as _close_windows_handle,
     process_alive as _process_alive,
     process_tree_metrics,
@@ -47,6 +49,16 @@ CACHE_FILENAME = "sandbox-cache-v1.json"
 CACHE_LIMITS = {"validator": 4000, "case": 12000}
 _COMPILER_IDENTITY = None
 _FILE_DIGEST_CACHE = {}
+
+
+def _cancel_signal_handler(_signum, _frame):
+    raise ProcessCancelled("execution cancelled")
+
+
+def install_cancellation_handlers():
+    signal.signal(signal.SIGTERM, _cancel_signal_handler)
+    if platform.system() == "Windows" and hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _cancel_signal_handler)
 
 
 def _hash_parts(*parts):
@@ -999,6 +1011,8 @@ def run_interactive_testcase(
 
             deadline = monotonic_start + float(time_limit)
             while solution.poll() is None or interactor.poll() is None:
+                if cancellation_requested():
+                    raise ProcessCancelled("execution cancelled")
                 now = time.monotonic()
                 resource_status = None
                 resource_message = ""
@@ -1342,11 +1356,14 @@ def finish(reporter, ok, message, exit_code, result_code=None):
 def main():
     jsonl = "--jsonl" in sys.argv
     no_cache = "--no-cache" in sys.argv
-    args = [arg for arg in sys.argv[1:] if arg not in {"--jsonl", "--no-cache"}]
+    cancellable = "--cancellable" in sys.argv
+    args = [arg for arg in sys.argv[1:] if arg not in {"--jsonl", "--no-cache", "--cancellable"}]
     reporter = Reporter(jsonl)
+    if cancellable:
+        install_cancellation_handlers()
 
     if len(args) != 1:
-        reporter.text("Usage: python scripts/local_judge.py <problem_dir> [--jsonl] [--no-cache]")
+        reporter.text("Usage: python scripts/local_judge.py <problem_dir> [--jsonl] [--no-cache] [--cancellable]")
         finish(reporter, False, "Invalid arguments", 1)
 
     prob_dir = args[0]
@@ -1673,4 +1690,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ProcessCancelled:
+        reporter = Reporter("--jsonl" in sys.argv)
+        reporter.event(
+            "final",
+            ok=False,
+            status="cancelled",
+            code="cancelled",
+            exit_code=130,
+            message="Submission judging cancelled",
+        )
+        reporter.text("Submission judging cancelled")
+        sys.exit(130)

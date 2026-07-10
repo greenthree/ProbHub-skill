@@ -12,6 +12,21 @@ from pathlib import Path
 
 DEFAULT_PROCESS_LIMIT = 32
 DEFAULT_POLL_INTERVAL = 0.005
+CANCEL_FILE_ENV = "PROBHUB_CANCEL_FILE"
+
+
+class ProcessCancelled(Exception):
+    """Raised when a supervising submission task requests cancellation."""
+
+
+def cancellation_requested():
+    path = os.environ.get(CANCEL_FILE_ENV)
+    if not path:
+        return False
+    try:
+        return Path(path).is_file()
+    except OSError:
+        return False
 
 
 def unix_preexec_memory_limit(memory_limit_mb):
@@ -241,26 +256,89 @@ def _linux_process_table():
     return table
 
 
-def process_tree_metrics(root_pid):
-    """Return descendant count and aggregate RSS in MB where /proc is available."""
-    table = _linux_process_table()
-    if not table:
-        return None, None
+def _process_tree_pids_from_table(root_pid, table):
+    root_pid = int(root_pid)
     children = {}
     for pid, (ppid, _) in table.items():
         children.setdefault(ppid, []).append(pid)
-    pending = [int(root_pid)]
+    pending = [root_pid]
     seen = set()
-    rss_pages = 0
     while pending:
         pid = pending.pop()
         if pid in seen:
             continue
         seen.add(pid)
-        value = table.get(pid)
-        if value:
-            rss_pages += value[1]
         pending.extend(children.get(pid, ()))
+    return seen
+
+
+def snapshot_process_tree(root_pid):
+    """Return the known root/descendant PIDs where the platform permits it."""
+    root_pid = int(root_pid)
+    if platform.system() == "Windows":
+        return {root_pid}
+    table = _linux_process_table()
+    if not table:
+        return {root_pid}
+    return _process_tree_pids_from_table(root_pid, table)
+
+
+def terminate_external_process_tree(proc, known_pids=()):
+    """Force-stop a supervisor process and detached descendant groups."""
+    if proc is None:
+        return
+    root_pid = int(proc.pid)
+    pids = set(int(pid) for pid in (known_pids or ())) | snapshot_process_tree(root_pid)
+    if platform.system() == "Windows":
+        targets = [root_pid] + sorted((pid for pid in pids if pid != root_pid), reverse=True)
+        for pid in targets:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    else:
+        current_group = os.getpgrp()
+        groups = set()
+        for pid in pids:
+            try:
+                group = os.getpgid(pid)
+                if group != current_group:
+                    groups.add(group)
+            except OSError:
+                pass
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except OSError:
+                pass
+        for pid in sorted(pids, reverse=True):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def process_tree_metrics(root_pid):
+    """Return descendant count and aggregate RSS in MB where /proc is available."""
+    table = _linux_process_table()
+    if not table:
+        return None, None
+    seen = _process_tree_pids_from_table(root_pid, table)
+    rss_pages = sum(table.get(pid, (0, 0))[1] for pid in seen)
     try:
         page_size = os.sysconf("SC_PAGE_SIZE")
     except (AttributeError, ValueError):
@@ -373,6 +451,9 @@ def wait_managed(
     try:
         while managed.proc.poll() is None:
             now = time.perf_counter()
+            if cancellation_requested():
+                reason, message = "cancelled", "execution cancelled"
+                break
             count = current_memory = None
             if now - last_resource_sample >= 0.05:
                 count, current_memory = managed.sample()
@@ -402,7 +483,9 @@ def wait_managed(
         elapsed = time.perf_counter() - started
         # A short process can exit before the first polling iteration. Recheck
         # file size and deadline after exit so fast output floods cannot bypass OLE.
-        if output_limit_bytes is not None and _files_size(output_paths) > int(output_limit_bytes):
+        if cancellation_requested():
+            reason, message = "cancelled", "execution cancelled"
+        elif output_limit_bytes is not None and _files_size(output_paths) > int(output_limit_bytes):
             reason, message = "output_limit", "output limit exceeded"
         elif elapsed > float(timeout) and reason == "completed":
             reason, message = "time_limit", "time limit exceeded"
@@ -442,6 +525,8 @@ def run_managed_to_files(
     input_stream = None
     temporary_input = None
     try:
+        if cancellation_requested():
+            raise ProcessCancelled("execution cancelled")
         if input_path is not None:
             input_stream = open(input_path, "rb")
         elif input_data is not None:
@@ -460,12 +545,15 @@ def run_managed_to_files(
                 memory_limit_mb=memory_limit_mb,
                 process_limit=process_limit,
             )
-            return wait_managed(
+            result = wait_managed(
                 managed,
                 timeout,
                 output_paths=(stdout_path, stderr_path),
                 output_limit_bytes=output_limit_bytes,
             )
+            if result.get("reason") == "cancelled":
+                raise ProcessCancelled(result.get("message") or "execution cancelled")
+            return result
     finally:
         if input_stream is not None and input_stream is not temporary_input:
             input_stream.close()
