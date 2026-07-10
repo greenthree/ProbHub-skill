@@ -81,7 +81,13 @@ ProbHub 会尽量自动安装 Python 依赖，但底层编译和排版仍依赖�
 ### Python 包
 
 ```bash
-pip install cyaron pypdf flask pyyaml
+pip install -r requirements.txt
+```
+
+需要使用 CYaRon 数据生成器时再额外安装：
+
+```bash
+pip install cyaron
 ```
 
 ### Typst
@@ -429,7 +435,7 @@ typst --version
 确认 Flask 已安装：
 
 ```bash
-pip install flask
+pip install -r requirements.txt
 ```
 
 然后在包含 `typst-statement/` 的工作区根目录运行：

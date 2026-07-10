@@ -36,6 +36,7 @@
   },
   "files": [
     "bin/*.js",
+    "requirements.txt",
     "SKILL.md",
     "references/**",
     "scripts/*.py",
