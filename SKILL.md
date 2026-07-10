@@ -149,15 +149,19 @@ probhub build L01 --skip-judge
   - `brute.cpp`：朴素但绝对正确，允许 TLE/MLE，不允许 WA。
   - `wrong*.cpp`：针对典型错误，必须被数据击杀。
   - `inmaker.cpp` 或生成脚本：覆盖样例、随机、边界、极限和定向卡错解数据。
-- 非唯一答案使用 `code/checker.cpp`；交互题使用 `code/interactor.cpp`。Windows MinGW 编译 testlib 程序时加 `-static`。
+- 普通唯一答案题使用 `judge.type: standard`：忽略整个输出首尾空白和每行末尾空格/Tab，但行内空格与内部换行仍需一致。需要 Token 级宽松比较时改用 Checker。
+- 非唯一答案和浮点题使用 `judge.type: custom` 与 `code/checker.cpp`；交互题使用 `judge.type: interactive` 与 `code/interactor.cpp`。实现前读取 `references/checker-interactor.md`。
+- Checker/Interactor 必须使用附带的 DOMjudge/testlib 协议；交互题按需设置 `judge.interactive.idle_limit` 和 `transcript_limit`。Core 负责本地编译以及生成 `output_validators/validate/`，不得手工维护该生成目录。
 - 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
+- 为定向卡错解和复杂度数据配置 `data.groups` 与结构化 `solutions.*[].expected`；实现或审查时读取 `references/data-groups-expectations.md`。要求错解必须 WA 时显式写 `status: WA`，不得用偶然 RE/TLE 代替。
 - 时间限制使用正整数秒；内存限制至少为 `256MB` 且为 2 的幂。
 - 复杂生成器读取 `references/cyaron.md`；简单 C++ 生成器读取 `references/fast.md`。
 
 # 6. 沙箱宿命与修复
 
 - Validator 失败：修复生成器或数据格式并重新生成。
-- accepted 非全 AC：修复标程或答案。
+- accepted 非全 AC：修复标程、答案或 Checker/Interactor。
+- Checker/Interactor 返回 `FAIL`：这是题目基础设施错误，不得当作错解被击杀；检查官方答案、协议和评测程序。
 - brute 出现 WA：修复 brute、标程或答案；不得忽略。
 - brute 没有任何 TLE/MLE：检查复杂度与数据强度。
 - wrong 全 AC：补充针对性数据或修正错解模型。

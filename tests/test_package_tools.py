@@ -2,6 +2,9 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from zipfile import ZipFile
+
+from probhub.package_tools import generate_domjudge_config, validate_output_validator_source
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,6 +46,41 @@ class PackageToolsTests(unittest.TestCase):
             self.assertTrue(result["ok"], result)
             self.assertEqual(result["stats"]["sample_cases"], 1)
             self.assertEqual(result["stats"]["secret_cases"], 1)
+
+    def test_custom_and_interactive_packages_include_managed_validator_sources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            for judge_type, source_key, validation in (
+                ("custom", "checker", "custom"),
+                ("interactive", "interactor", "custom interactive"),
+            ):
+                with self.subTest(judge_type=judge_type):
+                    problem = temp / judge_type
+                    self.create_problem(problem)
+                    code = problem / "code"
+                    code.mkdir()
+                    source = code / f"{source_key}.cpp"
+                    source.write_text('#include "testlib.h"\nint main(){}\n', encoding="utf-8")
+                    config = {
+                        "name": judge_type,
+                        "limits": {"time": 1, "memory": 256},
+                        "judge": {
+                            "type": judge_type,
+                            source_key: f"code/{source_key}.cpp",
+                        },
+                    }
+                    generate_domjudge_config(problem, config)
+                    self.assertIsNotNone(validate_output_validator_source(problem, config))
+                    output = temp / f"{judge_type}.zip"
+                    PACKAGE.build_package(problem, output)
+                    result = VERIFY.verify_package(output, require_pdf=True)
+                    self.assertTrue(result["ok"], result)
+                    with ZipFile(output) as archive:
+                        names = set(archive.namelist())
+                        problem_yaml = archive.read("problem.yaml").decode("utf-8")
+                    self.assertIn(f"validation: {validation}", problem_yaml)
+                    self.assertIn("output_validators/validate/validate.cpp", names)
+                    self.assertIn("output_validators/validate/testlib.h", names)
 
 
 if __name__ == "__main__":

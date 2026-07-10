@@ -783,7 +783,10 @@ HTML_TEMPLATE = r"""
                                 <tbody>
                                     <template x-for="row in sandboxMatrixRows()" :key="row.case">
                                         <tr class="border-b border-white/[0.015]">
-                                            <td class="px-3 py-2 font-mono text-cream-muted" x-text="row.case"></td>
+                                            <td class="px-3 py-2 font-mono text-cream-muted">
+                                                <span x-text="row.case"></span>
+                                                <span x-show="row.groups.length" class="block mt-1 text-[9px] text-gold" x-text="row.groups.join(', ')"></span>
+                                            </td>
                                             <template x-for="prog in sandboxMatrixPrograms()" :key="prog">
                                                 <td class="px-3 py-2">
                                                     <span class="inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px]"
@@ -795,6 +798,26 @@ HTML_TEMPLATE = r"""
                                     </template>
                                 </tbody>
                             </table>
+                        </div>
+                    </div>
+
+                    <div x-show="selectedIdx !== null && sandboxExpectationRows().length > 0" class="rounded-xl border border-white/[0.02] overflow-hidden bg-ink-input/30">
+                        <div class="px-4 py-3 border-b border-white/[0.02] flex items-center justify-between">
+                            <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">宿命断言</h3>
+                            <span class="text-[10px] font-mono text-cream-subtle" x-text="sandboxExpectationRows().length + ' programs'"></span>
+                        </div>
+                        <div class="divide-y divide-white/[0.02]">
+                            <template x-for="exp in sandboxExpectationRows()" :key="exp.program">
+                                <div class="px-4 py-3 grid grid-cols-[minmax(0,1.4fr)_auto_minmax(0,1fr)_minmax(0,1.4fr)] gap-4 items-center text-[11px]">
+                                    <div>
+                                        <p class="font-mono text-cream" x-text="exp.program"></p>
+                                        <p class="text-cream-subtle mt-1" x-text="'status ' + (exp.expected_statuses || []).join('/') + ' · forbid ' + ((exp.forbidden_statuses || []).join('/') || '-')"></p>
+                                    </div>
+                                    <span class="font-mono px-2 py-0.5 rounded" :class="exp.ok ? 'bg-success/15 text-success' : 'bg-danger/15 text-danger'" x-text="exp.ok ? 'PASS' : 'FAIL'"></span>
+                                    <p class="font-mono text-gold" x-text="(exp.groups && exp.groups.length) ? exp.groups.join(', ') : 'all cases'"></p>
+                                    <p class="font-mono text-cream-subtle" x-text="sandboxFirstRelevant(exp) ? sandboxFirstRelevant(exp).case + ' → ' + sandboxFirstRelevant(exp).status : '-' "></p>
+                                </div>
+                            </template>
                         </div>
                     </div>
 
@@ -1162,8 +1185,13 @@ HTML_TEMPLATE = r"""
                     const compileItem = (kind) => compile.find(c => c.kind === kind);
                     const sumFor = (kind) => Object.values(summaries).filter(s => s.kind === kind);
                     const detailFor = (items) => items.length
-                        ? items.map(s => `${s.program}: AC ${s.stats.AC || 0}, WA ${s.stats.WA || 0}, TLE ${s.stats.TLE || 0}, MLE ${s.stats.MLE || 0}, RE ${s.stats.RE || 0}`).join(' · ')
+                        ? items.map(s => {
+                            const exp = s.expectation || {};
+                            const fate = Object.keys(exp).length ? ` · fate ${exp.ok ? 'PASS' : 'FAIL'}` : '';
+                            return `${s.program}: AC ${s.stats.AC || 0}, WA ${s.stats.WA || 0}, TLE ${s.stats.TLE || 0}, MLE ${s.stats.MLE || 0}, RE ${s.stats.RE || 0}${fate}`;
+                        }).join(' · ')
                         : 'No run';
+                    const expectationOk = (items) => items.length > 0 && items.every(s => (s.expectation || {}).ok === true);
                     const std = sumFor('std');
                     const brute = sumFor('brute');
                     const wrong = sumFor('wrong');
@@ -1177,21 +1205,21 @@ HTML_TEMPLATE = r"""
                         },
                         {
                             key: 'std', title: 'Standard',
-                            ok: std.length > 0 && std.every(s => (s.stats.WA || 0) + (s.stats.TLE || 0) + (s.stats.MLE || 0) + (s.stats.RE || 0) === 0),
+                            ok: expectationOk(std),
                             warn: false,
                             status: compileFailed('std') ? 'CE' : (std.length ? 'DONE' : 'FAIL'),
                             detail: detailFor(std)
                         },
                         {
                             key: 'brute', title: 'Brute',
-                            ok: brute.length > 0 && brute.every(s => (s.stats.WA || 0) === 0 && ((s.stats.TLE || 0) + (s.stats.MLE || 0)) > 0),
+                            ok: expectationOk(brute),
                             warn: brute.length === 0,
                             status: brute.length ? 'DONE' : 'SKIP',
                             detail: detailFor(brute)
                         },
                         {
                             key: 'wrong', title: 'Wrong',
-                            ok: wrong.length > 0 && wrong.some(s => (s.stats.WA || 0) + (s.stats.TLE || 0) + (s.stats.MLE || 0) + (s.stats.RE || 0) > 0),
+                            ok: expectationOk(wrong),
                             warn: wrong.length === 0,
                             status: wrong.length ? 'DONE' : 'SKIP',
                             detail: detailFor(wrong)
@@ -1208,10 +1236,20 @@ HTML_TEMPLATE = r"""
                     const cases = (this.sandboxResult && this.sandboxResult.cases) || [];
                     const rows = {};
                     cases.forEach(c => {
-                        if (!rows[c.case]) rows[c.case] = { case: c.case, results: {} };
+                        if (!rows[c.case]) rows[c.case] = { case: c.case, groups: c.groups || [], results: {} };
+                        rows[c.case].groups = [...new Set([...(rows[c.case].groups || []), ...(c.groups || [])])];
                         rows[c.case].results[c.program] = c;
                     });
                     return Object.values(rows).sort((a, b) => a.case.localeCompare(b.case, undefined, { numeric: true }));
+                },
+
+                sandboxExpectationRows() {
+                    const expectations = (this.sandboxResult && this.sandboxResult.expectations) || {};
+                    return Object.values(expectations).sort((a, b) => String(a.program).localeCompare(String(b.program)));
+                },
+
+                sandboxFirstRelevant(expectation) {
+                    return expectation.first_forbidden || expectation.first_expected_match || expectation.first_non_ac || null;
                 },
 
                 sandboxStatusClass(status) {
@@ -1219,7 +1257,7 @@ HTML_TEMPLATE = r"""
                     if (status === 'WA') return 'bg-danger/15 text-danger';
                     if (status === 'TLE') return 'bg-gold/15 text-gold';
                     if (status === 'MLE') return 'bg-danger/15 text-danger';
-                    if (status === 'RE') return 'bg-danger/20 text-danger';
+                    if (status === 'RE' || status === 'FAIL') return 'bg-danger/20 text-danger';
                     return 'bg-ink-elevated text-cream-subtle';
                 },
 
@@ -1722,8 +1760,11 @@ def _empty_sandbox_result(info):
         "compiles": [],
         "validator": [],
         "cases": [],
+        "groups": [],
+        "expectations": {},
         "summaries": {},
         "cache": {},
+        "transcripts": [],
         "final": None,
     }
 
@@ -1734,7 +1775,12 @@ def _apply_sandbox_event(result, event):
         result["limits"] = {
             "time": event.get("time_limit", 1),
             "memory": event.get("memory_limit", 256),
+            "judge_type": event.get("judge_type", "standard"),
+            "idle_limit": event.get("idle_limit"),
+            "transcript_limit": event.get("transcript_limit"),
         }
+    elif typ == "groups":
+        result["groups"] = event.get("groups") or []
     elif typ == "compile":
         result["compiles"].append({
             "kind": event.get("kind"),
@@ -1754,12 +1800,26 @@ def _apply_sandbox_event(result, event):
             "kind": event.get("kind"),
             "program": event.get("program"),
             "case": event.get("case"),
+            "groups": event.get("groups") or [],
             "status": event.get("status"),
             "time": float(event.get("time") or 0),
             "memory": event.get("memory"),
             "time_limit": event.get("time_limit"),
             "memory_limit": event.get("memory_limit"),
             "memory_enforced": event.get("memory_enforced"),
+            "judge_type": event.get("judge_type", "standard"),
+            "message": event.get("message", ""),
+            "timeout_kind": event.get("timeout_kind"),
+            "transcript_truncated": bool(event.get("transcript_truncated")),
+            "cached": bool(event.get("cached")),
+        })
+    elif typ == "transcript":
+        result["transcripts"].append({
+            "kind": event.get("kind"),
+            "program": event.get("program"),
+            "case": event.get("case"),
+            "entries": event.get("entries") or [],
+            "truncated": bool(event.get("truncated")),
             "cached": bool(event.get("cached")),
         })
     elif typ == "summary":
@@ -1768,6 +1828,13 @@ def _apply_sandbox_event(result, event):
             "kind": event.get("kind"),
             "program": program,
             "stats": event.get("stats", {}),
+            "expectation": event.get("expectation") or {},
+        }
+    elif typ == "expectation":
+        program = event.get("program") or f"{event.get('kind', 'unknown')}-expectation"
+        result["expectations"][program] = {
+            key: value for key, value in event.items()
+            if key not in {"protocol", "protocol_version", "type"}
         }
     elif typ == "cache":
         result["cache"] = {
@@ -1786,7 +1853,13 @@ def _apply_sandbox_event(result, event):
 def _sandbox_log_line(event):
     typ = event.get("type")
     if typ == "limits":
-        return f"[limits] {event.get('time_limit', 1):g}s / {event.get('memory_limit', 256)}MB"
+        return (
+            f"[limits:{event.get('judge_type', 'standard')}] "
+            f"{event.get('time_limit', 1):g}s / {event.get('memory_limit', 256)}MB"
+        )
+    if typ == "groups":
+        names = [group.get("name") for group in (event.get("groups") or [])]
+        return f"[groups] {', '.join(name for name in names if name) or 'none'}"
     if typ == "compile":
         ok = event.get("ok")
         status = "SKIP" if ok is None else ("OK" if ok else "FAIL")
@@ -1794,9 +1867,29 @@ def _sandbox_log_line(event):
     if typ == "validator":
         return f"[validator:{'OK' if event.get('ok') else 'FAIL'}] {event.get('case')}"
     if typ == "case":
-        return f"[{event.get('kind')}] {event.get('program')} / {event.get('case')} -> {event.get('status')} ({float(event.get('time') or 0):.3f}s)"
+        detail = f" · {event.get('message')}" if event.get("message") else ""
+        return (
+            f"[{event.get('kind')}:{event.get('judge_type', 'standard')}] "
+            f"{event.get('program')} / {event.get('case')} -> {event.get('status')} "
+            f"({float(event.get('time') or 0):.3f}s){detail}"
+        )
+    if typ == "transcript":
+        suffix = " truncated" if event.get("truncated") else ""
+        return (
+            f"[transcript{suffix}] {event.get('program')} / {event.get('case')}: "
+            f"{len(event.get('entries') or [])} chunks"
+        )
     if typ == "summary":
         return f"[summary] {event.get('program')}: {event.get('stats')}"
+    if typ == "expectation":
+        state = "PASS" if event.get("ok") else "FAIL"
+        first = event.get("first_forbidden") or event.get("first_expected_match") or event.get("first_non_ac")
+        suffix = f" · first={first.get('case')}:{first.get('status')}" if first else ""
+        return (
+            f"[expectation:{state}] {event.get('program')} "
+            f"status={event.get('expected_statuses') or []} "
+            f"groups={event.get('groups') or ['all']}{suffix}"
+        )
     if typ == "final":
         return f"[final:{'OK' if event.get('ok') else 'FAIL'}] {event.get('message')}"
     return json.dumps(event, ensure_ascii=False)

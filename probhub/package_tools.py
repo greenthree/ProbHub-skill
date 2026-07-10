@@ -1,16 +1,59 @@
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
+from .errors import ProbHubError
 from .io import write_yaml
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+TESTLIB_PATH = PACKAGE_ROOT / "references" / "testlib.h"
 
 FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 ROOT_FILES = ("domjudge-problem.ini", "problem.yaml", "problem.pdf")
 ROOT_DIRS = ("data", "output_validators")
 
 
+def _judge_type(config):
+    value = str((config.get("judge") or {}).get("type", "standard")).strip().lower()
+    return "custom" if value == "checker" else value
+
+
+def prepare_output_validator(problem_dir, config):
+    problem_dir = Path(problem_dir)
+    validate_dir = problem_dir / "output_validators" / "validate"
+    judge = config.get("judge") or {}
+    judge_type = _judge_type(config)
+    source_key = "checker" if judge_type == "custom" else "interactor" if judge_type == "interactive" else None
+
+    if source_key is None:
+        if validate_dir.exists():
+            shutil.rmtree(validate_dir)
+        output_root = validate_dir.parent
+        if output_root.is_dir() and not any(output_root.iterdir()):
+            output_root.rmdir()
+        return None
+
+    source_value = judge.get(source_key)
+    if not source_value:
+        raise ProbHubError(f"judge.{source_key} is required for {judge_type} judging")
+    source = problem_dir / source_value
+    if not source.is_file():
+        raise ProbHubError(f"{source_key} not found: {source_value}")
+    if not TESTLIB_PATH.is_file():
+        raise ProbHubError(f"testlib.h not found: {TESTLIB_PATH}")
+
+    validate_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, validate_dir / "validate.cpp")
+    shutil.copyfile(TESTLIB_PATH, validate_dir / "testlib.h")
+    return validate_dir
+
+
 def generate_domjudge_config(problem_dir, config):
+    problem_dir = Path(problem_dir)
     limits = config.get("limits") or {}
     time_limit = limits.get("time", 1)
     memory_limit = limits.get("memory", 256)
@@ -18,12 +61,38 @@ def generate_domjudge_config(problem_dir, config):
         f"timelimit='{time_limit}'\n", encoding="utf-8"
     )
     domjudge = {"name": config.get("name") or config.get("display_name"), "limits": {"memory": memory_limit}}
-    judge_type = (config.get("judge") or {}).get("type", "standard")
+    judge_type = _judge_type(config)
     if judge_type == "interactive":
         domjudge["validation"] = "custom interactive"
-    elif judge_type in {"custom", "checker"}:
+    elif judge_type == "custom":
         domjudge["validation"] = "custom"
+    prepare_output_validator(problem_dir, config)
     write_yaml(problem_dir / "problem.yaml", domjudge)
+
+
+def validate_output_validator_source(problem_dir, config):
+    validate_dir = prepare_output_validator(problem_dir, config)
+    if validate_dir is None:
+        return None
+    source = validate_dir / "validate.cpp"
+    with tempfile.TemporaryDirectory(prefix="probhub-validator-build-") as temp:
+        output = Path(temp) / ("validate.exe" if os.name == "nt" else "validate")
+        command = ["g++", str(source), "-o", str(output), "-O2", "-std=c++17", "-I", str(validate_dir)]
+        if os.name == "nt":
+            command.insert(4, "-static")
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            raise ProbHubError(f"failed to run g++ for output validator: {exc}") from exc
+        if result.returncode != 0:
+            raise ProbHubError(f"output validator failed to compile: {result.stderr.strip()}")
+    return validate_dir
 
 
 def collect_package_files(problem_dir):
@@ -109,6 +178,17 @@ def verify_package(zip_path, require_pdf=False):
                     errors.append("problem.yaml has no root name field")
                 if not re.search(r"(?m)^\s*memory\s*:\s*\d+", text):
                     warnings.append("problem.yaml has no numeric memory limit")
+                validation = None
+                match = re.search(r"(?m)^validation\s*:\s*['\"]?([^'\"\r\n]+)", text)
+                if match:
+                    validation = match.group(1).strip()
+                if validation in {"custom", "custom interactive"}:
+                    for required in (
+                        "output_validators/validate/validate.cpp",
+                        "output_validators/validate/testlib.h",
+                    ):
+                        if required not in names:
+                            errors.append(f"missing custom validator file: {required}")
     except (OSError, BadZipFile) as exc:
         errors.append(f"cannot read ZIP: {exc}")
     return {"ok": not errors, "errors": errors, "warnings": warnings, "stats": stats}

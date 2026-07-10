@@ -11,7 +11,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 ## 核心能力
 
 - **Agent 驱动出题**：内置 [SKILL.md](SKILL.md)，让 Claude Code、Codex 或兼容 Agent 按固定流程完成出题任务。
-- **严谨数据闭环**：自动组织 `std.cpp`、`validator.cpp`、`brute.cpp`、`wrong.cpp`，并通过本地沙箱检查标程 AC、暴力不 WA、错解被卡掉。
+- **严谨数据闭环**：自动组织 `std.cpp`、`validator.cpp`、`brute.cpp`、`wrong.cpp`，支持数据逻辑分组、结构化宿命和首个击杀用例，避免用偶然 RE/TLE 误判错解已被正确卡掉。
 - **时空限制自检**：`local_judge.py` 支持读取 `meta.json`、`domjudge-problem.ini`、`problem.yaml` 中的时间和内存限制，并报告 TLE/MLE/RE/WA/AC。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 微调题面**：提供 Flask 控制台，支持题目排序、Markdown 预览、样例编辑、引言 Quote、时空限制编辑、全卷编译和 PDF 分发。
@@ -218,7 +218,11 @@ python scripts/local_judge.py <problem_dir> --jsonl
 - `solutions.accepted` 指向的程序是否全部 AC。
 - `solutions.brute` 指向的程序是否不 WA，并且至少出现 TLE 或 MLE，用于证明强数据足够强。
 - `solutions.wrong` 指向的程序是否不能全 AC。
-- 每个测试点的时间和内存状态。
+- `judge.type: standard` 的普通题按行比较，允许每行末尾多余的空格或 Tab；行内空格和内部换行仍严格检查。
+- `judge.type: custom` 时，使用 `code/checker.cpp` 按 DOMjudge/testlib 协议判定输出。
+- `judge.type: interactive` 时，将选手程序与 `code/interactor.cpp` 双向连接，执行总时间/空闲超时，并记录有大小上限的双向 Transcript。
+- 每个测试点的时间和内存状态，以及 Checker/Interactor 判定信息。
+- `data.groups` 与 `solutions.*[].expected` 定义的数据组击杀矩阵、目标/禁止状态和首个相关用例；详见 `references/data-groups-expectations.md`。
 
 ### 沙箱增量缓存
 
@@ -349,7 +353,7 @@ python launch_ui.py
 - `domjudge-problem.ini`
 - `problem.yaml`
 - `problem.pdf`，如果已生成
-- `output_validators/`，如果存在自定义评测
+- `output_validators/`，如果存在自定义评测；Schema v1 下由 Core 从 `code/checker.cpp` 或 `code/interactor.cpp` 自动生成
 
 推荐使用确定性打包和验证脚本：
 
@@ -372,6 +376,7 @@ ProbHub-skill/
 │   └── init.js               # npm 脚手架入口
 ├── references/
 │   ├── cli.md                # Workspace Schema v1 完整 CLI 手册
+│   ├── checker-interactor.md # Checker 与交互题协议和模板
 │   ├── legacy-workflow.md    # 无 Schema v1 时按需加载的旧工作流
 │   ├── cyaron.md             # CYaRon 快速参考
 │   ├── fast.md               # 简单 C++ 数据生成模板

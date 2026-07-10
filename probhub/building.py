@@ -7,7 +7,7 @@ from .hashing import hash_file
 from .io import write_json
 from .judging import judge_problem
 from .linting import compute_data_hash, compute_source_hash, compute_workspace_hash, lint_workspace
-from .package_tools import build_package, generate_domjudge_config, verify_package
+from .package_tools import build_package, generate_domjudge_config, validate_output_validator_source, verify_package
 from .typesetting import compile_collection, extract_problem_pdfs
 from .workspace import load_problem
 
@@ -34,6 +34,7 @@ def write_manifest(root, workspace, problem_dir, config, package_path):
 
 def package_problem(root, problem_dir, config, require_pdf=True):
     generate_domjudge_config(problem_dir, config)
+    validate_output_validator_source(problem_dir, config)
     output = root / f"{config['id']}.zip"
     build_package(problem_dir, output)
     verification = verify_package(output, require_pdf=require_pdf)

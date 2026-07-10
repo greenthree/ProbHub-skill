@@ -45,15 +45,71 @@ judge:
   validator: code/validator.cpp
 solutions:
   accepted: [code/std.cpp]
-  brute: [code/brute.cpp]
-  wrong: [code/wrong_greedy.cpp]
+  brute:
+    - file: code/brute.cpp
+      expected:
+        status: [TLE, MLE]
+        groups: [stress]
+  wrong:
+    - file: code/wrong_greedy.cpp
+      expected:
+        status: WA
+        groups: [greedy-counterexample]
 generators: [code/inmaker.cpp]
 data:
   sample_dir: data/sample
   secret_dir: data/secret
+  groups:
+    - name: greedy-counterexample
+      role: wrong-solution-killer
+      patterns: [secret/greedy*]
+      targets: [code/wrong_greedy.cpp]
+    - name: stress
+      role: brute-killer
+      patterns: [secret/stress*]
+      targets: [code/brute.cpp]
 domjudge:
   include_pdf: true
 ```
+
+### Judge modes
+
+普通唯一答案题：
+
+```yaml
+judge:
+  type: standard
+  validator: code/validator.cpp
+```
+
+`standard` 比较会忽略整个输出首尾空白，以及每一行末尾的空格和 Tab。因此 `42` 与 `42   ` 等价；但行内多余空格、非首行的行首空白、缺少或增加的内部换行仍会导致 WA。需要更宽松的 Token 比较、浮点误差或非唯一答案时，应使用 `judge.type: custom` 和 Checker。
+
+自定义 Checker（包含浮点题和非唯一答案题）：
+
+```yaml
+judge:
+  type: custom
+  validator: code/validator.cpp
+  checker: code/checker.cpp
+```
+
+交互题：
+
+```yaml
+judge:
+  type: interactive
+  validator: code/validator.cpp
+  interactor: code/interactor.cpp
+  interactive:
+    idle_limit: 1.0
+    transcript_limit: 65536
+```
+
+`validator` 始终校验输入。`checker` 和 `interactor` 使用 ProbHub 附带的 DOMjudge/testlib 协议；完整参数、退出状态与模板见 `references/checker-interactor.md`。Core 会从规范源码生成 `output_validators/validate/validate.cpp` 和 `testlib.h`，不得手工维护生成目录。
+
+### Data groups and solution expectations
+
+`solutions` 可继续使用字符串列表，也可使用带 `file`、`expected.status`、`expected.groups`、`expected.all` 和 `expected.forbid` 的结构化条目。`data.groups` 使用 glob 将测试点映射到逻辑组，并可通过 `targets` 指定需要被该组击杀的程序。完整语义、默认宿命和 JSONL 字段见 `references/data-groups-expectations.md`。
 
 ## Problem directory layout
 

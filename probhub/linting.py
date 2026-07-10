@@ -81,10 +81,139 @@ def lint_problem(root, workspace, entry):
     except Exception as exc:
         errors.append(str(exc))
     judge = config.get("judge") or {}
+    judge_type = str(judge.get("type", "standard")).strip().lower()
+    if judge_type == "checker":
+        judge_type = "custom"
+    if judge_type not in {"standard", "custom", "interactive"}:
+        errors.append(f"unsupported judge.type: {judge_type}")
+
     validator = judge.get("validator")
-    if validator and not (problem_dir / validator).is_file():
+    if not validator:
+        errors.append("judge.validator is required")
+    elif not (problem_dir / validator).is_file():
         errors.append(f"validator not found: {validator}")
+
+    checker = judge.get("checker")
+    interactor = judge.get("interactor")
+    if judge_type == "custom":
+        if not checker:
+            errors.append("judge.checker is required for custom judging")
+        elif not (problem_dir / checker).is_file():
+            errors.append(f"checker not found: {checker}")
+        if interactor:
+            errors.append("judge.interactor is only valid for interactive judging")
+    elif judge_type == "interactive":
+        if not interactor:
+            errors.append("judge.interactor is required for interactive judging")
+        elif not (problem_dir / interactor).is_file():
+            errors.append(f"interactor not found: {interactor}")
+        if checker:
+            errors.append("judge.checker is not used for interactive judging")
+        interactive = judge.get("interactive") or {}
+        if not isinstance(interactive, dict):
+            errors.append("judge.interactive must be a mapping")
+        else:
+            idle_limit = interactive.get("idle_limit")
+            if idle_limit is not None and (not isinstance(idle_limit, (int, float)) or idle_limit <= 0):
+                errors.append("judge.interactive.idle_limit must be positive")
+            transcript_limit = interactive.get("transcript_limit")
+            if transcript_limit is not None and (
+                not isinstance(transcript_limit, int) or transcript_limit < 0
+            ):
+                errors.append("judge.interactive.transcript_limit must be a non-negative integer")
+    else:
+        if checker:
+            errors.append("judge.checker requires judge.type: custom")
+        if interactor:
+            errors.append("judge.interactor requires judge.type: interactive")
+    solutions = config.get("solutions") or {}
+    configured_programs = set()
+    referenced_groups = set()
+    allowed_statuses = {"AC", "WA", "TLE", "MLE", "RE", "FAIL"}
+    for solution_kind in ("accepted", "brute", "wrong"):
+        entries = solutions.get(solution_kind) or []
+        entries = entries if isinstance(entries, list) else [entries]
+        for solution in entries:
+            solution_file = solution.get("file") if isinstance(solution, dict) else solution
+            if solution_file:
+                solution_file = str(solution_file).replace("\\", "/")
+                configured_programs.add(solution_file)
+                if not (problem_dir / solution_file).is_file():
+                    errors.append(f"solution not found: {solution_file}")
+            if not isinstance(solution, dict) or not solution.get("expected"):
+                continue
+            expected = solution.get("expected")
+            if not isinstance(expected, dict):
+                errors.append(f"solutions.{solution_kind}.expected must be a mapping")
+                continue
+            if "status" not in expected:
+                errors.append(f"expected.status is required for {solution_file}")
+            for field in ("status", "forbid"):
+                values = expected.get(field)
+                values = [values] if isinstance(values, str) else values or []
+                if not isinstance(values, list):
+                    errors.append(f"expected.{field} must be a status or list for {solution_file}")
+                    continue
+                if field == "status" and not values:
+                    errors.append(f"expected.status must not be empty for {solution_file}")
+                invalid = sorted({str(status).upper() for status in values} - allowed_statuses)
+                if invalid:
+                    errors.append(
+                        f"invalid expected {field} for {solution_file}: {', '.join(invalid)}"
+                    )
+            groups = expected.get("groups")
+            groups = [groups] if isinstance(groups, str) else groups or []
+            if not isinstance(groups, list):
+                errors.append(f"expected.groups must be a name or list for {solution_file}")
+                groups = []
+            referenced_groups.update(str(group) for group in groups)
+            if "all" in expected and not isinstance(expected.get("all"), bool):
+                errors.append(f"expected.all must be boolean for {solution_file}")
+
     data = config.get("data") or {}
+    groups = data.get("groups") or []
+    if not isinstance(groups, list):
+        errors.append("data.groups must be a list")
+        groups = []
+    group_names = []
+    for group in groups:
+        if not isinstance(group, dict):
+            errors.append("data.groups entries must be mappings")
+            continue
+        group_name = str(group.get("name", "")).strip()
+        if not group_name:
+            errors.append("data group has no name")
+            continue
+        group_names.append(group_name)
+        patterns = group.get("patterns") or group.get("cases") or []
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        if not isinstance(patterns, list):
+            errors.append(f"data group {group_name} patterns must be a string or list")
+            patterns = []
+        if not patterns:
+            warnings.append(f"data group {group_name} has no patterns; name-prefix matching will be used")
+        targets = group.get("targets") or []
+        if isinstance(targets, str):
+            targets = [targets]
+        if not isinstance(targets, list):
+            errors.append(f"data group {group_name} targets must be a string or list")
+            targets = []
+        unknown_targets = sorted(
+            str(target).replace("\\", "/") for target in targets
+            if str(target).replace("\\", "/") not in configured_programs
+        )
+        if unknown_targets:
+            errors.append(
+                f"data group {group_name} has unknown targets: {', '.join(unknown_targets)}"
+            )
+    duplicate_groups = sorted({name for name in group_names if group_names.count(name) > 1})
+    if duplicate_groups:
+        errors.append("duplicate data group names: " + ", ".join(duplicate_groups))
+    unknown_groups = sorted(referenced_groups - set(group_names))
+    if unknown_groups:
+        errors.append("unknown expected groups: " + ", ".join(unknown_groups))
+
     for kind, default in (("sample", "data/sample"), ("secret", "data/secret")):
         directory = problem_dir / data.get(f"{kind}_dir", default)
         inputs = {path.stem for path in directory.glob("*.in")} if directory.is_dir() else set()

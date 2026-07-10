@@ -1,9 +1,14 @@
+import fnmatch
 import hashlib
 import json
 import os
 import platform
 import re
+import signal
+import shutil
 import subprocess
+import tempfile
+import threading
 import sys
 import time
 
@@ -121,13 +126,25 @@ def validator_cache_key(program_fingerprint, in_file):
     )
 
 
-def testcase_cache_key(program_fingerprint, in_file, ans_file, time_limit, memory_limit):
+def testcase_cache_key(
+    program_fingerprint,
+    in_file,
+    ans_file,
+    time_limit,
+    memory_limit,
+    judge_type="standard",
+    judge_fingerprint="",
+    judge_options_fingerprint="",
+):
     return _hash_parts(
         CACHE_SCHEMA_VERSION,
         "case",
         platform.system(),
         platform.machine(),
         program_fingerprint,
+        judge_type,
+        judge_fingerprint,
+        judge_options_fingerprint,
         _file_digest(in_file),
         _file_digest(ans_file),
         f"{float(time_limit):.9g}",
@@ -369,7 +386,55 @@ def binary_path_for_source(source_path):
     return os.path.splitext(source_path)[0] + ".exe"
 
 
-def discover_solution_sources(prob_dir, config=None):
+def _expected_defaults(kind):
+    if kind == "std":
+        return {
+            "status": ["AC"],
+            "all": True,
+            "forbid": ["WA", "TLE", "MLE", "RE", "FAIL"],
+        }
+    if kind == "brute":
+        return {
+            "status": ["TLE", "MLE"],
+            "all": False,
+            "forbid": ["WA", "FAIL"],
+        }
+    return {
+        "status": ["WA", "TLE", "MLE", "RE"],
+        "all": False,
+        "forbid": ["FAIL"],
+    }
+
+
+def _status_list(value):
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [str(item).upper() for item in value]
+
+
+def _string_list(value):
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [str(item) for item in value]
+
+
+def _normalize_expected(kind, entry):
+    expected = _expected_defaults(kind)
+    configured = entry.get("expected") if isinstance(entry, dict) else None
+    if isinstance(configured, dict):
+        expected.update(configured)
+    expected["status"] = _status_list(expected.get("status"))
+    expected["forbid"] = _status_list(expected.get("forbid"))
+    expected["groups"] = _string_list(expected.get("groups"))
+    expected["all"] = bool(expected.get("all"))
+    return expected
+
+
+def discover_solution_entries(prob_dir, config=None):
     solutions = {"std": [], "brute": [], "wrong": []}
     if config is not None:
         configured = config.get("solutions") or {}
@@ -377,7 +442,10 @@ def discover_solution_sources(prob_dir, config=None):
             for entry in _config_entries(configured.get(config_key)):
                 source_path = resolve_problem_path(prob_dir, entry)
                 if source_path:
-                    solutions[kind].append(source_path)
+                    solutions[kind].append({
+                        "path": source_path,
+                        "expected": _normalize_expected(kind, entry),
+                    })
         return solutions
 
     search_dir = os.path.join(prob_dir, "code")
@@ -388,10 +456,20 @@ def discover_solution_sources(prob_dir, config=None):
             continue
         for kind in solutions:
             if file_name.startswith(kind):
-                solutions[kind].append(os.path.join(search_dir, file_name))
+                solutions[kind].append({
+                    "path": os.path.join(search_dir, file_name),
+                    "expected": _normalize_expected(kind, None),
+                })
                 break
     return solutions
 
+
+def discover_solution_sources(prob_dir, config=None):
+    """Compatibility view used by existing callers/tests."""
+    return {
+        kind: [entry["path"] for entry in entries]
+        for kind, entries in discover_solution_entries(prob_dir, config).items()
+    }
 
 def discover_validator_source(prob_dir, config=None):
     if config is not None:
@@ -400,6 +478,22 @@ def discover_validator_source(prob_dir, config=None):
     if os.path.isfile(code_validator):
         return code_validator
     return os.path.join(prob_dir, "validator.cpp")
+
+
+def configured_judge_type(config=None):
+    if config is None:
+        return "standard"
+    value = str(((config.get("judge") or {}).get("type", "standard"))).strip().lower()
+    return "custom" if value == "checker" else value
+
+
+def discover_judge_source(prob_dir, config, key):
+    if config is not None:
+        return resolve_problem_path(prob_dir, ((config.get("judge") or {}).get(key)))
+    candidate = os.path.join(prob_dir, "code", f"{key}.cpp")
+    if os.path.isfile(candidate):
+        return candidate
+    return os.path.join(prob_dir, f"{key}.cpp")
 
 
 def read_problem_limits(prob_dir, config=None):
@@ -472,7 +566,7 @@ def _unix_preexec_memory_limit(memory_limit_mb):
     return apply_limit
 
 
-def _windows_assign_job_memory_limit(proc, memory_limit_mb):
+def _windows_assign_job(proc, memory_limit_mb=None):
     if platform.system() != "Windows":
         return None
     try:
@@ -530,8 +624,10 @@ def _windows_assign_job_memory_limit(proc, memory_limit_mb):
             return None
 
         info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = 0x00000200 | 0x00002000  # JOB_MEMORY | KILL_ON_JOB_CLOSE
-        info.JobMemoryLimit = int(memory_limit_mb * 1024 * 1024)
+        info.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+        if memory_limit_mb is not None:
+            info.BasicLimitInformation.LimitFlags |= 0x00000200  # JOB_MEMORY
+            info.JobMemoryLimit = int(memory_limit_mb * 1024 * 1024)
         ok = kernel32.SetInformationJobObject(
             job, 9, ctypes.byref(info), ctypes.sizeof(info)
         )
@@ -546,6 +642,10 @@ def _windows_assign_job_memory_limit(proc, memory_limit_mb):
         return job
     except Exception:
         return None
+
+
+def _windows_assign_job_memory_limit(proc, memory_limit_mb):
+    return _windows_assign_job(proc, memory_limit_mb)
 
 
 def _windows_query_job_peak_memory(handle):
@@ -640,65 +740,501 @@ def _failed_status(returncode, stderr, memory_enforced, peak_memory_mb, memory_l
     return "RE"
 
 
-def run_testcase(bin_path, in_file, ans_file, time_limit=DEFAULT_TIME_LIMIT, memory_limit=DEFAULT_MEMORY_LIMIT):
-    """Run a test case and return (status, elapsed_time, peak_memory_mb, memory_enforced)."""
-    temp_out = os.path.join(os.path.dirname(bin_path), ".probhub-temp.out")
+def _terminate_process(proc, job_handle=None):
+    """Terminate a process and its process tree, then reap the direct child."""
+    if proc is None:
+        _close_windows_handle(job_handle)
+        return
+
+    if platform.system() == "Windows":
+        if job_handle:
+            # Closing a KILL_ON_JOB_CLOSE job kills descendants even if the direct
+            # child has already exited.
+            _close_windows_handle(job_handle)
+            job_handle = None
+        elif proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    else:
+        # Interactive/contestant processes are launched as session leaders. Kill
+        # the group even when the direct child already exited, so grandchildren
+        # cannot survive the sandbox.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+
+    try:
+        proc.wait(timeout=2)
+    except (subprocess.TimeoutExpired, OSError):
+        if proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+def _process_alive(pid):
+    if not pid:
+        return False
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            kernel32.CloseHandle(handle)
+            return True
+        except Exception:
+            return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def run_program_to_file(
+    bin_path,
+    in_file,
+    output_file,
+    time_limit=DEFAULT_TIME_LIMIT,
+    memory_limit=DEFAULT_MEMORY_LIMIT,
+):
+    """Run one contestant process and write stdout to output_file."""
     start = time.time()
     memory_enforced = False
     peak_memory_mb = None
     job_handle = None
+    proc = None
+    stderr_path = output_file + ".stderr"
     try:
-        with open(in_file, "r") as fin, open(temp_out, "w") as fout:
+        with open(in_file, "rb") as fin, open(output_file, "wb") as fout, open(stderr_path, "wb") as ferr:
             kwargs = {
                 "stdin": fin,
                 "stdout": fout,
-                "stderr": subprocess.PIPE,
-                "text": True,
-                "encoding": "utf-8",
-                "errors": "replace",
+                "stderr": ferr,
                 "preexec_fn": _unix_preexec_memory_limit(memory_limit),
             }
             if platform.system() == "Windows":
                 kwargs.pop("preexec_fn", None)
+            else:
+                kwargs["start_new_session"] = True
             proc = subprocess.Popen([bin_path], **kwargs)
             if platform.system() == "Windows":
                 job_handle = _windows_assign_job_memory_limit(proc, memory_limit)
                 memory_enforced = job_handle is not None
             else:
                 memory_enforced = kwargs.get("preexec_fn") is not None
-
             try:
-                _, stderr = proc.communicate(timeout=time_limit)
+                proc.wait(timeout=time_limit)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
                 peak_memory_mb = _windows_query_job_peak_memory(job_handle)
-                return "TLE", time_limit, peak_memory_mb, memory_enforced
+                _terminate_process(proc, job_handle)
+                job_handle = None
+                return "TLE", time_limit, peak_memory_mb, memory_enforced, "time limit exceeded"
 
             run_time = time.time() - start
             peak_memory_mb = _windows_query_job_peak_memory(job_handle)
             if proc.returncode != 0:
+                try:
+                    stderr = open(stderr_path, "r", encoding="utf-8", errors="replace").read().strip()
+                except OSError:
+                    stderr = ""
                 status = _failed_status(proc.returncode, stderr, memory_enforced, peak_memory_mb, memory_limit)
-                return status, run_time, peak_memory_mb, memory_enforced
-
-        with open(ans_file, "r") as fa, open(temp_out, "r") as ft:
-            status = "AC" if fa.read().strip() == ft.read().strip() else "WA"
-        return status, time.time() - start, peak_memory_mb, memory_enforced
-    except subprocess.TimeoutExpired:
-        return "TLE", time_limit, peak_memory_mb, memory_enforced
-    except (OSError, subprocess.CalledProcessError):
-        return "RE", time.time() - start, peak_memory_mb, memory_enforced
+                return status, run_time, peak_memory_mb, memory_enforced, stderr
+            return "AC", run_time, peak_memory_mb, memory_enforced, ""
+    except OSError as exc:
+        return "RE", time.time() - start, peak_memory_mb, memory_enforced, str(exc)
     finally:
         _close_windows_handle(job_handle)
+        try:
+            os.remove(stderr_path)
+        except FileNotFoundError:
+            pass
+
+
+def normalize_standard_output(text):
+    """Normalize harmless whitespace for ordinary exact-answer problems.
+
+    Leading/trailing whitespace around the complete output remains ignored for
+    backwards compatibility. Within the output, only whitespace at the end of
+    each line is ignored; line breaks and whitespace before/between tokens stay
+    significant.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    return [line.rstrip(" \t") for line in text.splitlines()]
+
+
+def compare_standard_output(answer_text, actual_text):
+    expected_lines = normalize_standard_output(answer_text)
+    actual_lines = normalize_standard_output(actual_text)
+    if expected_lines == actual_lines:
+        return True, ""
+    shared = min(len(expected_lines), len(actual_lines))
+    for index in range(shared):
+        if expected_lines[index] != actual_lines[index]:
+            return False, f"output differs from answer at line {index + 1}"
+    return False, f"output has a different line count (expected {len(expected_lines)}, found {len(actual_lines)})"
+
+
+def run_standard_testcase(
+    bin_path,
+    in_file,
+    ans_file,
+    time_limit=DEFAULT_TIME_LIMIT,
+    memory_limit=DEFAULT_MEMORY_LIMIT,
+):
+    output_file = os.path.join(os.path.dirname(bin_path), ".probhub-temp.out")
+    try:
+        status, elapsed, memory, memory_enforced, message = run_program_to_file(
+            bin_path, in_file, output_file, time_limit, memory_limit
+        )
+        if status != "AC":
+            return status, elapsed, memory, memory_enforced, message
+        with open(ans_file, "r", encoding="utf-8", errors="replace") as answer, open(
+            output_file, "r", encoding="utf-8", errors="replace"
+        ) as actual:
+            matched, message = compare_standard_output(answer.read(), actual.read())
+        status = "AC" if matched else "WA"
+        return status, elapsed, memory, memory_enforced, message
+    finally:
         for _ in range(20):
             try:
-                os.remove(temp_out)
+                os.remove(output_file)
                 break
             except FileNotFoundError:
                 break
             except OSError:
                 time.sleep(0.05)
 
+
+def _checker_result(returncode, message):
+    message = (message or "").strip()
+    if returncode in {0, 42}:
+        return "AC", message
+    if returncode in {1, 2, 43}:
+        return "WA", message
+    return "FAIL", message or f"checker exited with code {returncode}"
+
+
+def _feedback_message(feedback_dir, fallback=""):
+    for name in ("judgemessage.txt", "teammessage.txt"):
+        path = os.path.join(feedback_dir, name)
+        if os.path.isfile(path):
+            try:
+                message = open(path, "r", encoding="utf-8", errors="replace").read().strip()
+                if message:
+                    return message
+            except OSError:
+                pass
+    return (fallback or "").strip()
+
+
+def run_custom_testcase(
+    bin_path,
+    checker_bin,
+    in_file,
+    ans_file,
+    time_limit=DEFAULT_TIME_LIMIT,
+    memory_limit=DEFAULT_MEMORY_LIMIT,
+):
+    """Run a DOMjudge/testlib-style output validator.
+
+    The validator receives <input> <answer> <feedback-dir> as argv and reads
+    contestant output from stdin, matching DOMjudge's custom validation protocol.
+    """
+    output_file = os.path.join(os.path.dirname(bin_path), ".probhub-temp.out")
+    feedback_dir = tempfile.mkdtemp(prefix=".probhub-feedback-", dir=os.path.dirname(bin_path))
+    try:
+        status, elapsed, memory, memory_enforced, message = run_program_to_file(
+            bin_path, in_file, output_file, time_limit, memory_limit
+        )
+        if status != "AC":
+            return status, elapsed, memory, memory_enforced, message
+        try:
+            with open(output_file, "rb") as contestant_output:
+                checker = subprocess.run(
+                    [checker_bin, in_file, ans_file, feedback_dir],
+                    stdin=contestant_output,
+                    capture_output=True,
+                    text=False,
+                    timeout=max(5.0, float(time_limit)),
+                )
+            stderr = checker.stderr.decode("utf-8", errors="replace")
+            checker_message = _feedback_message(feedback_dir, stderr)
+            checker_status, checker_message = _checker_result(checker.returncode, checker_message)
+            return checker_status, elapsed, memory, memory_enforced, checker_message
+        except subprocess.TimeoutExpired:
+            return "FAIL", elapsed, memory, memory_enforced, "checker timed out"
+        except OSError as exc:
+            return "FAIL", elapsed, memory, memory_enforced, f"checker failed to start: {exc}"
+    finally:
+        for _ in range(20):
+            try:
+                os.remove(output_file)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                time.sleep(0.05)
+        shutil.rmtree(feedback_dir, ignore_errors=True)
+
+def _pump_interactive_stream(source, destination, direction, transcript, activity):
+    """Forward bytes while recording a bounded transcript and last activity time."""
+    try:
+        while True:
+            chunk = source.read(4096)
+            if not chunk:
+                break
+            activity["last"] = time.monotonic()
+            if transcript["bytes"] < transcript["limit"]:
+                remaining = transcript["limit"] - transcript["bytes"]
+                saved = chunk[:remaining]
+                transcript["entries"].append({
+                    "direction": direction,
+                    "data": saved.decode("utf-8", errors="replace"),
+                })
+                transcript["bytes"] += len(saved)
+                if len(saved) < len(chunk):
+                    transcript["truncated"] = True
+            else:
+                transcript["truncated"] = True
+            destination.write(chunk)
+            destination.flush()
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    finally:
+        try:
+            destination.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            source.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _interactive_result(status, elapsed, memory, memory_enforced, message, transcript, timeout_kind=None):
+    details = {
+        "transcript": transcript["entries"],
+        "transcript_truncated": transcript["truncated"],
+    }
+    if timeout_kind:
+        details["timeout_kind"] = timeout_kind
+    return status, elapsed, memory, memory_enforced, message, details
+
+
+def run_interactive_testcase(
+    bin_path,
+    interactor_bin,
+    in_file,
+    ans_file,
+    time_limit=DEFAULT_TIME_LIMIT,
+    memory_limit=DEFAULT_MEMORY_LIMIT,
+    idle_limit=None,
+    transcript_limit=65536,
+):
+    """Connect contestant and interactor with transcript, idle and total deadlines."""
+    start = time.time()
+    monotonic_start = time.monotonic()
+    idle_limit = max(float(idle_limit if idle_limit is not None else min(time_limit, 2.0)), 0.1)
+    transcript = {"entries": [], "bytes": 0, "limit": max(int(transcript_limit), 0), "truncated": False}
+    activity = {"last": monotonic_start}
+    solution = None
+    interactor = None
+    solution_job = None
+    interactor_job = None
+    memory_enforced = False
+    peak_memory_mb = None
+    threads = []
+    solution_stderr = os.path.join(os.path.dirname(bin_path), ".probhub-solution.stderr")
+    interactor_stderr = os.path.join(os.path.dirname(bin_path), ".probhub-interactor.stderr")
+    feedback_dir = tempfile.mkdtemp(prefix=".probhub-feedback-", dir=os.path.dirname(bin_path))
+    try:
+        with open(solution_stderr, "wb") as solution_err, open(interactor_stderr, "wb") as interactor_err:
+            solution_kwargs = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": solution_err,
+                "preexec_fn": _unix_preexec_memory_limit(memory_limit),
+                "bufsize": 0,
+            }
+            interactor_kwargs = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": interactor_err,
+                "bufsize": 0,
+            }
+            if platform.system() == "Windows":
+                solution_kwargs.pop("preexec_fn", None)
+            else:
+                solution_kwargs["start_new_session"] = True
+                interactor_kwargs["start_new_session"] = True
+
+            solution = subprocess.Popen([bin_path], **solution_kwargs)
+            if platform.system() == "Windows":
+                solution_job = _windows_assign_job_memory_limit(solution, memory_limit)
+                memory_enforced = solution_job is not None
+            else:
+                memory_enforced = solution_kwargs.get("preexec_fn") is not None
+            interactor = subprocess.Popen(
+                [interactor_bin, in_file, ans_file, feedback_dir],
+                **interactor_kwargs,
+            )
+            if platform.system() == "Windows":
+                interactor_job = _windows_assign_job(interactor)
+
+            threads = [
+                threading.Thread(
+                    target=_pump_interactive_stream,
+                    args=(solution.stdout, interactor.stdin, "solution_to_interactor", transcript, activity),
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=_pump_interactive_stream,
+                    args=(interactor.stdout, solution.stdin, "interactor_to_solution", transcript, activity),
+                    daemon=True,
+                ),
+            ]
+            for thread in threads:
+                thread.start()
+
+            deadline = monotonic_start + float(time_limit)
+            while solution.poll() is None or interactor.poll() is None:
+                now = time.monotonic()
+                timeout_kind = None
+                if now >= deadline:
+                    timeout_kind = "total"
+                elif now - activity["last"] >= idle_limit:
+                    timeout_kind = "idle"
+                if timeout_kind:
+                    peak_memory_mb = _windows_query_job_peak_memory(solution_job)
+                    _terminate_process(solution, solution_job)
+                    solution_job = None
+                    _terminate_process(interactor, interactor_job)
+                    interactor_job = None
+                    for thread in threads:
+                        thread.join(timeout=1)
+                    message = (
+                        "interactive idle timeout exceeded"
+                        if timeout_kind == "idle"
+                        else "interactive time limit exceeded"
+                    )
+                    elapsed = min(time.time() - start, float(time_limit))
+                    return _interactive_result(
+                        "TLE",
+                        elapsed,
+                        peak_memory_mb,
+                        memory_enforced,
+                        message,
+                        transcript,
+                        timeout_kind=timeout_kind,
+                    )
+                time.sleep(0.005)
+
+            for thread in threads:
+                thread.join(timeout=1)
+
+        elapsed = time.time() - start
+        peak_memory_mb = _windows_query_job_peak_memory(solution_job)
+        solution_message = ""
+        interactor_message = ""
+        try:
+            solution_message = open(solution_stderr, "r", encoding="utf-8", errors="replace").read().strip()
+        except OSError:
+            pass
+        try:
+            interactor_message = open(interactor_stderr, "r", encoding="utf-8", errors="replace").read().strip()
+        except OSError:
+            pass
+        interactor_message = _feedback_message(feedback_dir, interactor_message)
+
+        if solution.returncode != 0:
+            status = _failed_status(
+                solution.returncode,
+                solution_message,
+                memory_enforced,
+                peak_memory_mb,
+                memory_limit,
+            )
+            return _interactive_result(
+                status, elapsed, peak_memory_mb, memory_enforced, solution_message, transcript
+            )
+        interactor_status, message = _checker_result(interactor.returncode, interactor_message)
+        return _interactive_result(
+            interactor_status, elapsed, peak_memory_mb, memory_enforced, message, transcript
+        )
+    except OSError as exc:
+        _terminate_process(solution, solution_job)
+        solution_job = None
+        _terminate_process(interactor, interactor_job)
+        interactor_job = None
+        return _interactive_result(
+            "FAIL",
+            time.time() - start,
+            peak_memory_mb,
+            memory_enforced,
+            str(exc),
+            transcript,
+        )
+    finally:
+        _terminate_process(solution, solution_job)
+        solution_job = None
+        _terminate_process(interactor, interactor_job)
+        interactor_job = None
+        _close_windows_handle(solution_job)
+        for file_name in (solution_stderr, interactor_stderr):
+            try:
+                os.remove(file_name)
+            except FileNotFoundError:
+                pass
+        shutil.rmtree(feedback_dir, ignore_errors=True)
+
+def run_testcase(
+    bin_path,
+    in_file,
+    ans_file,
+    time_limit=DEFAULT_TIME_LIMIT,
+    memory_limit=DEFAULT_MEMORY_LIMIT,
+    judge_type="standard",
+    judge_bin=None,
+    idle_limit=None,
+    transcript_limit=65536,
+):
+    if judge_type == "custom":
+        status, elapsed, memory, memory_enforced, message = run_custom_testcase(
+            bin_path, judge_bin, in_file, ans_file, time_limit, memory_limit
+        )
+        return status, elapsed, memory, memory_enforced, message, {}
+    if judge_type == "interactive":
+        return run_interactive_testcase(
+            bin_path,
+            judge_bin,
+            in_file,
+            ans_file,
+            time_limit,
+            memory_limit,
+            idle_limit=idle_limit,
+            transcript_limit=transcript_limit,
+        )
+    status, elapsed, memory, memory_enforced, message = run_standard_testcase(
+        bin_path, in_file, ans_file, time_limit, memory_limit
+    )
+    return status, elapsed, memory, memory_enforced, message, {}
 
 def run_validator(val_bin, in_file):
     """Validate input using Linux-style LF endings on every host."""
@@ -718,24 +1254,126 @@ def run_validator(val_bin, in_file):
         return False, str(exc)
 
 
+def _data_groups(config=None):
+    result = []
+    raw_groups = (((config or {}).get("data") or {}).get("groups") or [])
+    if not isinstance(raw_groups, list):
+        return result
+    for raw in raw_groups:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name", "")).strip()
+        if not name:
+            continue
+        patterns = _string_list(raw.get("patterns") or raw.get("cases") or [])
+        targets = [item.replace("\\", "/") for item in _string_list(raw.get("targets") or [])]
+        result.append({
+            "name": name,
+            "role": raw.get("role"),
+            "patterns": patterns,
+            "targets": targets,
+        })
+    return result
+
+
+def _testcase_groups(case_name, suite, base_name, groups):
+    matched = []
+    for group in groups:
+        patterns = group["patterns"] or [f"{group['name']}*", f"*/{group['name']}*"]
+        values = (case_name, base_name, f"{suite}/{base_name}")
+        if any(any(fnmatch.fnmatch(value, pattern) for value in values) for pattern in patterns):
+            matched.append(group["name"])
+    return matched
+
+
 def collect_testcases(prob_dir, config=None):
     testcases = []
     data_config = (config or {}).get("data") or {}
+    groups = _data_groups(config)
     for suite, default in (("sample", "data/sample"), ("secret", "data/secret")):
         data_dir = os.path.join(prob_dir, data_config.get(f"{suite}_dir", default))
         if not os.path.isdir(data_dir):
             continue
         for in_name in sorted([f for f in os.listdir(data_dir) if f.endswith(".in")]):
             base_name = in_name[:-3]
+            case_name = f"{suite}/{base_name}"
             testcases.append({
                 "suite": suite,
                 "name": base_name,
-                "case": f"{suite}/{base_name}",
+                "case": case_name,
+                "groups": _testcase_groups(case_name, suite, base_name, groups),
                 "in_path": os.path.join(data_dir, in_name),
                 "ans_path": os.path.join(data_dir, f"{base_name}.ans"),
             })
     return testcases
 
+
+def _targeted_group_names(groups, program_name):
+    program_name = program_name.replace("\\", "/")
+    return [
+        group["name"]
+        for group in groups
+        if program_name in group["targets"]
+    ]
+
+
+def _expectation_cases(kind, testcases, expected, group_definitions, program_name):
+    # Accepted solutions remain responsible for the complete data set. Targeted
+    # groups are intended to express where brute/wrong solutions must be killed.
+    if kind == "std":
+        return list(testcases), []
+    groups = list(expected.get("groups") or [])
+    if not groups:
+        groups = _targeted_group_names(group_definitions, program_name)
+    if groups:
+        selected = [case for case in testcases if set(case.get("groups") or []) & set(groups)]
+        return selected, groups
+    return list(testcases), []
+
+
+def _result_snapshot(item):
+    if item is None:
+        return None
+    return {
+        "case": item.get("case"),
+        "groups": list(item.get("groups") or []),
+        "status": item.get("status"),
+        "message": item.get("message", ""),
+    }
+
+
+def evaluate_expectation(kind, program_name, expected, case_results, testcases, group_definitions):
+    selected_cases, groups = _expectation_cases(
+        kind, testcases, expected, group_definitions, program_name
+    )
+    selected_names = {case["case"] for case in selected_cases}
+    selected_results = [item for item in case_results if item["case"] in selected_names]
+    statuses = set(expected.get("status") or [])
+    forbidden_statuses = set(expected.get("forbid") or [])
+    all_required = bool(expected.get("all"))
+    matched = [item for item in selected_results if item["status"] in statuses]
+    forbidden = [item for item in case_results if item["status"] in forbidden_statuses]
+    status_ok = bool(selected_results) and (
+        len(matched) == len(selected_results) if all_required else bool(matched)
+    )
+    first_non_ac = next((item for item in case_results if item["status"] != "AC"), None)
+    first_expected_match = matched[0] if matched else None
+    first_forbidden = forbidden[0] if forbidden else None
+    return {
+        "kind": kind,
+        "program": program_name,
+        "expected_statuses": sorted(statuses),
+        "forbidden_statuses": sorted(forbidden_statuses),
+        "groups": groups,
+        "all": all_required,
+        "ok": status_ok and not forbidden,
+        "matched_cases": [item["case"] for item in matched],
+        "selected_cases": [item["case"] for item in selected_results],
+        "forbidden_cases": [item["case"] for item in forbidden],
+        "first_non_ac": _result_snapshot(first_non_ac),
+        "first_expected_match": _result_snapshot(first_expected_match),
+        "first_forbidden": _result_snapshot(first_forbidden),
+    }
 
 def finish(reporter, ok, message, exit_code, result_code=None):
     cache = getattr(reporter, "cache", None)
@@ -798,7 +1436,25 @@ def main():
         f"{sum(1 for t in testcases if t['suite'] == 'secret')} secret"
     )
     reporter.text("=" * 50)
-    reporter.event("limits", time_limit=time_limit, memory_limit=memory_limit)
+    judge_type = configured_judge_type(config)
+    judge_config = (config or {}).get("judge") or {}
+    interactive_config = judge_config.get("interactive") or {}
+    idle_limit = _safe_float(interactive_config.get("idle_limit"), min(time_limit, 2.0))
+    idle_limit = max(idle_limit, 0.1)
+    transcript_limit = max(_safe_int(interactive_config.get("transcript_limit"), 65536), 0)
+    judge_options_fingerprint = _hash_parts(
+        judge_type,
+        f"{idle_limit:.9g}",
+        transcript_limit,
+    )
+    reporter.event(
+        "limits",
+        time_limit=time_limit,
+        memory_limit=memory_limit,
+        judge_type=judge_type,
+        idle_limit=idle_limit if judge_type == "interactive" else None,
+        transcript_limit=transcript_limit if judge_type == "interactive" else None,
+    )
 
     # 1. Compile and run Validator
     validator_entry = ((config or {}).get("judge") or {}).get("validator") if config is not None else None
@@ -861,11 +1517,39 @@ def main():
             stderr=f"{validator_name} not found",
         )
 
+    if judge_type not in {"standard", "custom", "interactive"}:
+        finish(reporter, False, f"unsupported judge.type: {judge_type}", 1, "invalid_judge_type")
+
+    judge_bin = None
+    judge_fingerprint = "standard-v2-ignore-line-trailing-whitespace"
+    if judge_type in {"custom", "interactive"}:
+        source_key = "checker" if judge_type == "custom" else "interactor"
+        judge_source = discover_judge_source(prob_dir, config, source_key)
+        judge_name = display_problem_path(prob_dir, judge_source) if judge_source else source_key
+        if not judge_source or not os.path.isfile(judge_source):
+            finish(reporter, False, f"{source_key} not found: {judge_name}", 1, f"{source_key}_missing")
+        judge_bin = binary_path_for_source(judge_source)
+        judge_fingerprint = source_fingerprint(judge_source, prob_dir, source_key)
+        if not compile_cpp(
+            judge_source,
+            judge_bin,
+            reporter,
+            source_key,
+            judge_name,
+            cache=cache,
+            fingerprint=judge_fingerprint,
+        ):
+            finish(reporter, False, f"{source_key} failed to compile", 1, f"{source_key}_compile_failed")
+
     # 2. Discover and compile all solutions
-    source_groups = discover_solution_sources(prob_dir, config)
+    source_groups = discover_solution_entries(prob_dir, config)
+    group_definitions = _data_groups(config)
+    reporter.event("groups", groups=group_definitions)
     solutions = {"std": [], "brute": [], "wrong": []}
-    for kind, source_paths in source_groups.items():
-        for source_path in source_paths:
+    for kind, source_entries in source_groups.items():
+        for source_entry in source_entries:
+            source_path = source_entry["path"]
+            expected = source_entry["expected"]
             program_name = display_problem_path(prob_dir, source_path)
             if not os.path.isfile(source_path):
                 reporter.event("compile", kind=kind, file=program_name, ok=False, stderr="source file not found")
@@ -882,16 +1566,17 @@ def main():
                 cache=cache,
                 fingerprint=fingerprint,
             ):
-                solutions[kind].append((program_name, bin_name, fingerprint))
+                solutions[kind].append((program_name, bin_name, fingerprint, expected))
 
     if not solutions["std"]:
         finish(reporter, False, "accepted solution not found or failed to compile. Aborting.", 1)
 
     # 3. Evaluate all solutions
     for kind, progs in solutions.items():
-        for prog_name, bin_path, fingerprint in progs:
+        for prog_name, bin_path, fingerprint, expected in progs:
             reporter.text(f"\nEvaluating: {prog_name}")
-            stats = {"AC": 0, "WA": 0, "TLE": 0, "RE": 0, "MLE": 0}
+            stats = {"AC": 0, "WA": 0, "TLE": 0, "RE": 0, "MLE": 0, "FAIL": 0}
+            case_results = []
 
             for testcase in testcases:
                 if not os.path.exists(testcase["ans_path"]):
@@ -903,6 +1588,9 @@ def main():
                     testcase["ans_path"],
                     time_limit,
                     memory_limit,
+                    judge_type=judge_type,
+                    judge_fingerprint=judge_fingerprint,
+                    judge_options_fingerprint=judge_options_fingerprint,
                 )
                 cached_result = cache.get("case", key)
                 if cached_result is not None:
@@ -910,14 +1598,20 @@ def main():
                     t = float(cached_result.get("time") or 0)
                     memory = cached_result.get("memory")
                     memory_enforced = bool(cached_result.get("memory_enforced"))
+                    judge_message = cached_result.get("message", "")
+                    judge_details = cached_result.get("details", {})
                     cached = True
                 else:
-                    status, t, memory, memory_enforced = run_testcase(
+                    status, t, memory, memory_enforced, judge_message, judge_details = run_testcase(
                         bin_path,
                         testcase["in_path"],
                         testcase["ans_path"],
                         time_limit,
                         memory_limit,
+                        judge_type=judge_type,
+                        judge_bin=judge_bin,
+                        idle_limit=idle_limit,
+                        transcript_limit=transcript_limit,
                     )
                     cache.set(
                         "case",
@@ -927,6 +1621,8 @@ def main():
                             "time": round(t, 6),
                             "memory": memory,
                             "memory_enforced": memory_enforced,
+                            "message": judge_message,
+                            "details": judge_details,
                         },
                     )
                     cached = False
@@ -936,31 +1632,91 @@ def main():
                     kind=kind,
                     program=prog_name,
                     case=testcase["case"],
+                    groups=testcase.get("groups", []),
                     status=status,
                     time=round(t, 6),
                     time_limit=time_limit,
                     memory=memory,
                     memory_limit=memory_limit,
                     memory_enforced=memory_enforced,
+                    judge_type=judge_type,
+                    message=judge_message,
+                    timeout_kind=judge_details.get("timeout_kind"),
+                    transcript_truncated=judge_details.get("transcript_truncated", False),
                     cached=cached,
                 )
+                case_results.append({
+                    "case": testcase["case"],
+                    "groups": testcase.get("groups", []),
+                    "status": status,
+                    "message": judge_message,
+                })
+                if judge_type == "interactive" and judge_details.get("transcript"):
+                    reporter.event(
+                        "transcript",
+                        kind=kind,
+                        program=prog_name,
+                        case=testcase["case"],
+                        entries=judge_details.get("transcript", []),
+                        truncated=judge_details.get("transcript_truncated", False),
+                        cached=cached,
+                    )
                 if status != "AC" or kind == "std":
                     suffix = " [cached]" if cached else ""
-                    reporter.text(f"  - {testcase['case'].ljust(16)} : {status} ({t:.3f}s){suffix}")
+                    detail = f" - {judge_message}" if judge_message else ""
+                    reporter.text(f"  - {testcase['case'].ljust(16)} : {status} ({t:.3f}s){suffix}{detail}")
+                if status == "FAIL":
+                    finish(
+                        reporter,
+                        False,
+                        f"{judge_type} judge failed on {testcase['case']}: {judge_message or 'unknown failure'}",
+                        1,
+                        "judge_failed",
+                    )
 
-            reporter.event("summary", kind=kind, program=prog_name, stats=stats)
+            expectation = evaluate_expectation(
+                kind,
+                prog_name,
+                expected,
+                case_results,
+                testcases,
+                group_definitions,
+            )
+            reporter.event(
+                "summary",
+                kind=kind,
+                program=prog_name,
+                stats=stats,
+                expectation=expectation,
+            )
+            reporter.event("expectation", **expectation)
             reporter.text(f"  Summary: {stats}")
+            reporter.text(
+                "  Expectation: "
+                f"{'PASS' if expectation['ok'] else 'FAIL'} "
+                f"statuses={expectation['expected_statuses']} "
+                f"forbid={expectation['forbidden_statuses']} "
+                f"groups={expectation['groups'] or ['all']}"
+            )
 
-            # Fate assertions
-            if kind == "std" and stats["AC"] != len(testcases):
-                finish(reporter, False, "std not 100% AC! Fix the standard solution immediately.", 1)
-            if kind == "brute":
-                if stats["WA"] > 0:
-                    finish(reporter, False, "Brute force has WA! Fix the brute or std logic.", 1)
-                if stats["TLE"] + stats["MLE"] == 0:
-                    finish(reporter, False, "WARNING: Brute force passes all tests without TLE/MLE. Data is too weak!", 1)
-            if kind == "wrong" and stats["AC"] == len(testcases):
-                finish(reporter, False, "WARNING: Wrong solution passes all tests! Add corner cases to break it.", 1)
+            if not expectation["selected_cases"]:
+                finish(
+                    reporter,
+                    False,
+                    f"expectation for {prog_name} selected no test cases",
+                    1,
+                    "expectation_has_no_cases",
+                )
+            if not expectation["ok"]:
+                failure = expectation.get("first_forbidden") or expectation.get("first_non_ac")
+                detail = f"; first relevant case: {failure}" if failure else ""
+                finish(
+                    reporter,
+                    False,
+                    f"expectation not met for {prog_name}{detail}",
+                    1,
+                    "expectation_not_met",
+                )
 
     reporter.text("\n" + "=" * 50)
     finish(reporter, True, "[+] 恭喜！所有代码均符合预期宿命", 0)
