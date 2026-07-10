@@ -15,6 +15,15 @@ from .typesetting import compile_collection, extract_problem_pdfs
 from .workspace import WORKSPACE_FILE, find_workspace, load_problem, load_workspace, problem_entries, select_entries
 
 
+def configure_stdout():
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def emit(data, json_output=False):
     if json_output:
         print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -111,7 +120,7 @@ def command_judge(args):
     results = {}
     for entry in select_entries(workspace, args.problem):
         problem_dir, _ = load_problem(root, entry)
-        results[entry["id"]] = judge_problem(root, problem_dir)
+        results[entry["id"]] = judge_problem(root, problem_dir, use_cache=not args.no_cache)
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
 
 
@@ -143,7 +152,13 @@ def command_verify(args):
 def command_build(args):
     root, workspace = workspace_context(args)
     entries = select_entries(workspace, args.problem)
-    return build_workspace(root, workspace, entries, run_judge=not args.skip_judge)
+    return build_workspace(
+        root,
+        workspace,
+        entries,
+        run_judge=not args.skip_judge,
+        use_judge_cache=not args.no_cache,
+    )
 
 
 def build_parser():
@@ -175,6 +190,8 @@ def build_parser():
         item.add_argument("problem", nargs="*")
         if name == "package":
             item.add_argument("--allow-missing-pdf", action="store_true")
+        if name in {"judge", "build"}:
+            item.add_argument("--no-cache", action="store_true", help="ignore existing sandbox caches and refresh them")
         if name == "build":
             item.add_argument("--skip-judge", action="store_true")
         item.set_defaults(handler=handler)
@@ -187,6 +204,7 @@ def build_parser():
 
 
 def main(argv=None):
+    configure_stdout()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

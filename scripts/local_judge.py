@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import platform
@@ -14,6 +15,202 @@ DEFAULT_TIME_LIMIT = 1.0
 DEFAULT_MEMORY_LIMIT = 256
 PROTOCOL_NAME = "probhub.local_judge"
 PROTOCOL_VERSION = 1
+CACHE_SCHEMA_VERSION = 1
+CACHE_FILENAME = "sandbox-cache-v1.json"
+CACHE_LIMITS = {"validator": 4000, "case": 12000}
+_COMPILER_IDENTITY = None
+_FILE_DIGEST_CACHE = {}
+
+
+def _hash_parts(*parts):
+    digest = hashlib.sha256()
+    for part in parts:
+        if isinstance(part, bytes):
+            payload = part
+        else:
+            payload = str(part).encode("utf-8")
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
+def _file_digest(path):
+    path = os.path.abspath(path)
+    stat = os.stat(path)
+    cache_key = (path, stat.st_mtime_ns, stat.st_size)
+    cached = _FILE_DIGEST_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    value = digest.hexdigest()
+    if len(_FILE_DIGEST_CACHE) > 4096:
+        _FILE_DIGEST_CACHE.clear()
+    _FILE_DIGEST_CACHE[cache_key] = value
+    return value
+
+
+def compiler_identity():
+    global _COMPILER_IDENTITY
+    if _COMPILER_IDENTITY is not None:
+        return _COMPILER_IDENTITY
+    try:
+        result = subprocess.run(
+            ["g++", "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        first_line = (result.stdout or result.stderr).splitlines()[0]
+        _COMPILER_IDENTITY = first_line.strip()
+    except Exception as exc:
+        _COMPILER_IDENTITY = f"g++-unknown:{exc}"
+    return _COMPILER_IDENTITY
+
+
+def source_fingerprint(src_file, prob_dir, kind=None):
+    src_file = os.path.abspath(src_file)
+    prob_dir = os.path.abspath(prob_dir)
+    dependencies = [src_file]
+    source_text = ""
+    try:
+        with open(src_file, "r", encoding="utf-8", errors="replace") as stream:
+            source_text = stream.read()
+    except OSError:
+        pass
+
+    for root, _, files in os.walk(prob_dir):
+        for name in files:
+            if name.endswith((".h", ".hpp")):
+                dependencies.append(os.path.join(root, name))
+    if "testlib.h" in source_text:
+        dependencies.append(os.path.join(REFERENCES_DIR, "testlib.h"))
+
+    parts = [
+        CACHE_SCHEMA_VERSION,
+        platform.system(),
+        platform.machine(),
+        compiler_identity(),
+        kind or "unknown",
+        "-O2",
+        "-std=c++17",
+        "-static" if platform.system() == "Windows" else "dynamic",
+        "-DFOR_LINUX" if platform.system() == "Windows" and kind == "validator" else "native-lines",
+    ]
+    for path in sorted(set(os.path.abspath(item) for item in dependencies)):
+        if os.path.isfile(path):
+            try:
+                label = os.path.relpath(path, prob_dir).replace(os.sep, "/")
+            except ValueError:
+                label = path.replace(os.sep, "/")
+            parts.extend((label, _file_digest(path)))
+    return _hash_parts(*parts)
+
+
+def validator_cache_key(program_fingerprint, in_file):
+    return _hash_parts(
+        CACHE_SCHEMA_VERSION,
+        "validator",
+        platform.system(),
+        program_fingerprint,
+        _file_digest(in_file),
+    )
+
+
+def testcase_cache_key(program_fingerprint, in_file, ans_file, time_limit, memory_limit):
+    return _hash_parts(
+        CACHE_SCHEMA_VERSION,
+        "case",
+        platform.system(),
+        platform.machine(),
+        program_fingerprint,
+        _file_digest(in_file),
+        _file_digest(ans_file),
+        f"{float(time_limit):.9g}",
+        int(memory_limit),
+    )
+
+
+class SandboxCache:
+    def __init__(self, prob_dir, enabled=True, read_enabled=None):
+        self.enabled = enabled
+        self.read_enabled = enabled if read_enabled is None else bool(read_enabled and enabled)
+        self.path = os.path.join(prob_dir, ".probhub", CACHE_FILENAME)
+        self.data = {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "compile": {},
+            "validator": {},
+            "case": {},
+        }
+        self.dirty = False
+        self.stats = {
+            "enabled": enabled,
+            "read_enabled": self.read_enabled,
+            "mode": "normal" if self.read_enabled else ("refresh" if enabled else "disabled"),
+            "compile_hits": 0,
+            "compile_misses": 0,
+            "validator_hits": 0,
+            "validator_misses": 0,
+            "case_hits": 0,
+            "case_misses": 0,
+        }
+        if self.read_enabled:
+            self._load()
+
+    def _load(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as stream:
+                loaded = json.load(stream)
+            if loaded.get("schema_version") != CACHE_SCHEMA_VERSION:
+                return
+            for section in ("compile", "validator", "case"):
+                if isinstance(loaded.get(section), dict):
+                    self.data[section] = loaded[section]
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def get(self, section, key):
+        if not self.enabled:
+            return None
+        if not self.read_enabled:
+            self.stats[f"{section}_misses"] += 1
+            return None
+        value = self.data.get(section, {}).get(key)
+        counter = f"{section}_hits" if value is not None else f"{section}_misses"
+        self.stats[counter] += 1
+        return value
+
+    def set(self, section, key, value):
+        if not self.enabled:
+            return
+        values = self.data.setdefault(section, {})
+        values.pop(key, None)
+        values[key] = value
+        limit = CACHE_LIMITS.get(section)
+        if limit and len(values) > limit:
+            for old_key in list(values)[: len(values) - limit]:
+                values.pop(old_key, None)
+        self.dirty = True
+
+    def delete(self, section, key):
+        if not self.enabled:
+            return
+        if self.data.get(section, {}).pop(key, None) is not None:
+            self.dirty = True
+
+    def save(self):
+        if not self.enabled or not self.dirty:
+            return
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        temp_path = self.path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as stream:
+            json.dump(self.data, stream, ensure_ascii=False, separators=(",", ":"))
+        os.replace(temp_path, self.path)
+        self.dirty = False
 
 
 class Reporter:
@@ -35,11 +232,39 @@ class Reporter:
             print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
-def compile_cpp(src_file, out_bin, reporter=None, kind=None, display_file=None):
+def compile_cpp(
+    src_file,
+    out_bin,
+    reporter=None,
+    kind=None,
+    display_file=None,
+    cache=None,
+    fingerprint=None,
+):
     if not os.path.exists(src_file):
         return False
     reporter = reporter or Reporter(False)
     file_name = display_file or os.path.basename(src_file)
+    fingerprint = fingerprint or source_fingerprint(src_file, os.path.dirname(src_file), kind)
+    cache_key = str(file_name).replace(os.sep, "/")
+
+    if cache and cache.enabled:
+        cached = cache.get("compile", cache_key)
+        binary_matches = False
+        if cached and cached.get("fingerprint") == fingerprint and os.path.isfile(out_bin):
+            try:
+                binary_matches = cached.get("binary_digest") == _file_digest(out_bin)
+            except OSError:
+                binary_matches = False
+        if binary_matches:
+            reporter.text(f"[*] Compiling {file_name}... cached")
+            reporter.event("compile", kind=kind or "unknown", file=file_name, ok=True, stderr="", cached=True)
+            return True
+        if cached is not None:
+            cache.stats["compile_hits"] -= 1
+            cache.stats["compile_misses"] += 1
+            cache.delete("compile", cache_key)
+
     reporter.text(f"[*] Compiling {file_name}...")
     flags = ["g++", src_file, "-o", out_bin, "-O2", "-std=c++17", "-I", REFERENCES_DIR]
     if platform.system() == "Windows":
@@ -51,13 +276,37 @@ def compile_cpp(src_file, out_bin, reporter=None, kind=None, display_file=None):
     try:
         ret = subprocess.run(flags, capture_output=True, text=True, encoding="utf-8", errors="replace")
         ok = ret.returncode == 0
-        reporter.event("compile", kind=kind or "unknown", file=file_name, ok=ok, stderr=ret.stderr)
+        reporter.event(
+            "compile",
+            kind=kind or "unknown",
+            file=file_name,
+            ok=ok,
+            stderr=ret.stderr,
+            cached=False,
+        )
         if not ok:
+            if cache:
+                cache.delete("compile", cache_key)
             reporter.text(f"[-] Compile failed:\n{ret.stderr}")
             return False
+        if cache:
+            cache.set(
+                "compile",
+                cache_key,
+                {"fingerprint": fingerprint, "binary_digest": _file_digest(out_bin)},
+            )
         return True
     except Exception as e:
-        reporter.event("compile", kind=kind or "unknown", file=file_name, ok=False, stderr=str(e))
+        if cache:
+            cache.delete("compile", cache_key)
+        reporter.event(
+            "compile",
+            kind=kind or "unknown",
+            file=file_name,
+            ok=False,
+            stderr=str(e),
+            cached=False,
+        )
         reporter.text(f"[-] Compile error: {e}")
         return False
 
@@ -131,14 +380,26 @@ def discover_solution_sources(prob_dir, config=None):
                     solutions[kind].append(source_path)
         return solutions
 
-    for file_name in os.listdir(prob_dir):
+    search_dir = os.path.join(prob_dir, "code")
+    if not os.path.isdir(search_dir):
+        search_dir = prob_dir
+    for file_name in os.listdir(search_dir):
         if not file_name.endswith(".cpp") or file_name == "validator.cpp":
             continue
         for kind in solutions:
             if file_name.startswith(kind):
-                solutions[kind].append(os.path.join(prob_dir, file_name))
+                solutions[kind].append(os.path.join(search_dir, file_name))
                 break
     return solutions
+
+
+def discover_validator_source(prob_dir, config=None):
+    if config is not None:
+        return resolve_problem_path(prob_dir, ((config.get("judge") or {}).get("validator")))
+    code_validator = os.path.join(prob_dir, "code", "validator.cpp")
+    if os.path.isfile(code_validator):
+        return code_validator
+    return os.path.join(prob_dir, "validator.cpp")
 
 
 def read_problem_limits(prob_dir, config=None):
@@ -477,6 +738,16 @@ def collect_testcases(prob_dir, config=None):
 
 
 def finish(reporter, ok, message, exit_code, result_code=None):
+    cache = getattr(reporter, "cache", None)
+    if cache is not None:
+        cache.save()
+        reporter.event("cache", **cache.stats)
+        reporter.text(
+            "Cache: "
+            f"compile {cache.stats['compile_hits']} hit/{cache.stats['compile_misses']} miss, "
+            f"validator {cache.stats['validator_hits']} hit/{cache.stats['validator_misses']} miss, "
+            f"case {cache.stats['case_hits']} hit/{cache.stats['case_misses']} miss"
+        )
     result_code = result_code or ("all_expectations_met" if ok else "validation_failed")
     reporter.event(
         "final",
@@ -492,14 +763,17 @@ def finish(reporter, ok, message, exit_code, result_code=None):
 
 def main():
     jsonl = "--jsonl" in sys.argv
-    args = [arg for arg in sys.argv[1:] if arg != "--jsonl"]
+    no_cache = "--no-cache" in sys.argv
+    args = [arg for arg in sys.argv[1:] if arg not in {"--jsonl", "--no-cache"}]
     reporter = Reporter(jsonl)
 
     if len(args) != 1:
-        reporter.text("Usage: python scripts/local_judge.py <problem_dir> [--jsonl]")
+        reporter.text("Usage: python scripts/local_judge.py <problem_dir> [--jsonl] [--no-cache]")
         finish(reporter, False, "Invalid arguments", 1)
 
     prob_dir = args[0]
+    cache = SandboxCache(prob_dir, enabled=True, read_enabled=not no_cache)
+    reporter.cache = cache
     try:
         config = read_probhub_config(prob_dir)
     except ValueError as exc:
@@ -527,18 +801,41 @@ def main():
     reporter.event("limits", time_limit=time_limit, memory_limit=memory_limit)
 
     # 1. Compile and run Validator
-    validator_entry = ((config or {}).get("judge") or {}).get("validator") if config is not None else "validator.cpp"
-    val_cpp = resolve_problem_path(prob_dir, validator_entry)
+    validator_entry = ((config or {}).get("judge") or {}).get("validator") if config is not None else None
+    val_cpp = discover_validator_source(prob_dir, config)
     if val_cpp and os.path.exists(val_cpp):
         val_bin = binary_path_for_source(val_cpp)
+        val_name = display_problem_path(prob_dir, val_cpp)
+        val_fingerprint = source_fingerprint(val_cpp, prob_dir, "validator")
         if compile_cpp(
-            val_cpp, val_bin, reporter, "validator", display_problem_path(prob_dir, val_cpp)
+            val_cpp,
+            val_bin,
+            reporter,
+            "validator",
+            val_name,
+            cache=cache,
+            fingerprint=val_fingerprint,
         ):
             reporter.text("\nRunning validator...")
             all_ok = True
             for testcase in testcases:
-                ok, validator_message = run_validator(val_bin, testcase["in_path"])
-                reporter.event("validator", case=testcase["case"], ok=ok, message=validator_message)
+                key = validator_cache_key(val_fingerprint, testcase["in_path"])
+                cached_result = cache.get("validator", key)
+                if cached_result is not None:
+                    ok = bool(cached_result.get("ok"))
+                    validator_message = cached_result.get("message", "")
+                    cached = True
+                else:
+                    ok, validator_message = run_validator(val_bin, testcase["in_path"])
+                    cache.set("validator", key, {"ok": ok, "message": validator_message})
+                    cached = False
+                reporter.event(
+                    "validator",
+                    case=testcase["case"],
+                    ok=ok,
+                    message=validator_message,
+                    cached=cached,
+                )
                 if not ok:
                     all_ok = False
                     detail = f" ({validator_message})" if validator_message else ""
@@ -555,7 +852,7 @@ def main():
             if all_ok:
                 reporter.text("[+] Validator: ALL PASS")
     elif jsonl:
-        validator_name = _entry_file(validator_entry) or "validator not configured"
+        validator_name = _entry_file(validator_entry) or display_problem_path(prob_dir, val_cpp)
         reporter.event(
             "compile",
             kind="validator",
@@ -575,15 +872,24 @@ def main():
                 reporter.text(f"[-] Source file not found: {program_name}")
                 continue
             bin_name = binary_path_for_source(source_path)
-            if compile_cpp(source_path, bin_name, reporter, kind, program_name):
-                solutions[kind].append((program_name, bin_name))
+            fingerprint = source_fingerprint(source_path, prob_dir, kind)
+            if compile_cpp(
+                source_path,
+                bin_name,
+                reporter,
+                kind,
+                program_name,
+                cache=cache,
+                fingerprint=fingerprint,
+            ):
+                solutions[kind].append((program_name, bin_name, fingerprint))
 
     if not solutions["std"]:
         finish(reporter, False, "accepted solution not found or failed to compile. Aborting.", 1)
 
     # 3. Evaluate all solutions
     for kind, progs in solutions.items():
-        for prog_name, bin_path in progs:
+        for prog_name, bin_path, fingerprint in progs:
             reporter.text(f"\nEvaluating: {prog_name}")
             stats = {"AC": 0, "WA": 0, "TLE": 0, "RE": 0, "MLE": 0}
 
@@ -591,9 +897,39 @@ def main():
                 if not os.path.exists(testcase["ans_path"]):
                     finish(reporter, False, f"{testcase['case']}.ans not found", 1)
 
-                status, t, memory, memory_enforced = run_testcase(
-                    bin_path, testcase["in_path"], testcase["ans_path"], time_limit, memory_limit
+                key = testcase_cache_key(
+                    fingerprint,
+                    testcase["in_path"],
+                    testcase["ans_path"],
+                    time_limit,
+                    memory_limit,
                 )
+                cached_result = cache.get("case", key)
+                if cached_result is not None:
+                    status = cached_result["status"]
+                    t = float(cached_result.get("time") or 0)
+                    memory = cached_result.get("memory")
+                    memory_enforced = bool(cached_result.get("memory_enforced"))
+                    cached = True
+                else:
+                    status, t, memory, memory_enforced = run_testcase(
+                        bin_path,
+                        testcase["in_path"],
+                        testcase["ans_path"],
+                        time_limit,
+                        memory_limit,
+                    )
+                    cache.set(
+                        "case",
+                        key,
+                        {
+                            "status": status,
+                            "time": round(t, 6),
+                            "memory": memory,
+                            "memory_enforced": memory_enforced,
+                        },
+                    )
+                    cached = False
                 stats[status] += 1
                 reporter.event(
                     "case",
@@ -606,9 +942,11 @@ def main():
                     memory=memory,
                     memory_limit=memory_limit,
                     memory_enforced=memory_enforced,
+                    cached=cached,
                 )
                 if status != "AC" or kind == "std":
-                    reporter.text(f"  - {testcase['case'].ljust(16)} : {status} ({t:.3f}s)")
+                    suffix = " [cached]" if cached else ""
+                    reporter.text(f"  - {testcase['case'].ljust(16)} : {status} ({t:.3f}s){suffix}")
 
             reporter.event("summary", kind=kind, program=prog_name, stats=stats)
             reporter.text(f"  Summary: {stats}")

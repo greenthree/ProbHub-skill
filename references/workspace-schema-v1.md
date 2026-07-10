@@ -115,3 +115,7 @@ The Core generates and may overwrite:
 - `<problem>/.probhub/build-manifest.json`
 
 Do not edit generated artifacts to make source changes.
+
+## Local sandbox cache
+
+`<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results. Relevant source, header, input, answer, limit, compiler, platform, or cache-schema changes invalidate entries automatically. Use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run and refresh the cache.

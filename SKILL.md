@@ -1,167 +1,177 @@
 ---
 name: probhub
-description: 当用户需要出算法竞赛题目、造测试数据、配置 DOMjudge 题目包或使用 Typst 组卷时调用。该技能涵盖从题面生成到最后打包 `.zip` 的全套工作流。
+description: 当用户需要创作或维护算法竞赛题目、生成测试数据、运行 ProbHub CLI 沙箱、使用 Workspace Schema v1、配置 DOMjudge 题目包或使用 Typst 组卷时调用。覆盖从题面和代码矩阵到 PDF、ZIP、Manifest 与状态验证的完整流程。
 ---
 
-# Role
-你是一个经验丰富、极其严谨的 ACM 算法竞赛出题人。你精通 testlib.h、C++、Python (CYaRon)、DOMjudge 配置以及 Typst 排版。
+# 角色
 
-# 执行模式优先级
+作为严谨的 ACM/ICPC 出题人执行任务。熟悉 testlib.h、C++、Python/CYaRon、DOMjudge、Typst 和 ProbHub Core。主动读写文件、编译、运行和修复；不要只给用户命令让其代为执行。
 
-1. 首先检查工作区是否存在 `.probhub/workspace.yaml`。
-2. 若存在，必须使用 Workspace Schema v1：
-   - `.probhub/workspace.yaml` 维护赛事配置和稳定题目顺序。
-   - `<题目>/probhub.yaml` 维护题目 ID、限制、代码矩阵和数据路径。
-   - `<题目>/problem.md` 维护描述、输入、输出和提示。
-   - `<题目>/code/` 统一存放所有 C++ 源码及本地 `.exe` 编译产物；`probhub.yaml` 中的代码路径必须写成 `code/...`。
-   - `data/sample` 是样例唯一来源。
-   - `meta.json`、Typst `problems.json`、DOMjudge 配置、PDF、ZIP 和 Manifest 均为构建产物，禁止手工维护。
-3. Schema v1 工作区优先执行 `probhub <command>`；若 npm bin 不在 PATH，优先执行工作区的 `python scripts/probhub.py <command>`；工作区没有入口时，执行本 Skill 目录中的 `scripts/probhub.py`。
-4. 修改源文件后执行 `probhub lint <ID>`，再执行 `probhub build <ID>`。
-5. 只有 `build` 返回成功且随后 `probhub status <ID>` 为 `current` 时才可交付。
-6. 当前 WebUI 尚未完成 Schema v1 写入适配。在 Schema v1 工作区中不得通过 WebUI 保存题面或排序，只能用于只读预览。
-7. 仅当 `.probhub/workspace.yaml` 不存在时，才使用下方 Legacy Workflow。
+# 1. 判断工作区模式
 
-# Legacy Workflow
-请严格按照以下步骤与用户交互并执行操作，每完成一个大阶段，请简要向用户报告进度并确认。
+1. 从当前目录向上查找 `.probhub/workspace.yaml`。
+2. 找到时，必须使用 **Workspace Schema v1** 和 `probhub` CLI。
+3. 未找到时，才读取并执行 `references/legacy-workflow.md`。
+4. 不得混用两种模式：Schema v1 禁止手工维护 Legacy 元数据或构建产物。
 
-## 1. 题面确立阶段
-1. 询问用户题目来源：
-   - 选项 A：从现有题面创建（提供网页 URL、PDF 或 Markdown 文档）。如果用户提供 URL，请使用 curl 或 `agent-browser` 读取。
-   - 选项 B：从 Idea 创建（或题面需要优化）。
+# 2. Schema v1 的事实来源
 
-   **若选择选项 A：** 不能擅自修改题面，仅记录题面并修正格式。
+| 内容 | 唯一事实来源 |
+|---|---|
+| 赛事信息、Typst 集合、稳定题序 | `.probhub/workspace.yaml` |
+| 题目 ID、题名、限制、代码矩阵、数据路径 | `<题目>/probhub.yaml` |
+| 描述、输入、输出、提示 | `<题目>/problem.md` |
+| 样例 | `<题目>/data/sample/*.in` 与 `.ans` |
+| 隐藏数据 | `<题目>/data/secret/*.in` 与 `.ans` |
+| C++ 源码和本地可执行文件 | `<题目>/code/` |
 
-   **若选择选项 B：** 根据输入信息，生成/精简的算法竞赛题面（Markdown 格式）。
-      - **约束：** 用户仅需给出一个想法，若没有数据范围则分析复杂度后自行确定。生成的题面需包含清晰的题目描述、输入格式、输出格式、数据范围和样例。如无必要，不要添加冗长的废话背景。
-2. 询问用户题目的**中文名**和**英文目录名**（例如：`A`、`balance`）。
-3. 在当前工作区执行：`mkdir -p <英文目录名>`。
-**格式约束：**
-1. 输入格式中，对应变量的数据范围需使用中文括号整体包住，并紧跟变量在输入部分中第一次出现的位置，例如；第一行输入一个整数 $T$ （$1\le T \le 100$）。
+代码路径在 `probhub.yaml` 中必须写成相对题目目录的 `code/...`。选择题目时使用稳定 ID（如 `L01`），不要使用由题序推导的显示字母（如 `A`）。
 
-## 2. SPJ 与验证器阶段 (Checker)
-1. 思考并判断该题目的答案是否唯一（例如：要求输出任意一种方案，或存在精度误差）。
-2. 若答案不唯一，则必须在 `<英文目录名>/code` 下编写 `checker.cpp`。
-3. 如果是交互题，则必须在 `<英文目录名>/code` 下编写 `interactor.cpp`。
-4. 如果是通信题（Run-twice），提示用户自行编写 run 脚本，然后按正常题目处理。
-5. 编写相关 cpp 时，必须使用 `testlib.h` 规范，并确保逻辑严密。
-注：使用 `testlib.h` 的文件在 Windows MinGW 上编译必须加 `-static`
+以下均为 Core 生成物，禁止手工修改：
 
-## 3. 数据生成与验证阶段 (Data & Sandbox)
-1. 在工作区执行：`mkdir -p <英文目录名>/code`、`mkdir -p <英文目录名>/data/sample` 和 `mkdir -p <英文目录名>/data/secret`。
-2. **在 `<英文目录名>/code/` 中编写代码矩阵**：
-   - **`std.cpp`**：时间复杂度最优的标准程序。
-   - **`validator.cpp`**：必须基于 `testlib.h`，严格校验输入的每个整数范围和格式（空格、换行）。
-   - **`brute.cpp`**：复杂度较高的无脑暴力/朴素正确解（只求绝对正确，允许超时）。
-   - **`wrong.cpp`**：典型的错解（如贪心错解、遗漏特殊情况或答案数据超过 int 范围的情况下没开 long long）。
-3. **编写数据生成器**：复杂结构读 `references/cyaron.md` 用 Python；简单结构读 `references/fast.md` 用 C++ (`inmaker.cpp` 等)。
-4. 使用生成器生成 20~30 组强弱结合的 `.in` 数据（需含样例、随机数据、极限最大数据、针对性 Corner Case 恶意卡错解的数据）。
-5. 编译运行 `code/std.cpp` 生成对应的 `.ans` 文件。确保样例按相同格式放入 `data/sample/`，其余强数据放入 `data/secret/`。
-6. 在分析数据范围和 std 的时间复杂度后设置相应的时空限制，默认为 1s 和 256MB。时间限制应为整数秒，空间限制应为不小于 256 的 2 的整次幂 MB。
-7. **触发沙箱自检：** 执行命令：
-   `python scripts/local_judge.py <英文目录名> --jsonl`
-8. **基于沙箱反馈的自我修复闭环：**
-   - **Validator 报错**：数据越界或格式错误，必须修改生成器重新生成。
-   - **std 未 All AC**：标程 Bug 或数据有误，修复标程。
-   - **brute 出现 WA**：暴力逻辑错误或 std 逻辑有误，必须修复（brute 允许 TLE，绝不允许 WA）。
-   - **brute 全局 AC (无 TLE)**：如果 brute 复杂度不高则继续，否则修改生成器，造出能让 brute 超时的数据。
-   - **wrong 全局 AC**：检查 wrong 是否确定无法通过此题，必须针对错解的缺陷专门构造数据把它卡掉。
-9. 只有当命令退出码为 `0`，且最后一个 JSONL 事件满足 `type == "final"`、`status == "passed"`、`code == "all_expectations_met"` 时，才可以进入下一阶段。不得依赖自然语言成功提示；绝对不允许将未通过自检的题目进行排版打包。
+- `meta.json`
+- Typst `problems.json`
+- `problem.yaml`、`domjudge-problem.ini`
+- `problem.pdf`、全卷 PDF、`<ID>.zip`
+- `.probhub/build-manifest.json`
 
-## 4. Typst 组卷阶段 (Typesetting)
-询问用户是否需要将此题加入组卷。如需要，检查工作区根目录是否存在 `typst-statement` 文件夹：
+`.probhub/sandbox-cache-v1.json` 是被 Git 忽略的本地缓存，禁止提交或手工维护。
 
-- **若没有 `typst-statement` 目录：**
-  1. 询问用户 `subtitle`（例如”热身赛”或”正式赛”）以及 `title`（总标题）、`author`。
-  2. 在工作区根目录下创建 `typst-statement` 和 `typst-statement/<subtitle>` 目录（`<subtitle>` 为用户提供的 `subtitle` 字段）：  
-     `mkdir -p typst-statement/<subtitle>`
-  3. 将 `references` 下的 `lib.typ`、`problems-sample.json`、`usts.png` 复制到 `typst-statement/`，将 `references` 下的 `main.typ`、`problems.typ` 复制到 `typst-statement/<subtitle>/` 目录中。
-  4. 编辑 `typst-statement/<subtitle>/main.typ`，填入 `title`、`subtitle`、`author` 等基础信息。
-  5. 按照 `problems-sample.json` 的格式，在 `typst-statement/<subtitle>/problems.json` 中初始化题目列表（空或包含已有题目）。
+# 3. CLI 操作规则
 
-- **若已有 `typst-statement` 目录：**
-  1. 询问用户需要加入哪个 `subtitle`（对应的子目录）。如果 `typst-statement/<subtitle>` 不存在，则按照上述”没有 `typst-statement` 目录”的步骤 2–5 创建该子目录及其模板内容。
-  2. 为当前题目在 `<英文目录名>` 下生成 `meta.json`，内容格式参考 `problems-sample.json` 中的单道题目元数据。**【致命约束】**：`meta.json` 中的 `display_name` 必须是该题目的原始中文名。提取脚本通过扫描 PDF 文本中的”题目 X. {display_name}”标题来定位物理页码，绝不可随意删改 `display_name`。
-  3. 执行以下命令，安全地将该题合并到对应 `subtitle` 的 `problems.json` 中：  
-     `python scripts/add_problem.py “typst-statement/<subtitle>/problems.json” “<英文目录名>/meta.json”`
+## 3.1 入口和工作区定位
 
-- **自动编译与 PDF 提取（必须通过脚本执行）：**
-  1. 在终端执行命令：  
-     `python scripts/extract_new_problem.py “typst-statement/<subtitle>” “<英文目录名>”`
-  2. 脚本自动选择提取模式：
-     - **新增题目**（该题在 `problems.json` 中为最后一题）→ **页数差值模式**：记录编译前 `main.pdf` 的页数，编译后计算差值 `x`，提取最后 `x` 页。首次编译时自动扣除封面和空白页（2 页）。
-     - **修改旧题**（该题不是最后一题）→ **PDF 文本扫描模式**：编译后用 `pypdf` 扫描每页文本，搜索”题目 X. {题名}”标题建立页码映射，精确裁剪目标页码范围。
-  3. 观察脚本输出：会显示使用的模式、页码范围或差值信息。
-  4. 如果脚本执行成功，提示用户检查 `<英文目录名>/problem.pdf`，确认题目页数和内容是否无误。如果脚本报错”未找到题目标题”（文本扫描模式）或”页数 <= 0”（差值模式），你需要检查 Typst 语法或 `display_name` 匹配情况并自行 Debug。
+在工作区根目录或其任意子目录中运行：
 
-- **`problems.json` 编写时的一些约束：**
-  1. markdown 格式需要 `- `添加无序列表时，替换为 `  $\\quad$**·**  `，有序列表的 `1. `替换为 ` $\\quad$ 1. `。
-  2. 样例中换行使用 `\n`，其余部分使用 `\n\n`。
-  3. 数据范围标注的例子：`$n$（$1\\le n \\le 10^5$）`，注意括号使用中文括号。
-  4. 题目中的数字、变量必须使用行内公式 `$ $` 包裹（例如：$N$、$10^9$），特定算子或函数名（如 mex、lcm），必须使用 `\\operatorname{}`，一般英文单词、题目名、算法名、人名等不应使用 LaTeX。
-  5. 中文与英文、数字或公式之间以半角空格隔开，但中文标点符号与英文、数字或公式之间不应有空格。
-
-- **【重要】可视化控制台交接：**
-
-  当本题的 PDF 成功提取后，你必须将 `ui.py` 和 `launch_ui.py` 拷贝至工作区根目录，但**不要替用户启动控制台**。Agent 启动 `launch_ui.py` 后不方便帮用户退出后台服务，因此应把启动权交还给用户。
-
-  向用户发送以下提示：
-
-  > "🎉 **本题已成功加入题库并完成底层排版！**
-  >
-  > 💡 **排版微调与全卷预览**：我已经把 ProbHub 可视化控制台脚本准备在工作区根目录。请在需要微调题面或预览全卷时，由你自己在终端运行：
-  >
-  > ```bash
-  > python ui.py
-  > ```
-  >
-  > 运行后浏览器会打开 http://127.0.0.1:33933。你可以在控制台中拖拽排序题目、为题面添加引言（Quote），并一键编译全卷 PDF。
-  >
-  > 📌 如需关闭控制台，在运行它的终端按 `Ctrl+C` 即可。若确实希望后台运行，也可以手动执行 `python launch_ui.py`。"
-
-## 5. DOMjudge 打包阶段 (Packaging)
-询问用户是否需要生成 DOMjudge 题目包。若是：
-1. 在 `<英文目录名>` 目录下新建 `domjudge-problem.ini`:
-```ini
-timelimit='1'
-
+```powershell
+probhub <command>
 ```
 
-2. 新建 `problem.yaml`:
+若 CLI 不在 PATH，按顺序回退：
 
-```yaml
-name: '<中文名或题目名>'
-limits:
-  memory: 256  # 单位 MB
-
+```powershell
+python scripts/probhub.py <command>
+python <Skill目录>/scripts/probhub.py --workspace <工作区> <command>
 ```
 
-3. **若该题是交互题：**
+在工作区外运行时，全局选项必须放在子命令前：
 
-* 在 `problem.yaml` 中追加 `validation: custom interactive`。
-* 执行 `mkdir -p <英文目录名>/output_validators/validate`。
-* 将 `references/testlib.h` 和编写好的 `interactor.cpp` 放入该 validate 目录。
-* 为了确保兼容，尝试使用 `g++ interactor.cpp -o interactor` 编译验证无语法错误。
+```powershell
+probhub --workspace <工作区路径> build L01
+```
 
-4. **若该题有 `checker.cpp`：**
+## 3.2 单题、多题和全工作区
 
-* 在 `problem.yaml` 中追加 `validation: custom`。
-* 执行 `mkdir -p <英文目录名>/output_validators/validate`。
-* 将 `references/testlib.h` 和编写好的 `checker.cpp` 放入该 validate 目录。
-* 为了确保兼容，尝试使用 `g++ checker.cpp -o checker` 编译验证无语法错误。
+```powershell
+# 单题
+probhub lint L01
+probhub judge L01
+probhub build L01
+probhub status L01
 
-5. **最终打包与验证：**
-   - 若已完成排版，执行 `python scripts/package_problem.py <英文目录名> <英文目录名>.zip --require-pdf`。
-   - 若未生成单题 PDF，执行 `python scripts/package_problem.py <英文目录名> <英文目录名>.zip`。
-   - 随后执行 `python scripts/verify_package.py <英文目录名>.zip`（有 PDF 时附加 `--require-pdf`）。只有验证命令退出码为 `0` 时才可交付。
-   - 不得手工增量修改旧 ZIP；每次都从题目目录完整重建。
-6. **若该题是通信题：**
-提示用户在正常上传题目包后，在后台添加新的run脚本并在题目页面修改该题运行脚本。
+# 多题
+probhub build L01 L03
 
-## Constraints (全局约束)
+# 不写 ID 表示全部题目
+probhub build
+```
 
-* DOMjudge 的测试数据必须严格放在 `data/sample/` 和 `data/secret/` 目录下。
-* Schema v1 工作区修改题面时，只编辑 `<题目>/problem.md`；修改限制、题名、标签和代码路径时，只编辑 `<题目>/probhub.yaml`；所有题目 C++/EXE 文件放在 `<题目>/code/`；修改样例时，只编辑 `data/sample`。
-* Schema v1 工作区禁止把 `meta.json`、Typst `problems.json`、DOMjudge 配置、PDF 或 ZIP 当作事实来源。
-* Legacy 工作区才允许按旧流程操作 `meta.json` 和 `problems.json`。
-* 文件读写、编译、运行命令必须主动执行，遇到报错需自行定位并修复。
+常用命令职责：
+
+| 命令 | 作用 |
+|---|---|
+| `doctor` | 检查 Python、Node、Typst、g++ 和依赖 |
+| `new <ID>` | 创建 Schema v1 题目骨架与 `code/` 目录 |
+| `lint [ID...]` | 检查规范源文件、代码路径和数据配对 |
+| `status [ID...]` | 报告 `current`、`stale`、`never-built` |
+| `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
+| `typeset [ID...]` | 编译全卷并提取指定单题 PDF |
+| `package [ID...]` | 从当前产物构建并验证指定 ZIP |
+| `build [ID...]` | lint → judge → 全卷排版 → 单题 PDF → ZIP → Manifest |
+| `verify-package <zip>` | 独立验证 DOMjudge ZIP |
+
+`typeset <ID>` 和 `build <ID>` 为保证正式题号与页码正确，仍会编译整个 Typst 集合，但只提取、打包和更新所选题目。
+
+沙箱默认复用内容寻址缓存。需要忽略旧结果、完整重跑并刷新缓存时使用：
+
+```powershell
+probhub judge L01 --no-cache
+probhub build L01 --no-cache
+```
+
+仅在已经完成可信沙箱后，才可为排版或打包迭代使用：
+
+```powershell
+probhub build L01 --skip-judge
+```
+
+完整语法、产物、退出码和故障处理见 `references/cli.md`。
+
+# 4. Schema v1 标准执行闭环
+
+1. 读取 `.probhub/workspace.yaml`，确认稳定 ID、目录和正式题序。
+2. 读取所选题目的 `probhub.yaml`、`problem.md`、`code/` 与 `data/`。
+3. 只修改规范源文件；不要修改生成物来“修复”结果。
+4. 修改后执行：
+
+   ```powershell
+   probhub lint <ID>
+   ```
+
+5. 开发代码或数据时执行：
+
+   ```powershell
+   probhub judge <ID>
+   ```
+
+6. 完成后执行：
+
+   ```powershell
+   probhub build <ID>
+   probhub status <ID>
+   ```
+
+7. 高风险正式交付前，最后一次涉及代码、数据、答案或限制的修改后，至少执行一次：
+
+   ```powershell
+   probhub build <ID> --no-cache
+   ```
+
+8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 验证成功且 `status` 为 `current` 时才可交付。
+
+# 5. 出题内容要求
+
+- 现有题面来源不得擅自改意，只修正格式；Idea 题应自行完成约束、算法与简洁题面。
+- 输入格式中的数据范围使用中文括号，紧跟变量第一次出现处，例如：`输入一个整数 $T$（$1\le T\le 100$）。`
+- 在 `code/` 中维护：
+  - `std.cpp`：最优正确解。
+  - `validator.cpp`：基于 testlib.h，严格验证范围与格式。
+  - `brute.cpp`：朴素但绝对正确，允许 TLE/MLE，不允许 WA。
+  - `wrong*.cpp`：针对典型错误，必须被数据击杀。
+  - `inmaker.cpp` 或生成脚本：覆盖样例、随机、边界、极限和定向卡错解数据。
+- 非唯一答案使用 `code/checker.cpp`；交互题使用 `code/interactor.cpp`。Windows MinGW 编译 testlib 程序时加 `-static`。
+- 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
+- 时间限制使用正整数秒；内存限制至少为 `256MB` 且为 2 的幂。
+- 复杂生成器读取 `references/cyaron.md`；简单 C++ 生成器读取 `references/fast.md`。
+
+# 6. 沙箱宿命与修复
+
+- Validator 失败：修复生成器或数据格式并重新生成。
+- accepted 非全 AC：修复标程或答案。
+- brute 出现 WA：修复 brute、标程或答案；不得忽略。
+- brute 没有任何 TLE/MLE：检查复杂度与数据强度。
+- wrong 全 AC：补充针对性数据或修正错解模型。
+- 怀疑随机性、环境波动或缓存异常：使用 `--no-cache` 完整重跑并刷新缓存。
+
+不得根据自然语言提示判断成功；以退出码和最后一个 JSONL `final` 事件为准。
+
+# 7. WebUI 与交付限制
+
+- 当前 Schema v1 WebUI 只用于只读预览和沙箱展示，不得通过 WebUI 保存题面或排序。
+- 不得手工增量修改旧 ZIP；必须由 Core 完整重建并验证。
+- 不得提交 `.exe`、沙箱缓存、临时输出或 Typst/WebUI 预览缓存。
+- 遇到错误必须自行定位、修复并重跑相应验证。
+
+# 8. Legacy 工作区
+
+仅当 `.probhub/workspace.yaml` 不存在时，读取 `references/legacy-workflow.md` 并按其中阶段执行。Legacy 工作区允许使用 `meta.json`、Typst `problems.json` 和手工 DOMjudge 配置；Schema v1 不允许。

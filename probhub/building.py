@@ -42,7 +42,7 @@ def package_problem(root, problem_dir, config, require_pdf=True):
     return output, verification
 
 
-def build_workspace(root, workspace, entries, run_judge=True):
+def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=True):
     lint = lint_workspace(root, workspace, entries)
     if not lint["ok"]:
         messages = []
@@ -57,11 +57,12 @@ def build_workspace(root, workspace, entries, run_judge=True):
     judge_results = {}
     if run_judge:
         for problem_dir, config in selected:
-            result = judge_problem(root, problem_dir)
+            result = judge_problem(root, problem_dir, use_cache=use_judge_cache)
             judge_results[config["id"]] = {
                 "ok": result["ok"],
                 "returncode": result["returncode"],
                 "final": result["final"],
+                "cache": result.get("cache", {}),
             }
             if not result["ok"]:
                 raise ProbHubError(f"sandbox failed for {config['id']}: {result.get('final')}")

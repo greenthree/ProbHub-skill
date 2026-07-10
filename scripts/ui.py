@@ -1723,6 +1723,7 @@ def _empty_sandbox_result(info):
         "validator": [],
         "cases": [],
         "summaries": {},
+        "cache": {},
         "final": None,
     }
 
@@ -1740,9 +1741,14 @@ def _apply_sandbox_event(result, event):
             "file": event.get("file"),
             "ok": event.get("ok"),
             "stderr": event.get("stderr", ""),
+            "cached": bool(event.get("cached")),
         })
     elif typ == "validator":
-        result["validator"].append({"case": event.get("case"), "ok": bool(event.get("ok"))})
+        result["validator"].append({
+            "case": event.get("case"),
+            "ok": bool(event.get("ok")),
+            "cached": bool(event.get("cached")),
+        })
     elif typ == "case":
         result["cases"].append({
             "kind": event.get("kind"),
@@ -1754,6 +1760,7 @@ def _apply_sandbox_event(result, event):
             "time_limit": event.get("time_limit"),
             "memory_limit": event.get("memory_limit"),
             "memory_enforced": event.get("memory_enforced"),
+            "cached": bool(event.get("cached")),
         })
     elif typ == "summary":
         program = event.get("program") or f"{event.get('kind', 'unknown')}-summary"
@@ -1761,6 +1768,11 @@ def _apply_sandbox_event(result, event):
             "kind": event.get("kind"),
             "program": program,
             "stats": event.get("stats", {}),
+        }
+    elif typ == "cache":
+        result["cache"] = {
+            key: value for key, value in event.items()
+            if key not in {"protocol", "protocol_version", "type"}
         }
     elif typ == "final":
         result["final"] = {
