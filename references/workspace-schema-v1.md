@@ -38,6 +38,7 @@ limits:
   time: 1
   memory: 256
   output: 64
+  processes: 32
 statement:
   source: problem.md
 judge:
@@ -77,6 +78,19 @@ data:
 domjudge:
   include_pdf: true
 ```
+
+### Resource limits
+
+`limits` controls every local sandbox path, including ordinary solutions, Checker, Validator, compiler, Interactor, and stress roles:
+
+| Field | Unit | Default | Meaning |
+|---|---:|---:|---|
+| `time` | seconds | `1` | Contestant wall-clock limit |
+| `memory` | MiB | `256` | Contestant memory limit |
+| `output` | MiB | `64` | Captured stdout + stderr budget for one contestant run |
+| `processes` | processes | `32` | Maximum processes in the controlled process tree |
+
+`time`, `output`, and `processes` must be positive integers. `memory` must be a power of two and at least `256` MiB. Output above the budget is terminated and reported as `OLE`, with captured files truncated. Official tools use bounded internal time/output policies and the same full-tree containment; their resource failure is infrastructure `FAIL`, not contestant WA. Windows uses Job Objects and refuses to run if containment cannot be established. Linux/Unix uses a separate process group, `RLIMIT_AS`, and low-frequency `/proc` tree monitoring. See `references/process-control.md`.
 
 ### Judge modes
 
@@ -204,6 +218,6 @@ Do not edit generated artifacts to make source changes.
 
 ## Local sandbox cache
 
-`<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results. Relevant source, header, input, answer, limit, compiler, platform, or cache-schema changes invalidate entries automatically. Use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run and refresh the cache.
+`<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results. Relevant source, header, input, answer, time/memory/output/process limit, compiler, platform, sandbox policy, or cache-schema changes invalidate entries automatically. Use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run and refresh the cache.
 
-`<problem>/.probhub/stress/` is a separate ignored diagnostic directory containing replayable counterexamples and `latest.json`; stress does not reuse the sandbox cache. Do not package or commit either local artifact.
+`<problem>/.probhub/stress/` is a separate ignored diagnostic directory containing replayable counterexamples and `latest.json`; stress does not reuse the sandbox cache. Resource-control semantics are versioned in the cache Schema, so older cached AC/RE/TLE results cannot bypass newer OLE or process-tree policies. Do not package or commit either local artifact.

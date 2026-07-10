@@ -89,10 +89,16 @@ def lint_problem(root, workspace, entry):
     limits = config.get("limits") or {}
     time_limit = limits.get("time")
     memory = limits.get("memory")
+    output_limit = limits.get("output", 64)
+    process_limit = limits.get("processes", 32)
     if not isinstance(time_limit, int) or time_limit <= 0:
         errors.append("limits.time must be a positive integer")
     if not isinstance(memory, int) or memory < 256 or memory & (memory - 1):
         errors.append("limits.memory must be a power of two and at least 256")
+    if isinstance(output_limit, bool) or not isinstance(output_limit, int) or output_limit <= 0:
+        errors.append("limits.output must be a positive integer in MB")
+    if isinstance(process_limit, bool) or not isinstance(process_limit, int) or process_limit <= 0:
+        errors.append("limits.processes must be a positive integer")
     source = problem_dir / ((config.get("statement") or {}).get("source", "problem.md"))
     try:
         parsed = parse_statement(source)
@@ -155,7 +161,7 @@ def lint_problem(root, workspace, entry):
     solutions = config.get("solutions") or {}
     configured_programs = set()
     referenced_groups = set()
-    allowed_statuses = {"AC", "WA", "TLE", "MLE", "RE", "FAIL"}
+    allowed_statuses = {"AC", "WA", "TLE", "MLE", "OLE", "RE", "FAIL"}
     for solution_kind in ("accepted", "brute", "wrong"):
         entries = solutions.get(solution_kind) or []
         entries = entries if isinstance(entries, list) else [entries]

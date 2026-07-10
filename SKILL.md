@@ -1,6 +1,6 @@
 ---
 name: probhub
-description: 当用户需要创作或维护算法竞赛题目、生成测试数据、运行 ProbHub CLI 沙箱或 stress 差分测试、使用 Workspace Schema v1、配置 DOMjudge 题目包或使用 Typst 组卷时调用。覆盖从题面和代码矩阵到 PDF、ZIP、Manifest 与状态验证的完整流程。
+description: 当用户需要创作或维护算法竞赛题目、生成测试数据、运行 ProbHub CLI 受控沙箱或 stress 差分测试、配置进程与输出限制、使用 Workspace Schema v1、配置 DOMjudge 题目包或使用 Typst 组卷时调用。覆盖从题面和代码矩阵到 PDF、ZIP、Manifest 与状态验证的完整流程。
 ---
 
 # 角色
@@ -106,7 +106,7 @@ probhub build L01 --no-cache
 probhub build L01 --skip-judge
 ```
 
-完整语法、产物、退出码和故障处理见 `references/cli.md`。配置或执行差分测试前读取 `references/stress.md`。
+完整语法、产物、退出码和故障处理见 `references/cli.md`。配置或执行差分测试前读取 `references/stress.md`；修改资源限制、解释 OLE 或排查残留进程时读取 `references/process-control.md`。
 
 # 4. Schema v1 标准执行闭环
 
@@ -163,7 +163,7 @@ probhub build L01 --skip-judge
 - Checker/Interactor 必须使用附带的 DOMjudge/testlib 协议；交互题按需设置 `judge.interactive.idle_limit` 和 `transcript_limit`。Core 负责本地编译以及生成 `output_validators/validate/`，不得手工维护该生成目录。
 - 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
 - 为定向卡错解和复杂度数据配置 `data.groups` 与结构化 `solutions.*[].expected`；实现或审查时读取 `references/data-groups-expectations.md`。要求错解必须 WA 时显式写 `status: WA`，不得用偶然 RE/TLE 代替。
-- 时间限制使用正整数秒；内存限制至少为 `256MB` 且为 2 的幂。
+- `limits.time` 使用正数秒；`limits.memory` 至少为 `256MB` 且为 2 的幂；`limits.output` 使用正整数 MiB，默认 `64`；`limits.processes` 使用正整数，默认 `32`。
 - 复杂生成器读取 `references/cyaron.md`；简单 C++ 生成器读取 `references/fast.md`。用于差分测试的 Generator 必须把单个测试点写到 stdout，并只由 `{seed}` / `{round}` 参数控制随机性；读取 `references/stress.md`。
 
 # 6. 沙箱宿命与修复
@@ -174,6 +174,9 @@ probhub build L01 --skip-judge
 - brute 出现 WA：修复 brute、标程或答案；不得忽略。
 - brute 没有任何 TLE/MLE：检查复杂度与数据强度。
 - wrong 全 AC：补充针对性数据或修正错解模型。
+- 出现 `OLE`：先检查程序是否无限输出，再判断 `limits.output` 是否确实过小；不得用放宽上限掩盖错误程序。
+- 出现 `process limit exceeded`：检查递归创建进程或未回收子进程；官方 Validator、Checker、Interactor、Generator 或编译器触发限制时按基础设施错误处理。
+- 评测结束后仍有后代进程、Windows Job 建立失败或资源控制异常：视为沙箱基础设施错误，不得继续无保护运行；读取 `references/process-control.md`。
 - stress 发现 `counterexample`：保留 `.probhub/stress/` 中的输入，用 `--replay latest` 或输出的重放命令复现；修复后把有价值的输入固化为隐藏数据。
 - stress 报 `infrastructure`：先修复 Generator、Validator 或 Checker；不得把基础设施失败当作算法反例。交互题当前不支持 stress。
 - 怀疑随机性、环境波动或缓存异常：普通沙箱使用 `--no-cache` 完整重跑并刷新缓存；stress 不使用沙箱缓存，应固定 `--seed` 或 replay。
@@ -182,7 +185,7 @@ probhub build L01 --skip-judge
 
 # 7. WebUI 与交付限制
 
-- 当前 Schema v1 WebUI 只用于只读预览和沙箱展示，不得通过 WebUI 保存题面或排序。
+- 当前 Schema v1 WebUI 只用于只读预览和现有沙箱展示，不得通过 WebUI 保存题面或排序。上传代码并仅评测临时提交、且不覆盖题目 `code/` 的功能尚未实现；共享进程控制层只是该功能的基础。
 - 不得手工增量修改旧 ZIP；必须由 Core 完整重建并验证。
 - 不得提交 `.exe`、沙箱缓存、临时输出或 Typst/WebUI 预览缓存。
 - 遇到错误必须自行定位、修复并重跑相应验证。

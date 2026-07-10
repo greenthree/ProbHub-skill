@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from probhub.cli import build_parser
 from probhub.errors import ProbHubError
 from probhub.io import write_yaml
 from probhub.linting import compute_source_hash, lint_workspace
+from probhub.process_control import process_alive
 from probhub.stressing import expand_generator_args, stress_problem
 from probhub.workspace import load_problem, load_workspace, problem_entries
 
@@ -144,6 +146,8 @@ class StressTests(unittest.TestCase):
             config["stress"]["generator"] = "../outside.py"
             config["stress"]["rounds"] = True
             config["stress"]["tool_timeout"] = float("nan")
+            config["limits"]["output"] = 0
+            config["limits"]["processes"] = False
             write_yaml(problem / "probhub.yaml", config)
             root, workspace = load_workspace(root)
             result = lint_workspace(root, workspace)
@@ -151,6 +155,8 @@ class StressTests(unittest.TestCase):
             self.assertTrue(any("must stay inside" in error for error in errors), errors)
             self.assertIn("stress.rounds must be a positive integer", errors)
             self.assertIn("stress.tool_timeout must be a positive finite number", errors)
+            self.assertIn("limits.output must be a positive integer in MB", errors)
+            self.assertIn("limits.processes must be a positive integer", errors)
             entry = problem_entries(workspace)[0]
             problem, loaded = load_problem(root, entry)
             compute_source_hash(problem, loaded)
@@ -168,6 +174,64 @@ class StressTests(unittest.TestCase):
             metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
             with self.assertRaisesRegex(ProbHubError, "invalid seed or round"):
                 stress_problem(root, problem, config, replay=artifact)
+
+
+    def test_generator_and_solution_output_limits_are_structured(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem, config = self.create_workspace(root)
+            config["limits"]["output"] = 1
+            (problem / "code/generator.py").write_text(
+                "import sys\nsys.stdout.write('1\\n' * 1000000)\n", encoding="utf-8"
+            )
+            result = stress_problem(root, problem, config, rounds=1, master_seed=1)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "infrastructure")
+            self.assertEqual(result["reason"], "generator_ole")
+            artifact = root / result["counterexample"]
+            self.assertLessEqual((artifact / "generator.out").stat().st_size, 1024 * 1024)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem, config = self.create_workspace(root)
+            config["limits"]["output"] = 1
+            (problem / "code/std.py").write_text(
+                "import sys\nsys.stdin.read()\nsys.stdout.write('x' * 2000000)\n",
+                encoding="utf-8",
+            )
+            result = stress_problem(root, problem, config, rounds=1, master_seed=1)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "counterexample")
+            self.assertEqual(result["reason"], "accepted_ole")
+
+
+    def test_checker_timeout_kills_descendant_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem, config = self.create_workspace(root, judge_type="custom")
+            pid_file = problem / "checker-child.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            (problem / "code/checker.py").write_text(
+                "import subprocess,sys,time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            config["stress"]["tool_timeout"] = 0.8
+            result = stress_problem(root, problem, config, rounds=1, master_seed=1)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "infrastructure")
+            self.assertEqual(result["reason"], "checker_failed")
+            self.assertTrue(pid_file.is_file(), "checker child did not start")
+            child_pid = int(pid_file.read_text(encoding="utf-8"))
+            deadline = time.time() + 5
+            while process_alive(child_pid) and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(process_alive(child_pid), f"checker child {child_pid} survived")
 
     def test_custom_checker_compares_brute_against_standard_output(self):
         with tempfile.TemporaryDirectory() as temp:

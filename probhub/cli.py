@@ -96,7 +96,7 @@ def command_new(args):
         "display_name": name,
         "difficulty": None,
         "tags": [],
-        "limits": {"time": 1, "memory": 256, "output": 64},
+        "limits": {"time": 1, "memory": 256, "output": 64, "processes": 32},
         "statement": {"source": "problem.md"},
         "judge": {"type": "standard", "validator": "code/validator.cpp"},
         "solutions": {

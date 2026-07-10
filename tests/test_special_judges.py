@@ -42,7 +42,7 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
             "schema_version": 1,
             "id": "A",
             "name": "Special",
-            "limits": {"time": 2, "memory": 256},
+            "limits": {"time": 2, "memory": 256, "output": 1, "processes": 8},
             "judge": {"validator": "code/validator.cpp", **judge},
             "solutions": {
                 "accepted": ["code/std.cpp"],
@@ -71,6 +71,33 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
         )
         events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         return result, events
+
+
+    def test_standard_output_limit_returns_ole(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {"type": "standard"},
+                """
+                #include <iostream>
+                int main(){ for (int i = 0; i < 2000000; ++i) std::cout << 'x'; }
+                """,
+                """
+                #include <iostream>
+                int main(){ std::cout << 0 << '\n'; }
+                """,
+                {},
+            )
+            result, events = self.run_judge(problem)
+            self.assertNotEqual(result.returncode, 0)
+            case = next(
+                event for event in events
+                if event.get("type") == "case" and event.get("kind") == "std"
+            )
+            self.assertEqual(case["status"], "OLE", case)
+            limits = next(event for event in events if event.get("type") == "limits")
+            self.assertEqual(limits["output_limit"], 1)
+            self.assertEqual(limits["process_limit"], 8)
 
     def test_custom_checker_accepts_non_unique_output_and_kills_wrong_solution(self):
         with tempfile.TemporaryDirectory() as temp:

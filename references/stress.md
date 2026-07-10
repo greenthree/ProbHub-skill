@@ -41,6 +41,19 @@ stress:
 
 `accepted` 和 `brute` 覆盖项当前写文件路径字符串；若不覆盖，可以继续在 `solutions` 中使用字符串或带 `file` 的结构化条目。
 
+### 资源控制
+
+Stress 沿用题目的 `limits.memory`、`limits.output` 和 `limits.processes`：
+
+```yaml
+limits:
+  memory: 256
+  output: 64     # MiB，默认 64
+  processes: 32  # 默认 32
+```
+
+Generator、Validator、accepted、brute、Checker 与编译器全部使用共享进程树控制。accepted/brute 使用 `stress.time_limit` 与题目资源限制；Generator、Validator、Checker 使用 `stress.tool_timeout` 及有界内部诊断输出。输出超限时会终止完整进程树并截断捕获文件；accepted/brute 记为 `OLE`，官方工具超限记为 `infrastructure`。即使某阶段的直接父进程已正常退出，其遗留后代仍会被清理。平台语义见 `references/process-control.md`。
+
 ### 自定义 Checker 配置
 
 浮点题、非唯一答案题或 Token 级比较使用：
@@ -116,7 +129,7 @@ args: ["--seed", "{seed}", "--round", "{round}", "--size", "20"]
 4. brute 运行并产生待检查输出；
 5. 按 `judge.type` 比较两份输出。
 
-任一阶段失败或输出不匹配时停止，不再执行后续轮次，并保存首个反例。
+任一阶段失败或输出不匹配时停止，不再执行后续轮次，并保存首个反例。每个阶段都在完整进程树控制下运行；TLE、MLE、OLE、进程数超限或启动基础设施错误都会先清理所有后代再返回。
 
 ### `standard`
 
@@ -223,12 +236,12 @@ Replay 结果另外包含 `replay: true`、`artifact`、`input`、`seed` 和 `ro
 | 情况 | `status`/分类 | 典型 `reason` | 是否保存反例 |
 |---|---|---|---:|
 | 所有轮次匹配 | `passed` | — | 否 |
-| accepted RE/TLE | `counterexample` | `accepted_re` / `accepted_tle` | 是 |
-| brute RE/TLE | `counterexample` | `brute_re` / `brute_tle` | 是 |
+| accepted RE/TLE/MLE/OLE | `counterexample` | `accepted_re` / `accepted_tle` / `accepted_mle` / `accepted_ole` | 是 |
+| brute RE/TLE/MLE/OLE | `counterexample` | `brute_re` / `brute_tle` / `brute_mle` / `brute_ole` | 是 |
 | 输出不等价或 Checker 判 WA | `counterexample` | `output_mismatch` | 是 |
-| Generator RE/TLE | `infrastructure` | `generator_re` / `generator_tle` | 是 |
+| Generator RE/TLE/MLE/OLE | `infrastructure` | `generator_re` / `generator_tle` / `generator_mle` / `generator_ole` | 是 |
 | Validator 拒绝或异常 | `infrastructure` | `validator_rejected` | 是 |
-| Checker FAIL、异常返回或超时 | `infrastructure` | `checker_failed` | 是 |
+| Checker FAIL、RE/TLE/MLE/OLE 或进程超限 | `infrastructure` | `checker_failed` | 是 |
 | Schema、路径或编译错误 | 命令错误 | `error` 字段 | 通常否 |
 
 进程正常退出且输出匹配才记为该轮通过。即使 brute 本来只用于小数据，brute 超时也会作为反例停止，通常说明生成规模过大或 `stress.time_limit` 太小。

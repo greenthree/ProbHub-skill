@@ -69,6 +69,8 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertTrue((root / "B/code").is_dir())
             _, config = load_problem(root, {"id": "B", "directory": "B"})
             self.assertEqual(config["judge"]["validator"], "code/validator.cpp")
+            self.assertEqual(config["limits"]["output"], 64)
+            self.assertEqual(config["limits"]["processes"], 32)
             self.assertEqual(config["solutions"]["accepted"], ["code/std.cpp"])
             self.assertEqual(config["generators"], ["code/inmaker.cpp"])
             _, workspace = load_workspace(root)

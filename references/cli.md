@@ -157,6 +157,7 @@ probhub judge [ID...] [--no-cache]
 3. 对 `data/sample` 和 `data/secret` 逐点评测。
 4. 按 `judge.type` 使用标准比较、Checker 或 Interactor。
 5. 根据每个程序的结构化 `expected` 宿命验证状态、目标数据组与禁止状态；未配置时保持 accepted 全 AC、brute 不 WA 且至少 TLE/MLE、wrong 至少一个非 AC 的默认语义。
+6. 对普通程序、Checker、Validator、编译器和 Interactor 应用完整进程树、时间、内存、输出与进程数控制。
 
 支持的评测类型：
 
@@ -191,6 +192,18 @@ Checker/Interactor 的参数协议、testlib 模板和状态映射见 `reference
 
 数据逻辑分组、`solutions.*[].expected`、默认宿命和首个击杀用例字段见 `references/data-groups-expectations.md`。仅修改分组或宿命会复用逐点缓存，并重新计算断言。
 
+资源配置：
+
+```yaml
+limits:
+  time: 1
+  memory: 256
+  output: 64     # MiB，默认 64
+  processes: 32  # 整棵进程树，默认 32
+```
+
+选手程序超过输出预算时状态为 `OLE`；超过进程数上限时为 `RE` 并带 `process limit exceeded`。官方 Checker、Validator、Interactor 或编译器自身超时、超限或无法建立完整进程树控制时属于基础设施 `FAIL`，而不是选手答案错误。输出超限后，保存的 stdout/stderr 会截断到预算以内。完整跨平台语义见 `references/process-control.md`。
+
 成功最终事件：
 
 ```json
@@ -217,7 +230,7 @@ Checker/Interactor 的参数协议、testlib 模板和状态映射见 `reference
 
 - 编译：源码、相关头文件、参数、编译器、平台、二进制摘要。
 - Validator：验证器指纹和输入内容。
-- Case：程序指纹、输入、答案、时限、内存和平台。
+- Case：程序指纹、输入、答案、时限、内存、输出上限、进程数上限、平台和沙箱策略。
 
 强制完整执行并用本次结果替换缓存：
 
@@ -225,7 +238,7 @@ Checker/Interactor 的参数协议、testlib 模板和状态映射见 `reference
 probhub judge L01 --no-cache
 ```
 
-缓存事件包含 `mode`、`compile_hits/misses`、`validator_hits/misses`、`case_hits/misses`。
+缓存事件包含 `mode`、`compile_hits/misses`、`validator_hits/misses`、`case_hits/misses`。进程树、OLE 或资源限制语义变化会提升缓存 Schema，防止旧结果绕过新策略。
 
 ## 9. `stress`
 
@@ -291,8 +304,8 @@ probhub stress L01 --replay "L01/.probhub/stress/<artifact>/input.in"
 结果与退出：
 
 - `status: passed`：全部轮次匹配或 replay 通过，退出码 `0`。
-- `status: counterexample`：输出不匹配或 accepted/brute RE/TLE，保存反例并退出 `1`。
-- `status: infrastructure`：Generator、Validator 或 Checker 失败，保存诊断并退出 `1`。
+- `status: counterexample`：输出不匹配或 accepted/brute RE/TLE/MLE/OLE，保存反例并退出 `1`。
+- `status: infrastructure`：Generator、Validator、Checker 或编译器 RE/TLE/MLE/OLE/进程限制失败，保存诊断并退出 `1`。
 - Schema、路径、编译或参数错误：输出 `ok: false` 和 `error`，退出 `1`。
 - Ctrl+C：退出 `130`。
 
