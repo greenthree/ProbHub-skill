@@ -15,7 +15,8 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 - **时空限制自检**：`local_judge.py` 支持读取 `meta.json`、`domjudge-problem.ini`、`problem.yaml` 中的时间和内存限制，并报告 TLE/MLE/RE/WA/AC。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 微调题面**：提供 Flask 控制台，支持题目排序、Markdown 预览、样例编辑、引言 Quote、时空限制编辑、全卷编译和 PDF 分发。
-- **DOMjudge 兼容**：生成 `problem.yaml`、`domjudge-problem.ini`、数据目录和自定义 checker/interactor 所需结构，可打包为 `.zip`。
+- **可重复构建 Core**：Workspace Schema v1、源文件哈希、构建 Manifest、过期检测和统一 `probhub` CLI。
+- **DOMjudge 兼容**：从规范源文件生成 `problem.yaml`、`domjudge-problem.ini` 和确定性 `.zip`。
 
 示例 PDF：
 [真实赛事 Typst 题面排版示例](https://github.com/greenthree/ProbHub-skill/blob/main/typst-template/%E6%AD%A3%E5%BC%8F%E8%B5%9B/main.pdf)
@@ -24,10 +25,18 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 
 ## 快速安装
 
-推荐使用 npm 脚手架安装：
+只需注入 Skill 时可使用 npm 脚手架：
 
 ```bash
 npx probhub-skill
+```
+
+若需要持久的 `probhub` CLI，推荐全局安装后再执行 Skill 注入：
+
+```bash
+npm install -g probhub-skill
+probhub-skill
+probhub --version
 ```
 
 安装脚本会把 skill 注入到两个常见 Agent 目录：
@@ -72,7 +81,7 @@ ProbHub 会尽量自动安装 Python 依赖，但底层编译和排版仍依赖�
 ### Python 包
 
 ```bash
-pip install cyaron pypdf flask
+pip install cyaron pypdf flask pyyaml
 ```
 
 ### Typst
@@ -104,6 +113,52 @@ winget install typst
 
 ---
 
+## ProbHub CLI 与 Workspace Schema v1
+
+`0.3.0` 开始，推荐让 Skill 编排统一 CLI，而不是手工串联脚本：
+
+```powershell
+probhub doctor
+probhub new L05 --name "新题"
+probhub lint L01
+probhub status
+probhub judge L01
+probhub typeset L01
+probhub package L01
+probhub build L01
+probhub build             # 构建全工作区
+probhub verify-package L01.zip --require-pdf
+```
+
+如果 npm bin 不在 PATH，可使用 Skill/工作区中的兼容入口：
+
+```powershell
+python scripts/probhub.py build L01
+```
+
+Schema v1 使用以下事实来源：
+
+```text
+.probhub/workspace.yaml    # 赛事配置、题目顺序、Typst 集合
+L01/probhub.yaml           # 稳定 ID、限制、代码矩阵和数据目录
+L01/problem.md             # 题面描述、输入、输出和提示
+L01/code/                   # 全部 C++ 源码与本地编译产物
+L01/data/sample/           # 样例唯一来源
+L01/data/secret/           # 隐藏数据唯一来源
+```
+
+以下均为构建产物，不应手工维护：
+
+- `meta.json`
+- Typst `problems.json`
+- `problem.yaml` 与 `domjudge-problem.ini`
+- `problem.pdf`、全卷 PDF 和 DOMjudge ZIP
+- `.probhub/build-manifest.json`
+
+`probhub build` 会依次执行 lint、沙箱、元数据生成、Typst 编译、单题 PDF 提取、DOMjudge 打包、包验证和 Manifest 写入。`probhub status` 会比较源文件、数据、PDF 和 ZIP 哈希，报告 `current`、`stale` 或 `never-built`。
+
+---
+
 ## 基本用法
 
 在一个题目工作区中启动你的 Agent 工具，例如 Claude Code：
@@ -130,7 +185,7 @@ Agent 会按 [SKILL.md](SKILL.md) 中的流程推进：
 
 1. 确立题面、中文题名和英文目录名。
 2. 判断是否需要 checker、interactor 或特殊评测。
-3. 编写 `std.cpp`、`validator.cpp`、`brute.cpp`、`wrong.cpp` 和数据生成器。
+3. 在 `code/` 中编写 `std.cpp`、`validator.cpp`、`brute.cpp`、`wrong.cpp` 和数据生成器。
 4. 生成 `data/sample` 与 `data/secret`。
 5. 运行本地沙箱自检。
 6. 加入 Typst 组卷并裁剪 `problem.pdf`。
@@ -143,35 +198,32 @@ Agent 会按 [SKILL.md](SKILL.md) 中的流程推进：
 对题目目录执行：
 
 ```bash
-python scripts/local_judge.py <problem_dir>
-```
-
-成功时应看到：
-
-```text
-[+] 恭喜！所有代码均符合预期宿命
-```
-
-`local_judge.py` 会检查：
-
-- `validator.cpp` 是否接受所有输入数据。
-- `std*.cpp` 是否全部 AC。
-- `brute*.cpp` 是否不 WA，并且至少出现 TLE 或 MLE，用于证明强数据足够强。
-- `wrong*.cpp` 是否不能全 AC。
-- 每个测试点的时间和内存状态。
-
-WebUI 会使用 JSONL 模式读取沙箱事件：
-
-```bash
 python scripts/local_judge.py <problem_dir> --jsonl
 ```
 
+自动化流程以退出码和最后一个 JSONL 事件为准。成功事件固定为：
+
+```json
+{"protocol":"probhub.local_judge","protocol_version":1,"type":"final","ok":true,"status":"passed","code":"all_expectations_met","exit_code":0,"message":"..."}
+```
+
+不带 `--jsonl` 时仍会输出适合人工阅读的文本，但调用方不应匹配自然语言成功提示。
+
+`local_judge.py` 会检查：
+
+- `probhub.yaml` 中 `judge.validator` 指向的验证器是否接受所有输入数据。
+- `solutions.accepted` 指向的程序是否全部 AC。
+- `solutions.brute` 指向的程序是否不 WA，并且至少出现 TLE 或 MLE，用于证明强数据足够强。
+- `solutions.wrong` 指向的程序是否不能全 AC。
+- 每个测试点的时间和内存状态。
+
+WebUI 使用同一 JSONL 协议读取编译、逐点、汇总和最终事件。
+
 时空限制读取优先级：
 
-1. `<problem_dir>/meta.json` 中的 `problem.time_limit` 和 `problem.memory_limit`
-2. `domjudge-problem.ini` 中的 `timelimit`
-3. `problem.yaml` 中的 `limits.memory`
-4. 默认 `1s / 256MB`
+1. `<problem_dir>/probhub.yaml` 中的 `limits.time` 和 `limits.memory`
+2. Legacy 工作区的 `meta.json`、`domjudge-problem.ini` 与 `problem.yaml`
+3. 默认 `1s / 256MB`
 
 ---
 
@@ -247,16 +299,21 @@ python launch_ui.py
 
 ```text
 <problem_dir>/
-├── std.cpp
-├── validator.cpp
-├── brute.cpp
-├── wrong.cpp
-├── checker.cpp              # 可选，非唯一答案时需要
-├── interactor.cpp           # 可选，交互题需要
-├── meta.json
-├── problem.pdf
-├── domjudge-problem.ini
-├── problem.yaml
+├── probhub.yaml             # 规范配置与代码调用路径
+├── problem.md               # 规范题面源文件
+├── code/
+│   ├── std.cpp
+│   ├── validator.cpp
+│   ├── brute.cpp
+│   ├── wrong.cpp
+│   ├── inmaker.cpp
+│   ├── checker.cpp          # 可选，非唯一答案时需要
+│   ├── interactor.cpp       # 可选，交互题需要
+│   └── *.exe                # 本地编译产物，不跟踪
+├── meta.json                # Core 生成
+├── problem.pdf              # Core 生成
+├── domjudge-problem.ini     # Core 生成
+├── problem.yaml             # Core 生成
 ├── data/
 │   ├── sample/
 │   │   ├── 1.in
@@ -274,6 +331,15 @@ python launch_ui.py
 - `problem.yaml`
 - `problem.pdf`，如果已生成
 - `output_validators/`，如果存在自定义评测
+
+推荐使用确定性打包和验证脚本：
+
+```bash
+python scripts/package_problem.py <problem_dir> <problem_id>.zip --require-pdf
+python scripts/verify_package.py <problem_id>.zip --require-pdf
+```
+
+打包脚本会按稳定顺序和固定时间戳写入 ZIP；验证脚本会检查路径安全、根配置文件、样例/隐藏数据及 `.in`/`.ans` 配对关系。
 
 ---
 

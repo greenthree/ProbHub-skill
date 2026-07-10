@@ -29,3 +29,7 @@ node_modules/
 
 # Local npm cache
 .npm-cache/
+
+# Python cache
+__pycache__/
+*.pyc

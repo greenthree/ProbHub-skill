@@ -1,0 +1,14 @@
+# Development-only files
+.github/
+tests/
+.npm-cache/
+node_modules/
+*.tgz
+
+# Repository-only templates and generated previews
+typst-template/
+__pycache__/
+*.pyc
+
+**/__pycache__/**
+**/*.pyc
