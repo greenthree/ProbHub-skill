@@ -1,0 +1,242 @@
+# ProbHub Stress Differential Testing
+
+`probhub stress` 用随机或定向小数据反复比较 accepted 与 brute，发现首个不一致后立即保存可重放反例。它适用于 `judge.type: standard` 和 `judge.type: custom`；当前不支持交互题。
+
+## 1. 配置
+
+在 `<problem>/probhub.yaml` 中增加：
+
+```yaml
+judge:
+  type: standard
+  validator: code/validator.cpp
+
+solutions:
+  accepted: [code/std.cpp]
+  brute: [code/brute.cpp]
+
+stress:
+  generator: code/stress_generator.cpp
+  args: ["{seed}", "{round}"]
+  rounds: 1000
+  time_limit: 5
+  tool_timeout: 5
+  accepted: code/std.cpp
+  brute: code/brute.cpp
+```
+
+字段：
+
+| 字段 | 必需 | 默认值 | 含义 |
+|---|---:|---|---|
+| `generator` | 是 | 无 | 每轮生成一个测试点的程序，路径相对题目目录且必须位于题目目录内 |
+| `args` | 否 | `["{seed}"]` | 传给生成器的参数模板；也可写单个字符串 |
+| `rounds` | 否 | `1000` | 未传 `--rounds` 时执行的轮数，必须为正整数 |
+| `time_limit` | 否 | `max(limits.time * 2, 5)` 秒 | accepted 和 brute 每次运行的超时 |
+| `tool_timeout` | 否 | `5` 秒 | generator、validator 和 Checker 每次运行的超时 |
+| `accepted` | 否 | `solutions.accepted` 第一项 | 差分中的可信实现 |
+| `brute` | 否 | `solutions.brute` 第一项 | 差分中的对照实现 |
+
+`generator`、`accepted`、`brute`、`judge.validator` 和自定义题的 `judge.checker` 支持 `.cpp`、`.py` 或当前平台可直接执行的文件。C++ 会以 C++17、`-O2` 临时编译；构建目录在命令结束后删除，不写入 `code/`。
+
+`accepted` 和 `brute` 覆盖项当前写文件路径字符串；若不覆盖，可以继续在 `solutions` 中使用字符串或带 `file` 的结构化条目。
+
+### 自定义 Checker 配置
+
+浮点题、非唯一答案题或 Token 级比较使用：
+
+```yaml
+judge:
+  type: custom
+  validator: code/validator.cpp
+  checker: code/checker.cpp
+
+stress:
+  generator: code/stress_generator.cpp
+  rounds: 10000
+```
+
+Checker 的完整模板、返回码和反馈文件见 `references/checker-interactor.md`。
+
+## 2. Generator 协议
+
+生成器每轮启动一次，并把**恰好一个完整测试点写到 stdout**。stdout 原样作为 Validator、accepted 和 brute 的 stdin；日志只能写 stderr，不能混入 stdout。生成器不应依赖交互式 stdin、当前时间或其他无法由 seed 恢复的状态。
+
+`stress.args` 支持两个占位符：
+
+- `{seed}`：本轮 seed；
+- `{round}`：从 `1` 开始的轮号。
+
+未传 `--seed` 时，ProbHub 随机选择一个非负 master seed，并在结果中输出。第 `round` 轮使用：
+
+```text
+seed = master_seed + round - 1
+```
+
+例如：
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+int main(int argc, char** argv) {
+    long long seed = stoll(argv[1]);
+    int round = argc >= 3 ? stoi(argv[2]) : 1;
+    mt19937_64 rng(seed);
+
+    int n = 1 + rng() % 20;
+    cout << n << '\n';
+    for (int i = 0; i < n; ++i) {
+        cout << static_cast<int>(rng() % 101) << " \n"[i + 1 == n];
+    }
+}
+```
+
+对应配置：
+
+```yaml
+stress:
+  generator: code/stress_generator.cpp
+  args: ["{seed}", "{round}"]
+```
+
+为了可重现性，随机分支应只由传入 seed 决定。若生成器需要模式参数，可与占位符混用：
+
+```yaml
+args: ["--seed", "{seed}", "--round", "{round}", "--size", "20"]
+```
+
+## 3. 每轮执行与比较
+
+每轮按以下顺序执行：
+
+1. Generator 向 stdout 生成输入；
+2. `judge.validator` 校验输入；
+3. accepted 运行并产生可信输出；
+4. brute 运行并产生待检查输出；
+5. 按 `judge.type` 比较两份输出。
+
+任一阶段失败或输出不匹配时停止，不再执行后续轮次，并保存首个反例。
+
+### `standard`
+
+accepted stdout 是期望输出，brute stdout 是实际输出。比较规则与普通沙箱一致：
+
+- 忽略整个输出首尾空白；
+- 忽略每行末尾的空格和 Tab；
+- 行内空格数量、非首行行首空白和内部换行结构仍须一致。
+
+### `custom`
+
+ProbHub 把 accepted stdout 写成 jury answer，把 brute stdout 作为 contestant output 交给现有 Checker。调用协议为：
+
+```text
+checker <input-file> <answer-file> <feedback-dir>
+```
+
+brute stdout 从 Checker stdin 传入。Checker 返回 AC 表示两份输出在题目语义下等价；WA 表示发现反例；FAIL、异常返回或超时属于评测基础设施失败。
+
+### `interactive`
+
+`judge.type: interactive` 当前不支持 `probhub stress`。`probhub lint` 会报告配置错误，直接运行也会以非零退出码拒绝。交互题继续使用 `probhub judge` 验证 Interactor 和选手程序。
+
+## 4. 命令
+
+使用题目稳定 ID：
+
+```powershell
+# 使用 probhub.yaml 中的 rounds，并随机生成 master seed
+probhub stress L01
+
+# 临时覆盖轮数
+probhub stress L01 --rounds 10000
+
+# 固定 master seed，便于复现完整随机序列
+probhub stress L01 --rounds 10000 --seed 12345
+
+# 可同时运行多题；任一题失败时总退出码非零
+probhub stress L01 L03 --rounds 2000
+
+# 机器可读结果；全局选项写在子命令前
+probhub --json stress L01 --rounds 10000 --seed 12345
+```
+
+`--rounds` 必须为正整数，`--seed` 必须为非负整数。差分测试不会读取或写入 `sandbox-cache-v1.json`；每次命令都会重新临时准备程序并执行请求的轮次。
+
+## 5. Replay
+
+发现失败后，输出包含 `counterexample` 和可直接执行的 `replay_command`。也可以重放该题最近一次保存的反例：
+
+```powershell
+probhub stress L01 --replay latest
+```
+
+显式传入反例目录或其中的输入文件：
+
+```powershell
+probhub stress L01 --replay "L01/.probhub/stress/20260710-120000-r37-s12381"
+probhub stress L01 --replay "L01/.probhub/stress/20260710-120000-r37-s12381/input.in"
+```
+
+`--replay` 只能选择一个题目，路径必须位于该题的 `.probhub/stress/` 内；若 `metadata.json` 声明了其他题目 ID，命令会拒绝重放。Replay 会读取保存的 `input.in`，重新运行 Validator、当前 accepted、当前 brute 和当前 Checker；不会重新运行或编译 Generator，也不会覆盖原反例。修复代码后 replay 返回 `passed`，说明当前实现已在该输入上重新一致，但不代表其他随机输入都已通过，仍应继续执行新的 stress 轮次。
+
+## 6. 反例目录
+
+首个失败写入：
+
+```text
+<problem>/.probhub/stress/
+├── latest.json
+└── <UTC时间>-r<round>-s<seed>/
+    ├── input.in
+    ├── generator.out
+    ├── generator.stderr
+    ├── validator.out
+    ├── validator.stderr
+    ├── accepted.out
+    ├── accepted.stderr
+    ├── brute.out
+    ├── brute.stderr
+    ├── checker.stderr
+    └── metadata.json
+```
+
+只会写入失败发生前已经产生的文件，因此较早阶段失败时部分文件可能为空或不存在。`metadata.json` 记录题目 ID、master seed、本轮 seed、轮号、生成器参数、程序路径、Judge 类型、失败分类和各阶段状态；`latest.json` 指向最近一次保存的反例目录。
+
+`.probhub/stress/` 是本地诊断产物，应由 Git 忽略，不得打进 DOMjudge 包或提交到仓库。需要长期保留某个反例时，建议把 `input.in` 整理为命名清晰的 `data/secret/*.in`，生成对应 `.ans`，并加入数据组或回归测试。
+
+## 7. 失败分类、结果与退出码
+
+命令在正常完成时输出结构化对象；使用 `--json` 可稳定用于脚本。普通 stress 运行的关键字段包括：
+
+- `ok`：是否所有请求轮次都匹配，或 replay 是否通过；
+- `status`：`passed`、`counterexample` 或 `infrastructure`；
+- `rounds_requested` / `rounds_completed`：请求轮数和失败前完整通过的轮数；
+- `master_seed`、`seed`、`round`：随机序列和失败位置；
+- `reason`、`message`：机器分类和诊断信息；
+- `counterexample`、`replay_command`：保存位置和重放命令。
+
+Replay 结果另外包含 `replay: true`、`artifact`、`input`、`seed` 和 `round`，但不包含普通运行的轮数统计或新的反例路径。
+
+失败语义：
+
+| 情况 | `status`/分类 | 典型 `reason` | 是否保存反例 |
+|---|---|---|---:|
+| 所有轮次匹配 | `passed` | — | 否 |
+| accepted RE/TLE | `counterexample` | `accepted_re` / `accepted_tle` | 是 |
+| brute RE/TLE | `counterexample` | `brute_re` / `brute_tle` | 是 |
+| 输出不等价或 Checker 判 WA | `counterexample` | `output_mismatch` | 是 |
+| Generator RE/TLE | `infrastructure` | `generator_re` / `generator_tle` | 是 |
+| Validator 拒绝或异常 | `infrastructure` | `validator_rejected` | 是 |
+| Checker FAIL、异常返回或超时 | `infrastructure` | `checker_failed` | 是 |
+| Schema、路径或编译错误 | 命令错误 | `error` 字段 | 通常否 |
+
+进程正常退出且输出匹配才记为该轮通过。即使 brute 本来只用于小数据，brute 超时也会作为反例停止，通常说明生成规模过大或 `stress.time_limit` 太小。
+
+CLI 退出码：
+
+- `0`：所有所选题目的所有轮次通过，或 replay 通过；
+- `1`：发现反例、基础设施失败、配置/路径/编译/参数错误，或多题中至少一题失败；
+- `130`：用户中断（Ctrl+C）。
+
+不要只匹配自然语言输出；自动化流程应检查退出码以及 `ok`、`status`、`reason` 和反例路径。

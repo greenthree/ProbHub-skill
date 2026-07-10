@@ -11,6 +11,7 @@ from .io import write_yaml
 from .judging import judge_problem
 from .linting import lint_workspace, problem_status
 from .package_tools import verify_package
+from .stressing import stress_problem
 from .typesetting import compile_collection, extract_problem_pdfs
 from .workspace import WORKSPACE_FILE, find_workspace, load_problem, load_workspace, problem_entries, select_entries
 
@@ -39,6 +40,25 @@ def workspace_context(args, allow_empty=False):
     return load_workspace(root, allow_empty=allow_empty)
 
 
+def _ensure_local_gitignore(root):
+    path = Path(root) / ".gitignore"
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    required = [
+        "**/.probhub/sandbox-cache-v1.json",
+        "**/.probhub/sandbox-cache-v1.json.tmp",
+        "**/.probhub/stress/",
+    ]
+    present = {line.strip() for line in existing.splitlines()}
+    missing = [line for line in required if line not in present]
+    if not missing:
+        return
+    content = existing.rstrip()
+    if content:
+        content += "\n\n"
+    content += "# Local ProbHub artifacts\n" + "\n".join(missing) + "\n"
+    path.write_text(content, encoding="utf-8")
+
+
 def command_init(args):
     root = Path(args.directory or Path.cwd()).resolve()
     path = root / WORKSPACE_FILE
@@ -52,6 +72,7 @@ def command_init(args):
         "lint": {"forbidden_patterns": ["TODO", "FIXME", "114514", "待补充"]},
     }
     write_yaml(path, data)
+    _ensure_local_gitignore(root)
     return {"ok": True, "workspace": str(path)}
 
 
@@ -121,6 +142,25 @@ def command_judge(args):
     for entry in select_entries(workspace, args.problem):
         problem_dir, _ = load_problem(root, entry)
         results[entry["id"]] = judge_problem(root, problem_dir, use_cache=not args.no_cache)
+    return {"ok": all(item["ok"] for item in results.values()), "problems": results}
+
+
+def command_stress(args):
+    root, workspace = workspace_context(args)
+    entries = select_entries(workspace, args.problem)
+    if args.replay is not None and len(entries) != 1:
+        raise ProbHubError("stress --replay requires exactly one problem id")
+    results = {}
+    for entry in entries:
+        problem_dir, config = load_problem(root, entry)
+        results[entry["id"]] = stress_problem(
+            root,
+            problem_dir,
+            config,
+            rounds=args.rounds,
+            master_seed=args.seed,
+            replay=args.replay,
+        )
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
 
 
@@ -195,6 +235,13 @@ def build_parser():
         if name == "build":
             item.add_argument("--skip-judge", action="store_true")
         item.set_defaults(handler=handler)
+
+    stress = sub.add_parser("stress")
+    stress.add_argument("problem", nargs="+")
+    stress.add_argument("--rounds", type=int, help="override stress.rounds")
+    stress.add_argument("--seed", type=int, help="master seed; round seeds increase from this value")
+    stress.add_argument("--replay", help="counterexample directory/input path, or 'latest'")
+    stress.set_defaults(handler=command_stress)
 
     verify = sub.add_parser("verify-package")
     verify.add_argument("zip_path")

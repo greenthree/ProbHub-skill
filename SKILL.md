@@ -1,6 +1,6 @@
 ---
 name: probhub
-description: 当用户需要创作或维护算法竞赛题目、生成测试数据、运行 ProbHub CLI 沙箱、使用 Workspace Schema v1、配置 DOMjudge 题目包或使用 Typst 组卷时调用。覆盖从题面和代码矩阵到 PDF、ZIP、Manifest 与状态验证的完整流程。
+description: 当用户需要创作或维护算法竞赛题目、生成测试数据、运行 ProbHub CLI 沙箱或 stress 差分测试、使用 Workspace Schema v1、配置 DOMjudge 题目包或使用 Typst 组卷时调用。覆盖从题面和代码矩阵到 PDF、ZIP、Manifest 与状态验证的完整流程。
 ---
 
 # 角色
@@ -35,7 +35,7 @@ description: 当用户需要创作或维护算法竞赛题目、生成测试数�
 - `problem.pdf`、全卷 PDF、`<ID>.zip`
 - `.probhub/build-manifest.json`
 
-`.probhub/sandbox-cache-v1.json` 是被 Git 忽略的本地缓存，禁止提交或手工维护。
+`.probhub/sandbox-cache-v1.json` 是被 Git 忽略的本地缓存；`.probhub/stress/` 保存可重放差分反例。两者都禁止提交或手工维护。
 
 # 3. CLI 操作规则
 
@@ -85,6 +85,7 @@ probhub build
 | `lint [ID...]` | 检查规范源文件、代码路径和数据配对 |
 | `status [ID...]` | 报告 `current`、`stale`、`never-built` |
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
+| `stress ID...` | 反复生成小数据，对拍 accepted 与 brute，保存首个可重放反例 |
 | `typeset [ID...]` | 编译全卷并提取指定单题 PDF |
 | `package [ID...]` | 从当前产物构建并验证指定 ZIP |
 | `build [ID...]` | lint → judge → 全卷排版 → 单题 PDF → ZIP → Manifest |
@@ -105,7 +106,7 @@ probhub build L01 --no-cache
 probhub build L01 --skip-judge
 ```
 
-完整语法、产物、退出码和故障处理见 `references/cli.md`。
+完整语法、产物、退出码和故障处理见 `references/cli.md`。配置或执行差分测试前读取 `references/stress.md`。
 
 # 4. Schema v1 标准执行闭环
 
@@ -123,6 +124,14 @@ probhub build L01 --skip-judge
    ```powershell
    probhub judge <ID>
    ```
+
+   若题目配置了 `stress`，在 brute 能处理的小数据范围继续执行：
+
+   ```powershell
+   probhub stress <ID> --rounds 10000 --seed 12345
+   ```
+
+   发现反例后先用输出的 `replay_command` 固定复现，再修复并重跑；完整协议见 `references/stress.md`。
 
 6. 完成后执行：
 
@@ -155,7 +164,7 @@ probhub build L01 --skip-judge
 - 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
 - 为定向卡错解和复杂度数据配置 `data.groups` 与结构化 `solutions.*[].expected`；实现或审查时读取 `references/data-groups-expectations.md`。要求错解必须 WA 时显式写 `status: WA`，不得用偶然 RE/TLE 代替。
 - 时间限制使用正整数秒；内存限制至少为 `256MB` 且为 2 的幂。
-- 复杂生成器读取 `references/cyaron.md`；简单 C++ 生成器读取 `references/fast.md`。
+- 复杂生成器读取 `references/cyaron.md`；简单 C++ 生成器读取 `references/fast.md`。用于差分测试的 Generator 必须把单个测试点写到 stdout，并只由 `{seed}` / `{round}` 参数控制随机性；读取 `references/stress.md`。
 
 # 6. 沙箱宿命与修复
 
@@ -165,9 +174,11 @@ probhub build L01 --skip-judge
 - brute 出现 WA：修复 brute、标程或答案；不得忽略。
 - brute 没有任何 TLE/MLE：检查复杂度与数据强度。
 - wrong 全 AC：补充针对性数据或修正错解模型。
-- 怀疑随机性、环境波动或缓存异常：使用 `--no-cache` 完整重跑并刷新缓存。
+- stress 发现 `counterexample`：保留 `.probhub/stress/` 中的输入，用 `--replay latest` 或输出的重放命令复现；修复后把有价值的输入固化为隐藏数据。
+- stress 报 `infrastructure`：先修复 Generator、Validator 或 Checker；不得把基础设施失败当作算法反例。交互题当前不支持 stress。
+- 怀疑随机性、环境波动或缓存异常：普通沙箱使用 `--no-cache` 完整重跑并刷新缓存；stress 不使用沙箱缓存，应固定 `--seed` 或 replay。
 
-不得根据自然语言提示判断成功；以退出码和最后一个 JSONL `final` 事件为准。
+不得根据自然语言提示判断成功：普通沙箱同时检查退出码和最后一个 JSONL `final` 事件；stress 同时检查退出码和单个结果中的 `ok`、`status`、`reason`。
 
 # 7. WebUI 与交付限制
 

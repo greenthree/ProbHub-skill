@@ -54,6 +54,8 @@ class CoreWorkspaceTests(unittest.TestCase):
                 self.assertEqual(cli_main(["--workspace", str(root), "--json", "new", "A", "--name", "First"]), 0)
             _, workspace = load_workspace(root)
             self.assertEqual(problem_entries(workspace)[0]["id"], "A")
+            gitignore = (root / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn("**/.probhub/stress/", gitignore)
 
     def test_new_command_scaffolds_schema_problem(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -15,7 +15,14 @@ import time
 import yaml
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REFERENCES_DIR = os.path.join(SCRIPT_DIR, "..", "references")
+PACKAGE_ROOT = os.path.dirname(SCRIPT_DIR)
+if PACKAGE_ROOT in sys.path:
+    sys.path.remove(PACKAGE_ROOT)
+sys.path.insert(0, PACKAGE_ROOT)
+
+from probhub.output_compare import compare_standard_output, normalize_standard_output
+
+REFERENCES_DIR = os.path.join(PACKAGE_ROOT, "references")
 DEFAULT_TIME_LIMIT = 1.0
 DEFAULT_MEMORY_LIMIT = 256
 PROTOCOL_NAME = "probhub.local_judge"
@@ -863,32 +870,6 @@ def run_program_to_file(
             os.remove(stderr_path)
         except FileNotFoundError:
             pass
-
-
-def normalize_standard_output(text):
-    """Normalize harmless whitespace for ordinary exact-answer problems.
-
-    Leading/trailing whitespace around the complete output remains ignored for
-    backwards compatibility. Within the output, only whitespace at the end of
-    each line is ignored; line breaks and whitespace before/between tokens stay
-    significant.
-    """
-    text = text.strip()
-    if not text:
-        return []
-    return [line.rstrip(" \t") for line in text.splitlines()]
-
-
-def compare_standard_output(answer_text, actual_text):
-    expected_lines = normalize_standard_output(answer_text)
-    actual_lines = normalize_standard_output(actual_text)
-    if expected_lines == actual_lines:
-        return True, ""
-    shared = min(len(expected_lines), len(actual_lines))
-    for index in range(shared):
-        if expected_lines[index] != actual_lines[index]:
-            return False, f"output differs from answer at line {index + 1}"
-    return False, f"output has a different line count (expected {len(expected_lines)}, found {len(actual_lines)})"
 
 
 def run_standard_testcase(
