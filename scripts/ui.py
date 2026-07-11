@@ -2092,7 +2092,7 @@ def compile_pdf():
         return jsonify({"success": True, "stdout": ret.stdout, "stderr": ret.stderr})
     except ProbHubError as e:
         detail = analyze_compile_error(str(e))
-        status = 409 if e.code in {"build_busy", "inputs_changed"} else 400
+        status = 409 if e.code in {"artifact_busy", "build_busy", "inputs_changed"} else 400
         return jsonify({"success": False, "error": str(e), "code": e.code, **detail}), status
     except FileNotFoundError as e:
         detail = analyze_compile_error("typst not found")
@@ -2132,7 +2132,7 @@ def distribute_pdfs():
         dist_results = distribute_problems(subtitle)
         return jsonify({"success": True, "distributed": dist_results})
     except ProbHubError as e:
-        status = 409 if e.code in {"build_busy", "inputs_changed"} else 400
+        status = 409 if e.code in {"artifact_busy", "build_busy", "inputs_changed"} else 400
         return jsonify({"success": False, "error": str(e), "code": e.code}), status
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})

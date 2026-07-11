@@ -6,7 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from probhub.build_lock import workspace_build_lock
-from probhub.building import build_workspace
+from probhub.building import (
+    _assert_publish_targets_available,
+    build_workspace,
+    publish_build,
+)
 from probhub.cli import command_status
 from probhub.errors import ProbHubError
 from probhub.hashing import hash_file
@@ -504,6 +508,64 @@ class BatchBuildTests(unittest.TestCase):
 
             with workspace_build_lock(root):
                 pass
+
+    def test_windows_locked_artifact_is_reported_before_publish(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            problem, _ = load_problem(root, problem_entries(workspace)[0])
+            target = problem / "problem.pdf"
+            target.write_bytes(b"old pdf")
+            plan = SimpleNamespace(
+                root=root,
+                typst_relative=Path("typst/contest"),
+                problems=(SimpleNamespace(problem_dir=problem),),
+                selected=(
+                    SimpleNamespace(
+                        problem_dir=problem,
+                        config={"id": "A"},
+                    ),
+                ),
+            )
+
+            real_open = __import__("os").open
+
+            def locked_open(path, flags):
+                if Path(path) == target:
+                    raise PermissionError(13, "in use")
+                return real_open(path, flags)
+
+            with (
+                patch("probhub.building.os.name", "nt"),
+                patch("probhub.building.os.open", side_effect=locked_open),
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    _assert_publish_targets_available(plan)
+
+            self.assertEqual(raised.exception.code, "artifact_busy")
+            self.assertIn(str(target), str(raised.exception))
+            self.assertEqual(target.read_bytes(), b"old pdf")
+
+    def test_publish_preflight_failure_happens_before_any_replacement(self):
+        failure = ProbHubError("locked", code="artifact_busy")
+        with (
+            patch(
+                "probhub.building._assert_publish_targets_available",
+                side_effect=failure,
+            ),
+            patch("probhub.building._replace_staged_file") as replace,
+        ):
+            with self.assertRaises(ProbHubError) as raised:
+                publish_build(
+                    SimpleNamespace(),
+                    SimpleNamespace(),
+                    manifests={},
+                    pdfs={},
+                    packages={},
+                    publish_cache=False,
+                )
+
+        self.assertIs(raised.exception, failure)
+        replace.assert_not_called()
 
     def test_status_reuses_collection_hash_for_multiple_problems(self):
         with tempfile.TemporaryDirectory() as temp:

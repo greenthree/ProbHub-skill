@@ -1,4 +1,5 @@
 import copy
+import errno
 import json
 import os
 import shutil
@@ -427,7 +428,64 @@ def _publish_cache(source_problem, destination_problem):
                 pass
 
 
+def _publish_targets(plan):
+    targets = [item.problem_dir / "meta.json" for item in plan.problems]
+    typst_dir = plan.root / plan.typst_relative
+    targets.extend((typst_dir / "problems.json", typst_dir / "main.pdf"))
+    for item in plan.selected:
+        targets.extend(
+            item.problem_dir / name
+            for name in (
+                "problem.pdf",
+                "problem.yaml",
+                "domjudge-problem.ini",
+                "output_validators",
+                ".probhub/build-manifest.json",
+            )
+        )
+        targets.append(plan.root / f"{item.config['id']}.zip")
+    return targets
+
+
+def _assert_publish_targets_available(plan):
+    if os.name != "nt":
+        return
+
+    locked = []
+    for target in _publish_targets(plan):
+        candidates = target.rglob("*") if target.is_dir() else (target,)
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_RDWR | getattr(os, "O_BINARY", 0),
+                )
+            except OSError as exc:
+                if (
+                    isinstance(exc, PermissionError)
+                    or exc.errno in {errno.EACCES, errno.EPERM}
+                    or getattr(exc, "winerror", None) in {5, 32, 33}
+                ):
+                    locked.append(candidate)
+                    continue
+                raise
+            else:
+                os.close(descriptor)
+
+    if locked:
+        shown = ", ".join(str(path) for path in locked[:3])
+        suffix = "" if len(locked) <= 3 else f" (+{len(locked) - 3} more)"
+        raise ProbHubError(
+            "generated artifact is in use and cannot be replaced: "
+            f"{shown}{suffix}. Close the PDF/ZIP viewer and retry.",
+            code="artifact_busy",
+        )
+
+
 def publish_build(plan, snapshot, manifests, pdfs, packages, publish_cache):
+    _assert_publish_targets_available(plan)
     live_by_id = {item.config["id"]: item for item in plan.problems}
     staged_by_id = {item.config["id"]: item for item in snapshot.problems}
 
