@@ -249,7 +249,7 @@ class UiWriteBoundaryTests(unittest.TestCase):
     def test_schema_sandbox_selection_uses_workspace_id_not_generated_meta(self):
         info = self.ui._sandbox_problem_info("Contest", 0)
         self.assertTrue(info["matched"])
-        self.assertEqual(Path(info["dir"]), self.root / "A")
+        self.assertTrue(os.path.samefile(info["dir"], self.root / "A"))
         self.assertEqual(info["name"], "Alpha")
 
     def test_existing_visual_template_and_theme_markers_are_unchanged(self):
