@@ -14,6 +14,11 @@ contest:
 typst:
   directory: typst-statement/正式赛
   creation_timestamp: 1782403200
+  cover:
+    logo: usts.png
+    logo_width: 9cm
+    logo_space_above: 0em
+    logo_space_below: 0em
 problems:
   - id: L01
     directory: L01
@@ -22,6 +27,8 @@ lint:
 ```
 
 The order of `problems` is the official contest order. `id` is stable and does not change when the displayed letter changes.
+
+`contest` 是赛事标题、封面副标题、作者和日期的规范源。`typst.cover` 可选，用于覆盖封面 Logo 和间距；Logo 路径必须留在 Typst 目录内，宽度和间距使用 Typst 长度。Core 排版时生成临时入口应用这些值，不修改正式 `main.typ` 或 `lib.typ`。
 
 ## Problem file
 
@@ -219,6 +226,16 @@ The Core generates and may overwrite:
 - `<problem>/.probhub/build-manifest.json`
 
 Do not edit generated artifacts to make source changes.
+
+## WebUI write boundaries
+
+Schema v1 WebUI 遵循以下写入边界：
+
+- 加载页面、切换赛事、切换题目和翻阅 PDF 只读，不修改工作区；PDF 页面缓存位于 WebUI 进程临时目录。
+- 题面自动保存只写 `.probhub/workspace.yaml` 的题序、`probhub.yaml`、`problem.md` 与 `data/sample/`，保存后执行完整 lint；失败时回滚。
+- 封面设置写入 `.probhub/workspace.yaml` 的 `contest` 与 `typst.cover`，不直接改 Typst 模板。
+- 编辑器使用 revision 防止多个标签页或 Agent 静默覆盖；冲突返回 HTTP `409` 和 `code: source_conflict`。
+- “编译”是隔离预览，只在系统临时目录生成 PDF；“分发”是显式正式 build，统一调用 Core 的锁、快照、staging、Judge、验包和发布流程。
 
 ## Local sandbox cache
 

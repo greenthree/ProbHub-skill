@@ -226,6 +226,20 @@ class CoreWorkspaceTests(unittest.TestCase):
                 result["problems"][0]["errors"],
             )
 
+    def test_lint_validates_typst_cover_configuration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root)
+            _, workspace = load_workspace(root)
+            workspace["typst"] = {
+                "directory": "typst/contest",
+                "cover": {"logo": "../outside.png", "logo_width": "wide"},
+            }
+            result = lint_workspace(root, workspace)
+            self.assertFalse(result["ok"])
+            self.assertIn("typst.cover.logo must stay inside the Typst directory", result["errors"])
+            self.assertIn("typst.cover.logo_width must be a Typst length", result["errors"])
+
 
 if __name__ == "__main__":
     unittest.main()

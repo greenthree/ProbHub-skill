@@ -39,10 +39,17 @@ def build_meta(problem_dir, config):
         problem["difficulty"] = config["difficulty"]
     if config.get("tags"):
         problem["tags"] = config["tags"]
+    statement = dict(parsed["sections"])
+    quote = (config.get("statement") or {}).get("quote")
+    if isinstance(quote, dict):
+        statement["quote"] = {
+            "text": str(quote.get("text", "")),
+            "source": str(quote.get("source", "")),
+        }
     return {
         "name": config.get("name") or config.get("display_name"),
         "problem": problem,
-        "statement": parsed["sections"],
+        "statement": statement,
     }
 
 

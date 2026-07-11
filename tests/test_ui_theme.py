@@ -51,7 +51,8 @@ class UiThemeTests(unittest.TestCase):
         self.assertIn("const requestedSubtitle = this.currentSubtitle", loader)
         self.assertIn("encodeURIComponent(requestedSubtitle)", loader)
         self.assertIn("if (this.currentSubtitle !== requestedSubtitle) return", loader)
-        self.assertIn("switchSubtitle() {\n                    this.pdfPages = [];", loader)
+        self.assertIn("switchSubtitle() {\n                    clearTimeout(this._coverSaveTimer);", loader)
+        self.assertIn("clearTimeout(this._coverSaveTimer);\n                    this.pdfPages = [];", loader)
 
     def test_theme_uses_css_variables_without_changing_api_markup(self):
         html = self.ui.HTML_TEMPLATE
@@ -62,27 +63,32 @@ class UiThemeTests(unittest.TestCase):
         self.assertIn("fetch('/api/distribute'", html)
         self.assertIn("fetch('/api/submission/run'", html)
 
-    def test_pdf_preview_serves_relative_cache_from_workspace(self):
+    def test_pdf_preview_renders_into_process_temp_cache(self):
         original_cwd = Path.cwd()
         original_base_dir = self.ui.BASE_DIR
         temp = tempfile.TemporaryDirectory()
         try:
             root = Path(temp.name)
-            preview = root / "typst-statement" / "QA" / ".preview"
-            preview.mkdir(parents=True)
-            pdf = preview.parent / "main.pdf"
-            png = preview / "page-1.png"
+            statement = root / "typst-statement" / "QA"
+            statement.mkdir(parents=True)
+            pdf = statement / "main.pdf"
             pdf.write_bytes(b"fixture pdf")
-            png.write_bytes(b"fixture png")
-            os.utime(png, (pdf.stat().st_mtime + 1, pdf.stat().st_mtime + 1))
             os.chdir(root)
             self.ui.BASE_DIR = "typst-statement"
-            with mock.patch("pypdf.PdfReader", return_value=mock.Mock(pages=[object()])):
+            def fake_render(command, **kwargs):
+                Path(command[-1] + ".png").write_bytes(b"fixture png")
+                return {"reason": "completed", "returncode": 0}
+
+            with (
+                mock.patch("pypdf.PdfReader", return_value=mock.Mock(pages=[object()])),
+                mock.patch.object(self.ui, "run_managed_to_files", side_effect=fake_render),
+            ):
                 response = self.client.get("/api/pdf-page/QA/0")
             self.assertEqual(response.status_code, 200)
             payload = response.get_data()
             response.close()
             self.assertEqual(payload, b"fixture png")
+            self.assertFalse((statement / ".preview").exists())
         finally:
             self.ui.BASE_DIR = original_base_dir
             os.chdir(original_cwd)

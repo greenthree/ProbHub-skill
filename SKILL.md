@@ -195,11 +195,13 @@ probhub build L01 --skip-judge
 
 # 7. WebUI 与交付限制
 
+- Schema v1 WebUI 导航和 PDF 翻页必须只读；题面保存只允许修改 `workspace.yaml` 题序、`probhub.yaml`、`problem.md` 和样例规范源，封面保存只修改 `workspace.yaml` 的 `contest` / `typst.cover`。不得让保存或导航隐式重写 PDF、ZIP、metadata 或 Manifest。
+- WebUI “编译”使用隔离快照和临时 PDF 预览；只有显式“分发”可调用 Core 正式 build。保存冲突以 `source_conflict` 返回，不得静默覆盖其他会话或 Agent 的修改。
 - Schema v1 WebUI 的临时提交评测只接受 UTF-8 `.cpp`，源码必须进入 `.probhub/submissions/<task-id>/` 独立目录；评测结束后清理，不得覆盖或修改题目原有 `code/`、数据、配置、答案和构建产物。
 - WebUI 上传提交时直接使用“沙箱评测”页；以编译事件、逐测试点事件和最终 verdict 为准，不得把上传代码加入 `solutions.accepted` 或写回 `probhub.yaml`。
 - 需要停止排队中或运行中的上传任务时使用页面“取消”按钮，并等待状态从 `CANCELLING` 进入 `CANCELLED`；不要手工删除仍在运行的任务目录。Core 会协作取消并在必要时强杀完整进程树。
 - WebUI 启动和接受新提交时会清理超过 24 小时且名称合法的遗留任务目录；陌生目录、符号链接和活动任务不得自动删除。
-- 当前 WebUI 其他题面编辑和排序能力仍属于 Legacy 界面；Schema v1 的规范源文件应继续通过 Core/CLI 维护。
+- Legacy 工作区仍保留原编辑兼容路径；不得把 Legacy 生成物编辑语义带入 Schema v1。
 - 不得手工增量修改旧 ZIP；必须由 Core 完整重建并验证。
 - 不得提交 `.exe`、沙箱缓存、临时输出或 Typst/WebUI 预览缓存。
 - 遇到错误必须自行定位、修复并重跑相应验证。

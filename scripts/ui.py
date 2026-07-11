@@ -5,6 +5,8 @@ import json
 import re
 import signal
 import subprocess
+import shutil
+import tempfile
 import webbrowser
 import uuid
 import time
@@ -26,13 +28,29 @@ LOCAL_JUDGE_SCRIPT = next(
     SCRIPT_DIR / "local_judge.py",
 )
 
-from probhub.process_control import snapshot_process_tree, terminate_external_process_tree
+from probhub.build_lock import workspace_build_lock
+from probhub.building import build_workspace, create_build_plan, create_build_snapshot
+from probhub.errors import ProbHubError
+from probhub.process_control import (
+    run_managed_to_files,
+    snapshot_process_tree,
+    terminate_external_process_tree,
+)
 from probhub.submissions import (
     MAX_SOURCE_BYTES,
     cleanup_stale_submission_workspaces,
     temporary_submission_workspace,
     validate_cpp_upload,
 )
+from probhub.typesetting import compile_collection
+from probhub.webui_workspace import (
+    load_contest_config,
+    load_editor_data,
+    save_contest_config as save_schema_contest_config,
+    save_editor_data,
+    schema_workspace_for_subtitle,
+)
+from probhub.workspace import load_workspace, problem_entries
 
 app = Flask(__name__)
 MAX_SUBMISSION_REQUEST_BYTES = MAX_SOURCE_BYTES + 64 * 1024
@@ -48,6 +66,8 @@ SUBMISSION_RESULT_TTL = 60 * 60
 SUBMISSION_FORCE_CANCEL_AFTER = 3.0
 MAX_CONCURRENT_SUBMISSIONS = max(1, min(4, os.cpu_count() or 2))
 SUBMISSION_SLOTS = BoundedSemaphore(MAX_CONCURRENT_SUBMISSIONS)
+WEBUI_PREVIEW_TEMP = tempfile.TemporaryDirectory(prefix="probhub-webui-preview-")
+WEBUI_PREVIEW_ROOT = Path(WEBUI_PREVIEW_TEMP.name)
 
 try:
     cleanup_stale_submission_workspaces(Path.cwd())
@@ -60,6 +80,16 @@ def secure_path(subtitle, filename):
     if not subtitle or '..' in subtitle or '/' in subtitle or '\\' in subtitle:
         raise ValueError("Invalid subtitle")
     return os.path.join(BASE_DIR, subtitle, filename)
+
+
+def _schema_workspace(subtitle):
+    return schema_workspace_for_subtitle(Path.cwd(), subtitle)
+
+
+def _preview_pdf_path(subtitle):
+    if not subtitle or '..' in subtitle or '/' in subtitle or '\\' in subtitle:
+        raise ValueError("Invalid subtitle")
+    return WEBUI_PREVIEW_ROOT / subtitle / "main.pdf"
 
 
 def problem_limits(problem_entry):
@@ -1112,6 +1142,7 @@ HTML_TEMPLATE = r"""
                 tagDraft: '',
                 coverConfig: { title: '', subtitle: '', author: '', date: '', logo: 'usts.png', logo_width: '9cm', logo_space_above: '0em', logo_space_below: '0em' },
                 _saveTimer: null,
+                _savePromise: Promise.resolve(true),
                 _coverSaveTimer: null,
                 toast: { show: false, msg: '', isError: false },
 
@@ -1164,6 +1195,7 @@ HTML_TEMPLATE = r"""
                 },
 
                 switchSubtitle() {
+                    clearTimeout(this._coverSaveTimer);
                     this.pdfPages = [];
                     this.loadData();
                     this.loadConfig();
@@ -1313,8 +1345,12 @@ HTML_TEMPLATE = r"""
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(this.coverConfig)
-                    }).then(res => res.json()).then(data => {
-                        if (data.success) { /* silent */ }
+                    }).then(async res => ({ status: res.status, data: await res.json() })).then(({ status, data }) => {
+                        if (data.success) {
+                            this.coverConfig = data.config || this.coverConfig;
+                        } else if (status === 409) {
+                            this.showToast('封面保存冲突：工作区已被其他会话修改，请刷新后重试。', true, 8000);
+                        }
                     });
                 },
 
@@ -1691,34 +1727,66 @@ HTML_TEMPLATE = r"""
                 autoSave() {
                     clearTimeout(this._saveTimer);
                     this.saveStatus = 'saving';
-                    this._saveTimer = setTimeout(() => this._doSave(), 800);
+                    this._saveTimer = setTimeout(() => this._queueSave(), 800);
                 },
 
-                _doSave() {
-                    if (!this.currentSubtitle) return;
+                _mergeSavedMetadata(savedProblems) {
+                    const savedById = new Map((savedProblems || []).map(problem => [problem._id, problem]));
+                    this.problems.forEach(problem => {
+                        const saved = savedById.get(problem._id);
+                        if (!saved) return;
+                        problem._revision = saved._revision;
+                        problem._workspace_revision = saved._workspace_revision;
+                        const liveSamples = (problem.problem && problem.problem.samples) || [];
+                        const savedSamples = (saved.problem && saved.problem.samples) || [];
+                        liveSamples.forEach((sample, index) => {
+                            if (savedSamples[index] && savedSamples[index]._name) {
+                                sample._name = savedSamples[index]._name;
+                            }
+                        });
+                    });
+                },
+
+                _queueSave() {
+                    this._savePromise = this._savePromise.then(() => this._performSave());
+                    return this._savePromise;
+                },
+
+                _performSave() {
+                    if (!this.currentSubtitle) return Promise.resolve(false);
+                    const subtitle = this.currentSubtitle;
+                    const payload = JSON.parse(JSON.stringify(this.problems));
                     this.saveStatus = 'saving';
-                    fetch('/api/data', {
+                    return fetch('/api/data', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ subtitle: this.currentSubtitle, problems: this.problems })
-                    }).then(res => res.json()).then(data => {
+                        body: JSON.stringify({ subtitle, problems: payload })
+                    }).then(async res => ({ ok: res.ok, status: res.status, data: await res.json() })).then(({ status, data }) => {
                         if (data.success) {
+                            if (subtitle !== this.currentSubtitle) return true;
+                            if (Array.isArray(data.problems)) this._mergeSavedMetadata(data.problems);
                             this.saveStatus = 'saved';
                             setTimeout(() => { if (this.saveStatus === 'saved') this.saveStatus = ''; }, 2500);
+                            return true;
                         } else {
                             this.saveStatus = 'error';
+                            const message = status === 409
+                                ? '保存冲突：题目已被其他会话修改，请刷新后重试。'
+                                : (data.error || '保存失败');
+                            this.showToast(message, true, 8000);
+                            return false;
                         }
-                    }).catch(() => { this.saveStatus = 'error'; });
+                    }).catch(() => { this.saveStatus = 'error'; return false; });
                 },
 
                 doSave() {
                     clearTimeout(this._saveTimer);
-                    return this._doSave();
+                    return this._queueSave();
                 },
 
-                compilePDF() {
+                async compilePDF() {
                     if (!this.currentSubtitle) return;
                     clearTimeout(this._saveTimer);
-                    this._doSave();
+                    if (!(await this.doSave())) return;
                     this.isCompiling = true;
                     fetch('/api/compile', {
                         method: 'POST',
@@ -1740,8 +1808,10 @@ HTML_TEMPLATE = r"""
                         this.showToast('编译请求失败。建议：确认 ui.py 服务仍在运行，并检查终端日志。', true, 8000);
                     });
                 },
-                distributePDFs() {
+                async distributePDFs() {
                     if (!this.currentSubtitle) return;
+                    clearTimeout(this._saveTimer);
+                    if (!(await this.doSave())) return;
                     this.isDistributing = true;
                     fetch('/api/distribute', {
                         method: 'POST',
@@ -1798,6 +1868,10 @@ def get_data():
     if not subtitle:
         return jsonify([])
     try:
+        schema = _schema_workspace(subtitle)
+        if schema is not None:
+            root, workspace = schema
+            return jsonify(load_editor_data(root, workspace))
         json_path = secure_path(subtitle, "problems.json")
         if not os.path.exists(json_path):
             return jsonify([])
@@ -1817,6 +1891,13 @@ def save_data():
         return jsonify({"success": False, "error": "Missing subtitle"})
         
     try:
+        schema = _schema_workspace(subtitle)
+        if schema is not None:
+            root, _ = schema
+            with workspace_build_lock(root):
+                _, live_workspace = load_workspace(root)
+                problems = save_editor_data(root, live_workspace, new_data)
+            return jsonify({"success": True, "problems": problems})
         json_path = secure_path(subtitle, "problems.json")
         for entry in new_data:
             entry.setdefault("problem", {})
@@ -1830,6 +1911,9 @@ def save_data():
         os.replace(tmp_path, json_path)  # atomic replace
         sync_problem_limits_to_files(new_data)
         return jsonify({"success": True})
+    except ProbHubError as e:
+        status = 409 if e.code == "source_conflict" else 400
+        return jsonify({"success": False, "error": str(e), "code": e.code}), status
     except Exception as e:
         print(f"[-] Save Data Error: {e}")
         return jsonify({"success": False, "error": str(e)})
@@ -1884,6 +1968,25 @@ def compile_pdf():
     if not subtitle:
         return jsonify({"success": False, "error": "Missing subtitle"})
     try:
+        schema = _schema_workspace(subtitle)
+        if schema is not None:
+            root, _ = schema
+            with workspace_build_lock(root):
+                _, live_workspace = load_workspace(root)
+                entries = problem_entries(live_workspace)
+                plan = create_build_plan(root, live_workspace, entries)
+                with create_build_snapshot(plan) as snapshot:
+                    _, staged_pdf, _ = compile_collection(
+                        snapshot.root,
+                        snapshot.workspace,
+                        snapshot.loaded_problems,
+                    )
+                    preview_pdf = _preview_pdf_path(subtitle)
+                    preview_pdf.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = preview_pdf.with_suffix(".pdf.tmp")
+                    shutil.copyfile(staged_pdf, temporary)
+                    os.replace(temporary, preview_pdf)
+            return jsonify({"success": True, "preview": True})
         typst_main = secure_path(subtitle, "main.typ")
         ret = subprocess.run(
             ["typst", "compile", "--root", ".", typst_main],
@@ -1894,6 +1997,10 @@ def compile_pdf():
             errors='replace',
         )
         return jsonify({"success": True, "stdout": ret.stdout, "stderr": ret.stderr})
+    except ProbHubError as e:
+        detail = analyze_compile_error(str(e))
+        status = 409 if e.code in {"build_busy", "inputs_changed"} else 400
+        return jsonify({"success": False, "error": str(e), "code": e.code, **detail}), status
     except FileNotFoundError as e:
         detail = analyze_compile_error("typst not found")
         return jsonify({"success": False, "error": str(e), **detail})
@@ -1911,8 +2018,29 @@ def distribute_pdfs():
     if not subtitle:
         return jsonify({"success": False, "error": "Missing subtitle"})
     try:
+        schema = _schema_workspace(subtitle)
+        if schema is not None:
+            root, workspace = schema
+            result = build_workspace(root, workspace, problem_entries(workspace))
+            distributed = [
+                {
+                    "name": problem_id,
+                    "status": "ok",
+                    "dir": str(Path(details["path"]).parent),
+                    "zip": "verified",
+                }
+                for problem_id, details in result["pdfs"].items()
+            ]
+            return jsonify({
+                "success": True,
+                "distributed": distributed,
+                "batch_id": result["batch_id"],
+            })
         dist_results = distribute_problems(subtitle)
         return jsonify({"success": True, "distributed": dist_results})
+    except ProbHubError as e:
+        status = 409 if e.code in {"build_busy", "inputs_changed"} else 400
+        return jsonify({"success": False, "error": str(e), "code": e.code}), status
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -2049,6 +2177,14 @@ def sync_problem_limits_to_files(problem_entries):
 
 
 def _load_problem_by_index(subtitle, index):
+    schema = _schema_workspace(subtitle)
+    if schema is not None:
+        root, workspace = schema
+        entries = problem_entries(workspace)
+        if index < 0 or index >= len(entries):
+            raise ValueError("Problem index out of range")
+        data = load_editor_data(root, workspace)
+        return data[index]
     json_path = secure_path(subtitle, "problems.json")
     with open(json_path, "r", encoding="utf-8") as f:
         problems = json.load(f)
@@ -2060,8 +2196,14 @@ def _load_problem_by_index(subtitle, index):
 def _sandbox_problem_info(subtitle, index):
     problem = _load_problem_by_index(subtitle, index)
     display_name = problem.get("problem", {}).get("display_name", "")
-    name_to_dir = find_problem_dirs()
-    prob_dir = name_to_dir.get(display_name)
+    schema = _schema_workspace(subtitle)
+    if schema is not None:
+        root, workspace = schema
+        entries = problem_entries(workspace)
+        prob_dir = str(root / entries[index].get("directory", entries[index]["id"]))
+    else:
+        name_to_dir = find_problem_dirs()
+        prob_dir = name_to_dir.get(display_name)
     script_path = os.path.join("scripts", "local_judge.py")
     info = {
         "name": display_name,
@@ -2803,7 +2945,12 @@ def _write_contest_config(subtitle, config):
 @app.route('/api/config/<subtitle>', methods=['GET'])
 def get_contest_config(subtitle):
     try:
-        return jsonify({"success": True, "config": _read_contest_config(subtitle)})
+        defaults = _read_contest_config(subtitle)
+        schema = _schema_workspace(subtitle)
+        if schema is not None:
+            root, workspace = schema
+            return jsonify({"success": True, "config": load_contest_config(root, workspace, defaults)})
+        return jsonify({"success": True, "config": defaults})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -2812,8 +2959,18 @@ def get_contest_config(subtitle):
 def save_contest_config(subtitle):
     try:
         config = request.json
+        schema = _schema_workspace(subtitle)
+        if schema is not None:
+            root, _ = schema
+            with workspace_build_lock(root):
+                _, live_workspace = load_workspace(root)
+                saved = save_schema_contest_config(root, live_workspace, config)
+            return jsonify({"success": True, "config": saved})
         _write_contest_config(subtitle, config)
         return jsonify({"success": True})
+    except ProbHubError as e:
+        status = 409 if e.code == "source_conflict" else 400
+        return jsonify({"success": False, "error": str(e), "code": e.code}), status
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -2822,7 +2979,8 @@ def save_contest_config(subtitle):
 def pdf_page_count(subtitle):
     """Return the number of pages in main.pdf."""
     import pypdf
-    pdf_path = secure_path(subtitle, "main.pdf")
+    preview_path = _preview_pdf_path(subtitle)
+    pdf_path = str(preview_path if preview_path.is_file() else Path(secure_path(subtitle, "main.pdf")))
     if not os.path.exists(pdf_path):
         return jsonify({"pages": 0})
     try:
@@ -2834,11 +2992,12 @@ def pdf_page_count(subtitle):
 
 @app.route('/api/pdf-page/<subtitle>/<int:page>')
 def serve_pdf_page(subtitle, page):
-    """Render a single page of main.pdf as PNG using typst, then serve it."""
+    """Render a single PDF page through Poppler into the process temp cache."""
     from flask import send_file
     import pypdf
 
-    pdf_path = secure_path(subtitle, "main.pdf")
+    preview_path = _preview_pdf_path(subtitle)
+    pdf_path = str(preview_path if preview_path.is_file() else Path(secure_path(subtitle, "main.pdf")))
     if not os.path.exists(pdf_path):
         return "PDF not compiled", 404
 
@@ -2851,20 +3010,41 @@ def serve_pdf_page(subtitle, page):
     except Exception:
         return "Invalid PDF", 500
 
-    # Cache PNG in .preview/ directory
-    preview_dir = os.path.join(BASE_DIR, subtitle, ".preview")
+    # Page rendering is a read-only WebUI concern; never cache into the workspace.
+    preview_dir = str(WEBUI_PREVIEW_ROOT / subtitle / ".pages")
     os.makedirs(preview_dir, exist_ok=True)
     png_path = os.path.join(preview_dir, f"page-{page + 1}.png")
 
     # Regenerate if PNG is missing or older than PDF
     if not os.path.exists(png_path) or os.path.getmtime(png_path) < os.path.getmtime(pdf_path):
-        typst_main = secure_path(subtitle, "main.typ")
-        subprocess.run(
-            ["typst", "compile", "--root", ".", "--format", "png",
-             f"--pages={page + 1}", typst_main, png_path],
-            check=True, capture_output=True,
-            text=True, encoding='utf-8', errors='replace'
-        )
+        prefix = str(Path(png_path).with_suffix(""))
+        stdout_path = Path(preview_dir) / f"page-{page + 1}.stdout"
+        stderr_path = Path(preview_dir) / f"page-{page + 1}.stderr"
+        try:
+            rendered = run_managed_to_files(
+                [
+                    "pdftoppm",
+                    "-f", str(page + 1),
+                    "-l", str(page + 1),
+                    "-singlefile",
+                    "-png",
+                    "-r", "144",
+                    pdf_path,
+                    prefix,
+                ],
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=30,
+                memory_limit_mb=512,
+                output_limit_bytes=4 * 1024 * 1024,
+                process_limit=8,
+                cwd=Path.cwd(),
+            )
+        except OSError as exc:
+            return f"Render failed: {exc}", 500
+        if rendered["reason"] != "completed" or rendered["returncode"] != 0:
+            detail = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.is_file() else ""
+            return f"Render failed: {detail[-1000:]}", 500
 
     if not os.path.exists(png_path):
         return "Render failed", 500
