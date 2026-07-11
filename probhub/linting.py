@@ -1,13 +1,25 @@
+import hashlib
 import json
 import math
 import re
 from pathlib import Path
 
 from .hashing import files_under, hash_file, hash_paths
+from .metadata import build_meta
 from .statement import parse_statement
 from .workspace import load_problem, problem_entries
 
 DEFAULT_FORBIDDEN = ("TODO", "FIXME", "114514", "待补充")
+BUILD_MANIFEST_SCHEMA_VERSION = 2
+STATEMENT_ASSET_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
+STATEMENT_ASSET_IGNORED_DIRS = {
+    ".preview",
+    ".probhub",
+    "__pycache__",
+    "code",
+    "data",
+    "output_validators",
+}
 
 
 def _problem_relative_path(problem_dir, value):
@@ -20,6 +32,29 @@ def _problem_relative_path(problem_dir, value):
     except ValueError:
         return None
     return candidate
+
+
+def problem_statement_asset_paths(problem_dir):
+    problem_dir = Path(problem_dir).resolve()
+    paths = []
+    for path in problem_dir.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        relative = path.relative_to(problem_dir)
+        if any(part in STATEMENT_ASSET_IGNORED_DIRS for part in relative.parts[:-1]):
+            continue
+        if path.suffix.lower() in STATEMENT_ASSET_SUFFIXES:
+            paths.append(path)
+    return paths
+
+
+def compute_statement_assets_hash(problem_dir):
+    problem_dir = Path(problem_dir).resolve()
+    relative_paths = [
+        path.relative_to(problem_dir)
+        for path in problem_statement_asset_paths(problem_dir)
+    ]
+    return hash_paths(problem_dir, relative_paths)[0]
 
 
 def problem_source_paths(problem_dir, config):
@@ -46,6 +81,7 @@ def problem_source_paths(problem_dir, config):
             candidate = _problem_relative_path(problem_dir, stress.get(key))
             if candidate:
                 paths.append(candidate)
+    paths.extend(problem_statement_asset_paths(problem_dir))
     return paths
 
 
@@ -70,6 +106,27 @@ def compute_workspace_hash(root, workspace):
             if path.suffix.lower() in {".typ", ".png", ".jpg", ".jpeg", ".svg"}:
                 paths.append(path)
     return hash_paths(root, [path.relative_to(root) for path in paths if path.exists()])[0]
+
+
+def compute_collection_hash(root, workspace):
+    snapshot = {
+        "workspace_hash": compute_workspace_hash(root, workspace),
+        "problems": [],
+    }
+    for entry in problem_entries(workspace):
+        problem_dir, config = load_problem(root, entry)
+        snapshot["problems"].append({
+            "id": config["id"],
+            "metadata": build_meta(problem_dir, config),
+            "statement_assets_hash": compute_statement_assets_hash(problem_dir),
+        })
+    payload = json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def compute_data_hash(problem_dir, config):
@@ -329,7 +386,14 @@ def load_manifest(problem_dir):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def problem_status(problem_dir, config, root=None, workspace=None):
+def problem_status(
+    problem_dir,
+    config,
+    root=None,
+    workspace=None,
+    workspace_hash=None,
+    collection_hash=None,
+):
     manifest = load_manifest(problem_dir)
     current = {
         "source_hash": compute_source_hash(problem_dir, config),
@@ -338,8 +402,20 @@ def problem_status(problem_dir, config, root=None, workspace=None):
         "package_hash": hash_file(problem_dir.parent / f"{config['id']}.zip"),
     }
     if root is not None and workspace is not None:
-        current["workspace_hash"] = compute_workspace_hash(root, workspace)
+        current["workspace_hash"] = (
+            compute_workspace_hash(root, workspace)
+            if workspace_hash is None
+            else workspace_hash
+        )
+        current["collection_hash"] = (
+            compute_collection_hash(root, workspace)
+            if collection_hash is None
+            else collection_hash
+        )
     if not manifest:
         return {"state": "never-built", **current}
-    stale = [key for key, value in current.items() if manifest.get(key) != value]
+    stale = []
+    if manifest.get("schema_version") != BUILD_MANIFEST_SCHEMA_VERSION:
+        stale.append("manifest_schema")
+    stale.extend(key for key, value in current.items() if manifest.get(key) != value)
     return {"state": "stale" if stale else "current", "stale_fields": stale, **current, "manifest": manifest}

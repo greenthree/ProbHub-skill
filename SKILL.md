@@ -22,6 +22,7 @@ description: 当用户需要创作或维护算法竞赛题目、生成测试数�
 | 赛事信息、Typst 集合、稳定题序 | `.probhub/workspace.yaml` |
 | 题目 ID、题名、限制、代码矩阵、数据路径 | `<题目>/probhub.yaml` |
 | 描述、输入、输出、提示 | `<题目>/problem.md` |
+| 题面图片等媒体资源 | `<题目>/assets/` 或题目目录内的常见图片文件 |
 | 样例 | `<题目>/data/sample/*.in` 与 `.ans` |
 | 隐藏数据 | `<题目>/data/secret/*.in` 与 `.ans` |
 | C++ 源码和本地可执行文件 | `<题目>/code/` |
@@ -94,6 +95,14 @@ probhub build
 
 `typeset <ID>` 和 `build <ID>` 为保证正式题号与页码正确，仍会编译整个 Typst 集合，但只提取、打包和更新所选题目。
 
+批量出题时，所有目标题完成审查并冻结 source/data hash 后，应由一个协调者执行单次多题构建：
+
+```powershell
+probhub build L01 L02 L03 --no-cache
+```
+
+一次多题 `build` 只编译一次完整 Typst 集合，再分别提取、打包和更新所选题目。不要让多个 Agent 依次运行单题 `build`，否则会重复重写共享 `meta.json`、Typst `problems.json` 和全卷 PDF。
+
 沙箱默认复用内容寻址缓存。需要忽略旧结果、完整重跑并刷新缓存时使用：
 
 ```powershell
@@ -147,7 +156,7 @@ probhub build L01 --skip-judge
    probhub build <ID> --no-cache
    ```
 
-8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 验证成功且 `status` 为 `current` 时才可交付。
+8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 验证成功且 `status` 为 `current` 时才可交付。Manifest 的 `collection_hash` 会跟踪整场排版输入；其他题题面、题面媒体、样例、题序或模板变化后，受影响题目也必须重新构建。
 
 # 5. 出题内容要求
 

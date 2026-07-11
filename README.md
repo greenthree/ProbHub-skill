@@ -16,7 +16,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 - **跨平台资源控制**：共享 `probhub/process_control.py` 为普通程序、Checker、Validator、编译器、Interactor 和 stress 提供完整进程树清理、时间/内存/输出/进程数限制，并报告 TLE/MLE/OLE/RE/WA/AC。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 微调题面**：提供 Flask 控制台，支持题目排序、Markdown 预览、样例编辑、引言 Quote、时空限制编辑、全卷编译和 PDF 分发。
-- **可重复构建 Core**：Workspace Schema v1、源文件哈希、构建 Manifest、过期检测和统一 `probhub` CLI。
+- **可重复构建 Core**：Workspace Schema v1、源文件/数据/整场排版依赖哈希、构建 Manifest、过期检测和统一 `probhub` CLI。
 - **DOMjudge 兼容**：从规范源文件生成 `problem.yaml`、`domjudge-problem.ini` 和确定性 `.zip`。
 
 示例 PDF：
@@ -162,7 +162,7 @@ L01/data/secret/           # 隐藏数据唯一来源
 
 本地诊断目录 `.probhub/stress/` 保存差分反例，不属于正式构建产物，也不应提交。
 
-`probhub build` 会依次执行 lint、沙箱、元数据生成、Typst 编译、单题 PDF 提取、DOMjudge 打包、包验证和 Manifest 写入。`probhub status` 会比较源文件、数据、PDF 和 ZIP 哈希，报告 `current`、`stale` 或 `never-built`。
+`probhub build` 会依次执行 lint、沙箱、元数据生成、Typst 编译、单题 PDF 提取、DOMjudge 打包、包验证和 Manifest 写入。多 ID build 只编译一次完整 Typst 集合。`probhub status` 会比较源文件、数据、工作区、整场排版输入、PDF 和 ZIP 哈希，报告 `current`、`stale` 或 `never-built`。
 
 完整命令语法、单题/多题操作、缓存语义与故障处理见 [`references/cli.md`](references/cli.md)。无 `.probhub/workspace.yaml` 的旧工作区流程已独立整理到 [`references/legacy-workflow.md`](references/legacy-workflow.md)，Schema v1 工作区不要混用。
 
