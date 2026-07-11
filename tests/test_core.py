@@ -1,10 +1,13 @@
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from probhub.cli import build_parser, main as cli_main
+from probhub.errors import ProbHubError
 from probhub.hashing import hash_file
 from probhub.io import write_json, write_yaml
 from probhub.linting import (
@@ -61,7 +64,31 @@ class CoreWorkspaceTests(unittest.TestCase):
             _, workspace = load_workspace(root)
             self.assertEqual(problem_entries(workspace)[0]["id"], "A")
             gitignore = (root / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn("**/.probhub/build.lock", gitignore)
             self.assertIn("**/.probhub/stress/", gitignore)
+
+    def test_cli_emits_machine_readable_error_code(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root)
+            output = io.StringIO()
+            with (
+                patch(
+                    "probhub.cli.build_workspace",
+                    side_effect=ProbHubError("busy", code="build_busy"),
+                ),
+                redirect_stdout(output),
+            ):
+                code = cli_main([
+                    "--workspace",
+                    str(root),
+                    "--json",
+                    "build",
+                    "A",
+                ])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(output.getvalue())["code"], "build_busy")
 
     def test_new_command_scaffolds_schema_problem(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -103,6 +130,7 @@ class CoreWorkspaceTests(unittest.TestCase):
             (root / "A.zip").write_bytes(b"zip")
             manifest = {
                 "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
+                "batch_id": "fixture-batch",
                 "source_hash": compute_source_hash(problem, config),
                 "data_hash": compute_data_hash(problem, config),
                 "pdf_hash": hash_file(problem / "problem.pdf"),
@@ -118,6 +146,14 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(status["stale_fields"], ["manifest_schema"])
 
             manifest["schema_version"] = BUILD_MANIFEST_SCHEMA_VERSION
+            write_json(problem / ".probhub/build-manifest.json", manifest)
+            manifest.pop("batch_id")
+            write_json(problem / ".probhub/build-manifest.json", manifest)
+            status = problem_status(problem, config)
+            self.assertEqual(status["state"], "stale")
+            self.assertEqual(status["stale_fields"], ["batch_id"])
+
+            manifest["batch_id"] = "fixture-batch"
             write_json(problem / ".probhub/build-manifest.json", manifest)
             with (problem / "problem.md").open("a", encoding="utf-8") as stream:
                 stream.write("\nchanged\n")

@@ -37,7 +37,7 @@ description: 当用户需要创作或维护算法竞赛题目、生成测试数�
 - `problem.pdf`、全卷 PDF、`<ID>.zip`
 - `.probhub/build-manifest.json`
 
-`.probhub/sandbox-cache-v1.json` 是被 Git 忽略的本地缓存；`.probhub/stress/` 保存可重放差分反例。两者都禁止提交或手工维护。
+`.probhub/build.lock` 是可保留的 OS 文件锁载体，不能用“文件是否存在”判断是否占用；`.probhub/sandbox-cache-v1.json` 是本地缓存，`.probhub/stress/` 保存可重放差分反例。这些路径都应被 Git 忽略，禁止提交或手工维护。
 
 # 3. CLI 操作规则
 
@@ -101,7 +101,7 @@ probhub build
 probhub build L01 L02 L03 --no-cache
 ```
 
-一次多题 `build` 只编译一次完整 Typst 集合，再分别提取、打包和更新所选题目。不要让多个 Agent 依次运行单题 `build`，否则会重复重写共享 `meta.json`、Typst `problems.json` 和全卷 PDF。
+一次多题 `build` 只编译一次完整 Typst 集合，再分别提取、打包和更新所选题目。Core 会持有跨平台 OS 写锁，在临时快照中完成全部准备和 ZIP 验证，发布前复核 live source/data/collection hash；输入变化返回 `inputs_changed`，并发 writer 返回 `build_busy`。所有所选 Manifest 记录同一 `batch_id`。不要让多个 Agent 依次运行单题 `build`，否则仍会重复工作并产生不必要的新批次。
 
 沙箱默认复用内容寻址缓存。需要忽略旧结果、完整重跑并刷新缓存时使用：
 

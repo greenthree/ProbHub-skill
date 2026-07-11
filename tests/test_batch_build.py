@@ -4,14 +4,41 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from probhub.build_lock import workspace_build_lock
 from probhub.building import build_workspace
 from probhub.cli import command_status
+from probhub.errors import ProbHubError
 from probhub.io import write_yaml
 from probhub.linting import problem_status
 from probhub.workspace import load_problem, load_workspace, problem_entries
 
 
 class BatchBuildTests(unittest.TestCase):
+    def write_compiled_fixture(self, root, loaded):
+        typst_dir = root / "typst/contest"
+        for problem_dir, config in loaded:
+            (problem_dir / "meta.json").write_text(
+                '{"id":"' + config["id"] + '"}\n',
+                encoding="utf-8",
+            )
+        (typst_dir / "problems.json").write_text("[]\n", encoding="utf-8")
+        main_pdf = typst_dir / "main.pdf"
+        main_pdf.write_bytes(b"%PDF-1.4\n")
+        return typst_dir, main_pdf, []
+
+    def write_package_fixture(self, root, problem_dir, config, require_pdf=True):
+        (problem_dir / "problem.yaml").write_text(
+            f"name: {config['id']}\nlimits:\n  memory: 256\n",
+            encoding="utf-8",
+        )
+        (problem_dir / "domjudge-problem.ini").write_text(
+            "timelimit='1'\n",
+            encoding="utf-8",
+        )
+        output = root / f"{config['id']}.zip"
+        output.write_bytes(b"zip-" + config["id"].encode("ascii"))
+        return output, {"ok": True, "errors": [], "warnings": [], "stats": {}}
+
     def create_problem(self, root, problem_id, name):
         problem = root / problem_id
         (problem / "code").mkdir(parents=True)
@@ -72,9 +99,7 @@ class BatchBuildTests(unittest.TestCase):
                 }
 
             def fake_compile(root, workspace, loaded):
-                main_pdf = root / "typst/contest/main.pdf"
-                main_pdf.write_bytes(b"%PDF-1.4\n")
-                return root / "typst/contest", main_pdf, []
+                return self.write_compiled_fixture(root, loaded)
 
             def fake_extract(main_pdf, loaded, only_ids=None):
                 outputs = {}
@@ -87,9 +112,12 @@ class BatchBuildTests(unittest.TestCase):
                 return outputs
 
             def fake_package(root, problem_dir, config, require_pdf=True):
-                output = root / f"{config['id']}.zip"
-                output.write_bytes(b"zip-" + config["id"].encode("ascii"))
-                return output, {"ok": True, "errors": [], "warnings": [], "stats": {}}
+                return self.write_package_fixture(
+                    root,
+                    problem_dir,
+                    config,
+                    require_pdf=require_pdf,
+                )
 
             with (
                 patch("probhub.building.judge_problem", side_effect=fake_judge) as judge,
@@ -114,6 +142,10 @@ class BatchBuildTests(unittest.TestCase):
                 manifest["collection_hash"] for manifest in result["manifests"].values()
             }
             self.assertEqual(len(collection_hashes), 1)
+            batch_ids = {
+                manifest["batch_id"] for manifest in result["manifests"].values()
+            }
+            self.assertEqual(batch_ids, {result["batch_id"]})
             self.assertEqual(
                 {manifest["schema_version"] for manifest in result["manifests"].values()},
                 {2},
@@ -144,9 +176,7 @@ class BatchBuildTests(unittest.TestCase):
                 stream.write("\n![diagram](assets/diagram.png)\n")
 
             def fake_compile(root, workspace, loaded):
-                main_pdf = root / "typst/contest/main.pdf"
-                main_pdf.write_bytes(b"%PDF-1.4\n")
-                return root / "typst/contest", main_pdf, []
+                return self.write_compiled_fixture(root, loaded)
 
             def fake_extract(main_pdf, loaded, only_ids=None):
                 problem_dir, config = loaded[0]
@@ -155,9 +185,12 @@ class BatchBuildTests(unittest.TestCase):
                 return {config["id"]: {"path": str(output), "pages": 1}}
 
             def fake_package(root, problem_dir, config, require_pdf=True):
-                output = root / f"{config['id']}.zip"
-                output.write_bytes(b"zip-A")
-                return output, {"ok": True, "errors": [], "warnings": [], "stats": {}}
+                return self.write_package_fixture(
+                    root,
+                    problem_dir,
+                    config,
+                    require_pdf=require_pdf,
+                )
 
             with (
                 patch("probhub.building.compile_collection", side_effect=fake_compile),
@@ -205,7 +238,7 @@ class BatchBuildTests(unittest.TestCase):
             self.assertEqual(status["state"], "stale")
             self.assertEqual(status["stale_fields"], ["collection_hash"])
 
-    def test_manifest_keeps_pre_typeset_collection_snapshot(self):
+    def test_build_rejects_inputs_changed_before_manifest_publish(self):
         with tempfile.TemporaryDirectory() as temp:
             root, workspace = self.create_workspace(Path(temp))
             entries = problem_entries(workspace)
@@ -217,9 +250,7 @@ class BatchBuildTests(unittest.TestCase):
                     statement.read_text(encoding="utf-8") + "\nChanged during build.\n",
                     encoding="utf-8",
                 )
-                main_pdf = root / "typst/contest/main.pdf"
-                main_pdf.write_bytes(b"%PDF-1.4\n")
-                return root / "typst/contest", main_pdf, []
+                return self.write_compiled_fixture(root, loaded)
 
             def fake_extract(main_pdf, loaded, only_ids=None):
                 problem_dir, config = loaded[0]
@@ -228,21 +259,165 @@ class BatchBuildTests(unittest.TestCase):
                 return {config["id"]: {"path": str(output), "pages": 1}}
 
             def fake_package(root, problem_dir, config, require_pdf=True):
-                output = root / f"{config['id']}.zip"
-                output.write_bytes(b"zip-A")
-                return output, {"ok": True, "errors": [], "warnings": [], "stats": {}}
+                return self.write_package_fixture(
+                    root,
+                    problem_dir,
+                    config,
+                    require_pdf=require_pdf,
+                )
 
             with (
                 patch("probhub.building.compile_collection", side_effect=fake_compile),
                 patch("probhub.building.extract_problem_pdfs", side_effect=fake_extract),
                 patch("probhub.building.package_problem", side_effect=fake_package),
             ):
-                build_workspace(root, workspace, [entries[0]], run_judge=False)
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, [entries[0]], run_judge=False)
 
-            problem_a, config_a = load_problem(root, entries[0])
-            status = problem_status(problem_a, config_a, root, workspace)
-            self.assertEqual(status["state"], "stale")
-            self.assertEqual(status["stale_fields"], ["collection_hash"])
+            self.assertEqual(raised.exception.code, "inputs_changed")
+            problem_a, _ = load_problem(root, entries[0])
+            self.assertFalse((problem_a / ".probhub/build-manifest.json").exists())
+
+    def test_build_rejects_selected_data_changed_after_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            problem_a, _ = load_problem(root, entries[0])
+
+            def fake_compile(root, workspace, loaded):
+                (problem_a / "data/secret/1.in").write_text("changed\n", encoding="utf-8")
+                return self.write_compiled_fixture(root, loaded)
+
+            def fake_extract(main_pdf, loaded, only_ids=None):
+                problem_dir, config = loaded[0]
+                output = problem_dir / "problem.pdf"
+                output.write_bytes(b"%PDF-1.4\nA")
+                return {config["id"]: {"path": str(output), "pages": 1}}
+
+            with (
+                patch("probhub.building.compile_collection", side_effect=fake_compile),
+                patch("probhub.building.extract_problem_pdfs", side_effect=fake_extract),
+                patch(
+                    "probhub.building.package_problem",
+                    side_effect=self.write_package_fixture,
+                ),
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, [entries[0]], run_judge=False)
+
+            self.assertEqual(raised.exception.code, "inputs_changed")
+            self.assertIn("A.data_hash", str(raised.exception))
+            self.assertFalse((problem_a / ".probhub/build-manifest.json").exists())
+
+    def test_later_problem_failure_leaves_all_live_artifacts_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            artifacts = []
+            for entry in entries:
+                problem_dir, _ = load_problem(root, entry)
+                for relative, content in (
+                    ("meta.json", b"old meta"),
+                    ("problem.pdf", b"old problem pdf"),
+                    ("problem.yaml", b"old yaml"),
+                    ("domjudge-problem.ini", b"old ini"),
+                    (".probhub/build-manifest.json", b"old manifest"),
+                ):
+                    path = problem_dir / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content + entry["id"].encode("ascii"))
+                    artifacts.append((path, path.read_bytes()))
+                package = root / f"{entry['id']}.zip"
+                package.write_bytes(b"old zip" + entry["id"].encode("ascii"))
+                artifacts.append((package, package.read_bytes()))
+            for relative, content in (
+                ("typst/contest/main.pdf", b"old main pdf"),
+                ("typst/contest/problems.json", b"old problems"),
+            ):
+                path = root / relative
+                path.write_bytes(content)
+                artifacts.append((path, path.read_bytes()))
+
+            def fake_extract(main_pdf, loaded, only_ids=None):
+                outputs = {}
+                for problem_dir, config in loaded:
+                    if only_ids and config["id"] not in only_ids:
+                        continue
+                    output = problem_dir / "problem.pdf"
+                    output.write_bytes(b"%PDF-1.4\n" + config["id"].encode("ascii"))
+                    outputs[config["id"]] = {"path": str(output), "pages": 1}
+                return outputs
+
+            def failing_package(root, problem_dir, config, require_pdf=True):
+                if config["id"] == "B":
+                    raise ProbHubError("B package failed")
+                return self.write_package_fixture(
+                    root,
+                    problem_dir,
+                    config,
+                    require_pdf=require_pdf,
+                )
+
+            with (
+                patch(
+                    "probhub.building.compile_collection",
+                    side_effect=lambda root, workspace, loaded: self.write_compiled_fixture(
+                        root,
+                        loaded,
+                    ),
+                ),
+                patch("probhub.building.extract_problem_pdfs", side_effect=fake_extract),
+                patch("probhub.building.package_problem", side_effect=failing_package),
+            ):
+                with self.assertRaisesRegex(ProbHubError, "B package failed"):
+                    build_workspace(root, workspace, entries, run_judge=False)
+
+            for path, content in artifacts:
+                with self.subTest(path=path):
+                    self.assertEqual(path.read_bytes(), content)
+
+    def test_build_lints_unselected_collection_inputs_before_typesetting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            problem_b, _ = load_problem(root, entries[1])
+            (problem_b / "code/validator.cpp").unlink()
+
+            with patch("probhub.building.compile_collection") as compile_collection:
+                with self.assertRaisesRegex(ProbHubError, "B: validator not found"):
+                    build_workspace(root, workspace, [entries[0]], run_judge=False)
+
+            compile_collection.assert_not_called()
+
+    def test_build_rejects_typst_directory_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            workspace["typst"]["directory"] = "../outside"
+            write_yaml(root / ".probhub/workspace.yaml", workspace)
+
+            with self.assertRaisesRegex(
+                ProbHubError,
+                "Typst directory must stay inside the workspace",
+            ):
+                build_workspace(
+                    root,
+                    workspace,
+                    [problem_entries(workspace)[0]],
+                    run_judge=False,
+                )
+
+    def test_workspace_build_lock_rejects_a_second_writer_and_releases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".probhub").mkdir()
+            with workspace_build_lock(root):
+                with self.assertRaises(ProbHubError) as raised:
+                    with workspace_build_lock(root):
+                        pass
+                self.assertEqual(raised.exception.code, "build_busy")
+
+            with workspace_build_lock(root):
+                pass
 
     def test_status_reuses_collection_hash_for_multiple_problems(self):
         with tempfile.TemporaryDirectory() as temp:
