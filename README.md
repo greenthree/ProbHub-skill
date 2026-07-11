@@ -475,7 +475,7 @@ ProbHub-skill/
 
 ## npm 双包发布
 
-从 `0.3.3` 开始同时维护两个 npm package：
+当前同时发布两个 npm package：
 
 - `probhub`：完整主包，是 Core、CLI、WebUI、Skill 与 references 的唯一事实来源；
 - `probhub-skill`：轻量入口包，依赖完全相同版本的 `probhub`，提供 `npx probhub-skill` 安装入口。
@@ -495,11 +495,11 @@ Pop-Location
 
 ```powershell
 npm publish
-npm view probhub@0.3.3 version
+npm view probhub@0.3.4 version
 Push-Location compat/probhub-skill
 npm publish
 Pop-Location
-npm view probhub-skill@0.3.3 version
+npm view probhub-skill@0.3.4 version
 ```
 
 两个包的版本必须一致，入口包的 `dependencies.probhub` 必须锁定精确版本，不能使用 `^` 或 `~`。不要在入口包中复制 Python Core、WebUI、Skill 或 references。
