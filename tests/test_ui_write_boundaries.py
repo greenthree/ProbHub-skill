@@ -249,6 +249,16 @@ class UiWriteBoundaryTests(unittest.TestCase):
         self.assertEqual(response.get_json()["batch_id"], "batch")
         build.assert_called_once()
 
+    def test_schema_distribute_reports_locked_artifact_as_http_409(self):
+        with mock.patch.object(
+            self.ui,
+            "build_workspace",
+            side_effect=self.ui.ProbHubError("locked", code="artifact_busy"),
+        ):
+            response = self.client.post("/api/distribute", json={"subtitle": "Contest"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "artifact_busy")
+
     def test_schema_preview_reports_build_conflict_as_http_409(self):
         with mock.patch.object(
             self.ui,
