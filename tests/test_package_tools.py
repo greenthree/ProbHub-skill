@@ -2,9 +2,14 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from zipfile import ZipFile
 
-from probhub.package_tools import generate_domjudge_config, validate_output_validator_source
+from probhub.package_tools import (
+    build_verified_package,
+    generate_domjudge_config,
+    validate_output_validator_source,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,6 +86,33 @@ class PackageToolsTests(unittest.TestCase):
                     self.assertIn(f"validation: {validation}", problem_yaml)
                     self.assertIn("output_validators/validate/validate.cpp", names)
                     self.assertIn("output_validators/validate/testlib.h", names)
+
+    def test_invalid_staged_package_does_not_replace_existing_zip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            problem = temp / "A"
+            self.create_problem(problem)
+            output = temp / "A.zip"
+            output.write_bytes(b"last known good package")
+            invalid = {
+                "ok": False,
+                "errors": ["invalid fixture"],
+                "warnings": [],
+                "stats": {},
+            }
+
+            with mock.patch(
+                "probhub.package_tools.verify_package",
+                return_value=invalid,
+            ):
+                _, verification = build_verified_package(
+                    problem,
+                    output,
+                    require_pdf=True,
+                )
+
+            self.assertEqual(verification, invalid)
+            self.assertEqual(output.read_bytes(), b"last known good package")
 
 
 if __name__ == "__main__":

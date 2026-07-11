@@ -108,13 +108,15 @@ def compute_workspace_hash(root, workspace):
     return hash_paths(root, [path.relative_to(root) for path in paths if path.exists()])[0]
 
 
-def compute_collection_hash(root, workspace):
+def compute_collection_hash(root, workspace, loaded_problems=None):
     snapshot = {
         "workspace_hash": compute_workspace_hash(root, workspace),
         "problems": [],
     }
-    for entry in problem_entries(workspace):
-        problem_dir, config = load_problem(root, entry)
+    loaded = loaded_problems
+    if loaded is None:
+        loaded = [load_problem(root, entry) for entry in problem_entries(workspace)]
+    for problem_dir, config in loaded:
         snapshot["problems"].append({
             "id": config["id"],
             "metadata": build_meta(problem_dir, config),
@@ -417,5 +419,7 @@ def problem_status(
     stale = []
     if manifest.get("schema_version") != BUILD_MANIFEST_SCHEMA_VERSION:
         stale.append("manifest_schema")
+    elif not isinstance(manifest.get("batch_id"), str) or not manifest["batch_id"]:
+        stale.append("batch_id")
     stale.extend(key for key, value in current.items() if manifest.get(key) != value)
     return {"state": "stale" if stale else "current", "stale_fields": stale, **current, "manifest": manifest}

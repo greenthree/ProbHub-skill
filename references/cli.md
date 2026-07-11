@@ -146,7 +146,7 @@ probhub status [ID...]
 
 Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以及所有题目实际生成 Typst metadata 的输入计算。其他题的题面、题面图片、样例、展示配置或题序变化可能改变当前题的页码、总页数或单题 PDF，因此会使当前题变为 `stale`；其他题仅修改不参与排版的 secret 数据不会使当前题过期。
 
-包含 `collection_hash` 的 Build Manifest 使用 schema v2。旧 v1 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
+包含 `collection_hash` 的 Build Manifest 使用 schema v2。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`；缺失时显示 `stale_fields: ["batch_id", ...]`。旧 v1 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
 
 ## 8. `judge`
 
@@ -339,8 +339,8 @@ probhub package L01 --allow-missing-pdf
 执行：
 
 1. 从 `probhub.yaml` 生成 DOMjudge `problem.yaml` 与 `domjudge-problem.ini`。
-2. 构建根目录 `<ID>.zip`。
-3. 立即验证路径、配置、样例、隐藏数据、配对关系与 PDF。
+2. 在同卷临时路径构建 `<ID>.zip`。
+3. 验证路径、配置、样例、隐藏数据、配对关系与 PDF；只有验证成功才替换根目录正式 ZIP。
 
 默认要求已有 `problem.pdf`。`--allow-missing-pdf` 只用于尚未排版的中间状态，不用于正式交付。
 
@@ -354,16 +354,21 @@ probhub build [ID...] [--skip-judge] [--no-cache]
 
 顺序：
 
-1. lint 所选题目。
-2. judge 所选题目。
-3. 编译完整 Typst 集合。
-4. 提取所选单题 PDF。
-5. 构建并验证所选 ZIP。
-6. 写入所选 `.probhub/build-manifest.json`。
+1. 取得 `.probhub/build.lock` 的跨平台 OS 排他锁；锁文件可以长期存在，只有 OS 锁状态表示占用。
+2. lint 全部 collection 依赖，建立包含正式题序、全部排版输入和所选 source/data hash 的 BuildPlan。
+3. 复制受控输入快照；后续 judge、排版和打包只读取该快照。
+4. judge 所选题目。
+5. 在快照中编译一次完整 Typst 集合并提取所选单题 PDF。
+6. 在快照中生成 DOMjudge 配置、构建并验证全部所选 ZIP。
+7. 为所有所选题目生成带同一 `batch_id` 的 Manifest。
+8. 发布前重新计算 live 输入哈希；变化时以 `inputs_changed` 失败。
+9. 全部准备成功后发布共享产物与所选产物，Manifest 最后替换。
 
 即使执行 `build L01`，也会为了题序与页码编译全卷，但只评测、提取、打包和更新 L01。
 
-执行 `build L01 L02 ...` 时，所选题目逐题评测，但完整 Typst 集合只编译一次。所有所选 Manifest 使用构建开始前同一份 `workspace_hash` 和 `collection_hash` 快照；构建期间规范排版输入发生变化时，后续 `status` 会报告 `collection_hash` 过期。
+执行 `build L01 L02 ...` 时，所选题目逐题评测，但完整 Typst 集合只编译一次。任一题在 judge、PDF 提取、配置、ZIP 构建或验证阶段失败时，正式 metadata、PDF、ZIP 与 Manifest 均保持不变。所有所选 Manifest 使用同一份 `workspace_hash`、`collection_hash` 和 `batch_id`。
+
+并发执行 `build`、`typeset` 或 `package` 时，第二个 writer 失败并在 JSON 中返回 `code: "build_busy"`。快照创建或发布前发现 live 输入变化时返回 `code: "inputs_changed"`。快照 I/O 与发布 I/O 分别使用 `snapshot_failed`、`publish_failed`。当前版本尚未实现发布阶段的 journal/rollback；如果进程在多个正式文件替换之间被硬终止，仍需人工检查并重新 build。
 
 选项：
 

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .build_lock import workspace_build_lock
 from .building import build_workspace, package_problem
 from .doctor import run_doctor
 from .errors import ProbHubError
@@ -49,6 +50,7 @@ def _ensure_local_gitignore(root):
     path = Path(root) / ".gitignore"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     required = [
+        "**/.probhub/build.lock",
         "**/.probhub/sandbox-cache-v1.json",
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",
@@ -180,21 +182,25 @@ def command_stress(args):
 
 def command_typeset(args):
     root, workspace = workspace_context(args)
-    all_loaded = [load_problem(root, entry) for entry in problem_entries(workspace)]
-    _, main_pdf, _ = compile_collection(root, workspace, all_loaded)
-    ids = {entry["id"] for entry in select_entries(workspace, args.problem)} if args.problem else None
-    pdfs = extract_problem_pdfs(main_pdf, all_loaded, only_ids=ids)
-    return {"ok": True, "main_pdf": str(main_pdf), "pdfs": pdfs}
+    with workspace_build_lock(root):
+        _, workspace = load_workspace(root)
+        all_loaded = [load_problem(root, entry) for entry in problem_entries(workspace)]
+        _, main_pdf, _ = compile_collection(root, workspace, all_loaded)
+        ids = {entry["id"] for entry in select_entries(workspace, args.problem)} if args.problem else None
+        pdfs = extract_problem_pdfs(main_pdf, all_loaded, only_ids=ids)
+        return {"ok": True, "main_pdf": str(main_pdf), "pdfs": pdfs}
 
 
 def command_package(args):
     root, workspace = workspace_context(args)
-    results = {}
-    for entry in select_entries(workspace, args.problem):
-        problem_dir, config = load_problem(root, entry)
-        output, verification = package_problem(root, problem_dir, config, require_pdf=not args.allow_missing_pdf)
-        results[entry["id"]] = {"path": str(output), "verification": verification}
-    return {"ok": True, "packages": results}
+    with workspace_build_lock(root):
+        _, workspace = load_workspace(root)
+        results = {}
+        for entry in select_entries(workspace, args.problem):
+            problem_dir, config = load_problem(root, entry)
+            output, verification = package_problem(root, problem_dir, config, require_pdf=not args.allow_missing_pdf)
+            results[entry["id"]] = {"path": str(output), "verification": verification}
+        return {"ok": True, "packages": results}
 
 
 def command_verify(args):
@@ -273,7 +279,10 @@ def main(argv=None):
         emit(result, args.json_output)
         return 0 if result.get("ok", True) else 1
     except ProbHubError as exc:
-        emit({"ok": False, "error": str(exc)}, args.json_output)
+        result = {"ok": False, "error": str(exc)}
+        if exc.code:
+            result["code"] = exc.code
+        emit(result, args.json_output)
         return 1
     except KeyboardInterrupt:
         return 130

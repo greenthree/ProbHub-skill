@@ -133,6 +133,21 @@ def build_package(problem_dir, output_path):
     return files
 
 
+def build_verified_package(problem_dir, output_path, require_pdf=False):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output_path.stem}-package-",
+        dir=output_path.parent,
+    ) as temporary:
+        staged = Path(temporary) / output_path.name
+        files = build_package(problem_dir, staged)
+        verification = verify_package(staged, require_pdf=require_pdf)
+        if verification["ok"]:
+            os.replace(staged, output_path)
+        return files, verification
+
+
 def _safe_path(name):
     path = PurePosixPath(name)
     return bool(name) and "\\" not in name and not path.is_absolute() and ".." not in path.parts and not re.match(r"^[A-Za-z]:", name)

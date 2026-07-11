@@ -162,7 +162,7 @@ L01/data/secret/           # 隐藏数据唯一来源
 
 本地诊断目录 `.probhub/stress/` 保存差分反例，不属于正式构建产物，也不应提交。
 
-`probhub build` 会依次执行 lint、沙箱、元数据生成、Typst 编译、单题 PDF 提取、DOMjudge 打包、包验证和 Manifest 写入。多 ID build 只编译一次完整 Typst 集合。`probhub status` 会比较源文件、数据、工作区、整场排版输入、PDF 和 ZIP 哈希，报告 `current`、`stale` 或 `never-built`。
+`probhub build` 会先取得跨平台工作区写锁并建立输入快照，再在同卷临时工作区完成 lint、沙箱、元数据生成、Typst 编译、单题 PDF、DOMjudge 配置、ZIP 验证和 Manifest。多 ID build 只编译一次完整 Typst 集合；全部准备阶段成功且 live 输入哈希未变化后才发布正式产物。所有所选 Manifest 记录同一 `batch_id`。`probhub status` 会比较源文件、数据、工作区、整场排版输入、PDF 和 ZIP 哈希，报告 `current`、`stale` 或 `never-built`。
 
 完整命令语法、单题/多题操作、缓存语义与故障处理见 [`references/cli.md`](references/cli.md)。无 `.probhub/workspace.yaml` 的旧工作区流程已独立整理到 [`references/legacy-workflow.md`](references/legacy-workflow.md)，Schema v1 工作区不要混用。
 

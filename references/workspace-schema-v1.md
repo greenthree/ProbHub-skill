@@ -222,6 +222,8 @@ Do not edit generated artifacts to make source changes.
 
 ## Local sandbox cache
 
+`<workspace>/.probhub/build.lock` 是 `build`、`typeset` 和 `package` 共享的跨平台 OS 文件锁载体。锁文件可在命令结束后保留；不得通过删除文件或检查文件是否存在来判断锁状态。新工作区会把它加入 `.gitignore`。
+
 `<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results. Relevant source, header, input, answer, time/memory/output/process limit, compiler, platform, sandbox policy, or cache-schema changes invalidate entries automatically. Use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run and refresh the cache.
 
 `<problem>/.probhub/stress/` is a separate ignored diagnostic directory containing replayable counterexamples and `latest.json`; stress does not reuse the sandbox cache. Resource-control semantics are versioned in the cache Schema, so older cached AC/RE/TLE results cannot bypass newer OLE or process-tree policies. Do not package or commit either local artifact.

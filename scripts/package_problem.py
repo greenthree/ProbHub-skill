@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from probhub.package_tools import build_package, collect_package_files, verify_package
+from probhub.package_tools import build_package, build_verified_package
 
 
 def main():
@@ -21,8 +21,11 @@ def main():
     if not problem_dir.is_dir():
         parser.error(f"problem directory not found: {problem_dir}")
     output = Path(args.output).resolve() if args.output else problem_dir.with_suffix(".zip")
-    files = build_package(problem_dir, output)
-    result = verify_package(output, require_pdf=args.require_pdf)
+    files, result = build_verified_package(
+        problem_dir,
+        output,
+        require_pdf=args.require_pdf,
+    )
     if not result["ok"]:
         for error in result["errors"]:
             print(f"[-] {error}", file=sys.stderr)
