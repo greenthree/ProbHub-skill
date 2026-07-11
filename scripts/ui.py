@@ -198,8 +198,14 @@ HTML_TEMPLATE = r"""
     <title>ProbHub · 题目排版控制台</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Inter:wght@350;400;500;600&display=swap" rel="stylesheet">
-    
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+        (() => {
+            const saved = localStorage.getItem('probhub-theme');
+            const preferred = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            document.documentElement.dataset.theme = saved === 'light' || saved === 'dark' ? saved : preferred;
+        })();
+    </script>
     <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
     <script>
       tailwind = { 
@@ -207,16 +213,26 @@ HTML_TEMPLATE = r"""
           theme: {
             extend: {
               colors: {
-                ink:      { bg:'#0b0d12', card:'#13151c', elevated:'#181b24', input:'#1e212b', border:'#252832' },
-                gold:     { DEFAULT:'#c8a45c', light:'#d4b670', muted:'#9e8040', dim:'#6b5a38' },
-                cream:    { DEFAULT:'#e4dfd4', muted:'#98968e', subtle:'#5f5e59' },
-                success:  { DEFAULT:'#6b9b6a', bg:'rgba(107,155,106,0.10)' },
-                danger:   { DEFAULT:'#c25450', bg:'rgba(194,84,80,0.10)' },
+                ink: {
+                  bg:'rgb(var(--ink-bg) / <alpha-value>)', card:'rgb(var(--ink-card) / <alpha-value>)',
+                  elevated:'rgb(var(--ink-elevated) / <alpha-value>)', input:'rgb(var(--ink-input) / <alpha-value>)',
+                  border:'rgb(var(--ink-border) / <alpha-value>)', deep:'rgb(var(--ink-deep) / <alpha-value>)'
+                },
+                gold: {
+                  DEFAULT:'rgb(var(--gold) / <alpha-value>)', light:'rgb(var(--gold-light) / <alpha-value>)',
+                  muted:'rgb(var(--gold-muted) / <alpha-value>)', dim:'rgb(var(--gold-dim) / <alpha-value>)'
+                },
+                cream: {
+                  DEFAULT:'rgb(var(--cream) / <alpha-value>)', muted:'rgb(var(--cream-muted) / <alpha-value>)',
+                  subtle:'rgb(var(--cream-subtle) / <alpha-value>)'
+                },
+                success:'rgb(var(--success) / <alpha-value>)',
+                danger:'rgb(var(--danger) / <alpha-value>)',
               },
               fontFamily: {
-                serif: ['"Noto Serif SC"', '"Noto Serif"', 'Georgia', 'serif'],
+                serif: ['"Noto Serif SC"', 'STSong', 'Georgia', 'serif'],
                 mono:  ['"JetBrains Mono"', '"Cascadia Code"', 'Consolas', 'monospace'],
-                sans:  ['"Inter"', 'system-ui', 'sans-serif'],
+                sans:  ['"IBM Plex Sans"', '"Microsoft YaHei UI"', 'sans-serif'],
               },
               animation: { 'fade-in': 'fadeIn 0.4s ease-out both' },
               keyframes: { fadeIn: { '0%': { opacity:'0' }, '100%': { opacity:'1' } } }
@@ -240,57 +256,173 @@ HTML_TEMPLATE = r"""
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
 
     <style>
-        :root { color-scheme: dark; }
-        * { scrollbar-width: thin; scrollbar-color: #252832 transparent; }
-        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        :root,
+        html[data-theme="light"] {
+            color-scheme: light;
+            --ink-bg: 246 243 236;
+            --ink-card: 255 253 249;
+            --ink-elevated: 244 240 232;
+            --ink-input: 238 233 223;
+            --ink-border: 211 202 185;
+            --ink-deep: 39 30 17;
+            --gold: 157 109 30;
+            --gold-light: 181 128 37;
+            --gold-muted: 125 94 45;
+            --gold-dim: 151 133 101;
+            --cream: 43 45 39;
+            --cream-muted: 91 91 81;
+            --cream-subtle: 125 122 109;
+            --success: 50 119 77;
+            --danger: 178 67 58;
+            --page-glow: rgba(190, 137, 49, 0.13);
+            --panel-border: rgba(92, 75, 49, 0.13);
+            --panel-shadow: 0 18px 50px rgba(79, 61, 35, 0.08), 0 2px 8px rgba(79, 61, 35, 0.05);
+            --terminal: 31 35 31;
+        }
+        html[data-theme="dark"] {
+            color-scheme: dark;
+            --ink-bg: 18 21 18;
+            --ink-card: 25 29 25;
+            --ink-elevated: 30 35 30;
+            --ink-input: 36 42 36;
+            --ink-border: 55 63 55;
+            --ink-deep: 28 22 10;
+            --gold: 202 164 92;
+            --gold-light: 226 198 139;
+            --gold-muted: 164 139 88;
+            --gold-dim: 112 100 72;
+            --cream: 222 219 204;
+            --cream-muted: 166 164 150;
+            --cream-subtle: 122 126 114;
+            --success: 111 166 121;
+            --danger: 204 106 95;
+            --page-glow: rgba(202, 164, 92, 0.08);
+            --panel-border: rgba(235, 230, 207, 0.055);
+            --panel-shadow: 0 20px 55px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.18);
+            --terminal: 12 15 13;
+        }
+        * { scrollbar-width: thin; scrollbar-color: rgb(var(--ink-border)) transparent; }
+        ::selection { color: rgb(var(--ink-deep)); background: rgb(var(--gold) / 0.42); }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #252832; border-radius: 10px; }
-        ::-webkit-scrollbar-thumb:hover { background: #353843; }
-        html, body { background: #0b0d12; }
+        ::-webkit-scrollbar-thumb { background: rgb(var(--ink-border)); border-radius: 999px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgb(var(--gold-muted) / 0.72); }
+        html, body { min-height: 100%; background: rgb(var(--ink-bg)); transition: background-color .28s ease, color .28s ease; }
+        body { letter-spacing: 0.006em; }
         body::before {
             content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0;
-            background: radial-gradient(ellipse 80% 50% at 50% -10%, rgba(200,164,92,0.04) 0%, transparent 70%),
-                        radial-gradient(ellipse 60% 40% at 90% 80%, rgba(200,164,92,0.02) 0%, transparent 70%);
+            background:
+                radial-gradient(ellipse 70% 55% at 12% -8%, var(--page-glow) 0%, transparent 72%),
+                radial-gradient(ellipse 55% 42% at 92% 92%, rgb(var(--success) / 0.045) 0%, transparent 72%);
         }
-        .drag-ghost { opacity: 0.25; background: #1e212b !important; border: 1px dashed #c8a45c !important; }
+        body::after {
+            content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: .32;
+            background-image: linear-gradient(rgb(var(--cream) / .018) 1px, transparent 1px), linear-gradient(90deg, rgb(var(--cream) / .018) 1px, transparent 1px);
+            background-size: 28px 28px;
+            mask-image: linear-gradient(to bottom, black, transparent 72%);
+        }
+        html[data-theme="light"] body::after { opacity: .55; }
         [x-cloak] { display: none !important; }
-        .ink-card { background: #13151c; border: 1px solid rgba(255,255,255,0.025); backdrop-filter: blur(12px); }
-        .gold-glow:focus-within { box-shadow: 0 0 0 1px rgba(200,164,92,0.4), 0 0 12px rgba(200,164,92,0.08); }
-        .toggle-track { transition: background-color 0.25s ease; }
-        .toggle-dot { transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1); }
-        
+        button, input, textarea, select { font: inherit; }
+        button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+            outline: 2px solid rgb(var(--gold) / .78); outline-offset: 2px;
+        }
+        .ink-card {
+            background: rgb(var(--ink-card) / .9);
+            border: 1px solid var(--panel-border);
+            box-shadow: var(--panel-shadow);
+            backdrop-filter: blur(18px) saturate(115%);
+            transition: background-color .28s ease, border-color .28s ease, box-shadow .28s ease;
+        }
+        .app-header { position: relative; overflow: hidden; }
+        .app-header::after {
+            content: ''; position: absolute; inset: auto 0 0; height: 1px;
+            background: linear-gradient(90deg, transparent, rgb(var(--gold) / .45), transparent);
+        }
+        .brand-logo { filter: drop-shadow(0 8px 16px rgb(var(--gold) / .08)); }
+        .brand-logo .logo-shell { fill: rgb(var(--ink-deep)); }
+        .brand-logo .logo-hub-text { fill: rgb(var(--ink-deep)); }
+        .drag-ghost { opacity: .28; background: rgb(var(--ink-input)) !important; border: 1px dashed rgb(var(--gold)) !important; }
+        .gold-glow:focus-within { box-shadow: 0 0 0 1px rgb(var(--gold) / .42), 0 0 0 4px rgb(var(--gold) / .08); }
+        .toggle-track { transition: background-color .25s ease; }
+        .toggle-dot { transition: transform .25s cubic-bezier(.34,1.56,.64,1); }
+        .theme-toggle {
+            display: inline-flex; align-items: center; gap: .55rem; min-height: 40px; padding: .45rem .72rem;
+            color: rgb(var(--cream-muted)); background: rgb(var(--ink-input) / .72);
+            border: 1px solid var(--panel-border); border-radius: .75rem;
+            transition: color .2s ease, background-color .2s ease, border-color .2s ease, transform .2s ease;
+        }
+        .theme-toggle:hover { color: rgb(var(--cream)); background: rgb(var(--ink-input)); border-color: rgb(var(--gold) / .28); transform: translateY(-1px); }
+        .theme-toggle-icon { width: 1rem; height: 1rem; color: rgb(var(--gold)); }
+        .primary-action {
+            color: rgb(var(--ink-deep)); background: linear-gradient(180deg, rgb(var(--gold-light)), rgb(var(--gold)));
+            box-shadow: 0 9px 24px rgb(var(--gold) / .19), inset 0 1px 0 rgb(255 255 255 / .25);
+        }
+        .primary-action:hover { filter: saturate(1.06) brightness(1.04); box-shadow: 0 12px 30px rgb(var(--gold) / .28); transform: translateY(-1px); }
+        .primary-action:active { transform: scale(.97); }
+        .secondary-action { box-shadow: inset 0 1px 0 rgb(var(--cream) / .025); }
+        .terminal-panel { background: rgb(var(--terminal)); border: 1px solid rgb(var(--cream) / .055); }
+        .soft-gold-panel { background: rgb(var(--gold) / .055) !important; }
+        .soft-panel { background: rgb(var(--cream) / .025) !important; }
+        select option { background-color: rgb(var(--ink-card)); color: rgb(var(--cream)); }
+        html[data-theme="light"] [class*="border-white"] { border-color: rgb(75 65 50 / .12) !important; }
+        html[data-theme="light"] [class*="hover:border-white"]:hover { border-color: rgb(75 65 50 / .22) !important; }
         .prose mjx-container { outline: none !important; }
         .prose mjx-container svg { max-width: none !important; height: auto !important; display: inline !important; }
         mjx-container:not([display="true"]) { display: inline-block !important; margin: 0 !important; }
-        mjx-container[display="true"] { margin: 0.75em 0 !important; }
-        
-        /* 下拉菜单定制样式 */
-        select option { background-color: #13151c; color: #e4dfd4; }
+        mjx-container[display="true"] { margin: .75em 0 !important; }
+        html[data-theme="light"] .prose-invert {
+            --tw-prose-body: rgb(var(--cream)); --tw-prose-headings: rgb(var(--cream));
+            --tw-prose-lead: rgb(var(--cream-muted)); --tw-prose-links: rgb(var(--gold));
+            --tw-prose-bold: rgb(var(--cream)); --tw-prose-counters: rgb(var(--cream-subtle));
+            --tw-prose-bullets: rgb(var(--gold-muted)); --tw-prose-hr: rgb(var(--ink-border));
+            --tw-prose-quotes: rgb(var(--cream)); --tw-prose-quote-borders: rgb(var(--gold));
+            --tw-prose-captions: rgb(var(--cream-subtle)); --tw-prose-code: rgb(var(--cream));
+            --tw-prose-pre-code: rgb(var(--cream)); --tw-prose-pre-bg: rgb(var(--ink-elevated));
+            --tw-prose-th-borders: rgb(var(--ink-border)); --tw-prose-td-borders: rgb(var(--ink-border));
+        }
+        .workspace-shell { height: calc(100vh - 140px); }
+        @media (max-width: 1023px) {
+            .app-header { align-items: flex-start; }
+            .header-actions { width: 100%; justify-content: flex-end; }
+            .workspace-shell { height: auto; flex-direction: column; }
+            .problem-sidebar { width: 100% !important; max-height: 280px; }
+            .workspace-panel { min-height: 720px; }
+        }
+        @media (max-width: 640px) {
+            .header-actions { justify-content: flex-start; }
+            .workspace-panel { min-height: 760px; padding: 1rem; }
+            .app-header > div:first-child { align-items: flex-start; gap: .8rem; }
+            .brand-logo { width: 8.4rem; height: auto; margin-top: .15rem; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+        }
     </style>
 </head>
-<body class="bg-ink-bg text-cream antialiased relative">
-    <div x-data="probhub()" x-init="initApp()" @input="autoSave()" class="max-w-7xl mx-auto px-6 py-6 relative z-10" x-cloak>
+<body class="min-h-screen bg-ink-bg text-cream antialiased relative">
+    <div x-data="probhub()" x-init="initApp()" @input="autoSave()" class="max-w-[1500px] mx-auto px-3 sm:px-5 lg:px-8 py-4 lg:py-6 relative z-10" x-cloak>
 
-        <div class="ink-card rounded-2xl p-5 mb-5 flex justify-between items-center">
+        <div class="ink-card app-header rounded-2xl p-4 lg:p-5 mb-5 flex flex-wrap justify-between items-center gap-4">
             <div class="flex items-center gap-5">
-                <svg class="h-12 w-auto select-none shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 324 90">
+                <svg class="brand-logo h-11 lg:h-12 w-auto select-none shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 324 90">
                     <style>.logo-text { font-family: "New Computer Modern Mono", "Courier New", monospace; font-weight: bold; font-size: 64px; }</style>
-                    <rect width="324" height="90" rx="16" fill="#0b0d12" />
+                    <rect class="logo-shell" width="324" height="90" rx="16" />
                     <text x="22" y="64" class="logo-text" fill="#E53935">p</text>
                     <text x="58" y="64" class="logo-text" fill="#E53935">r</text>
                     <text x="94" y="64" class="logo-text" fill="#E53935">o</text>
                     <text x="130" y="64" class="logo-text" fill="#1E88E5">b</text>
                     <rect x="182" y="14" width="130" height="62" rx="10" fill="#FFA31A" />
-                    <text x="192" y="64" class="logo-text" fill="#0b0d12">h</text>
-                    <text x="228" y="64" class="logo-text" fill="#0b0d12">u</text>
-                    <text x="264" y="64" class="logo-text" fill="#0b0d12">b</text>
+                    <text x="192" y="64" class="logo-text logo-hub-text">h</text>
+                    <text x="228" y="64" class="logo-text logo-hub-text">u</text>
+                    <text x="264" y="64" class="logo-text logo-hub-text">b</text>
                 </svg>
                 <div class="flex flex-col gap-1">
                     <span class="text-[11px] tracking-[0.2em] uppercase text-cream-muted font-medium">Typesetting Console</span>
                     <div class="flex items-center gap-3 flex-wrap">
                         <span class="text-sm text-cream-subtle">当前排版集</span>
                         <div class="relative flex items-center" x-show="subtitles.length > 0">
-                            <select x-model="currentSubtitle" @change="switchSubtitle()"
+                            <select x-model="currentSubtitle" @input.stop @change.stop="switchSubtitle()"
                                     class="bg-ink-input text-gold font-mono text-[13px] border border-white/[0.02] rounded-md pl-2.5 pr-8 py-1 outline-none focus:border-gold/40 cursor-pointer appearance-none transition-colors shadow-sm">
                                 <template x-for="sub in subtitles" :key="sub">
                                     <option :value="sub" x-text="sub"></option>
@@ -315,7 +447,7 @@ HTML_TEMPLATE = r"""
                 </div>
             </div>
 
-            <div class="flex items-center gap-3">
+            <div class="header-actions flex flex-wrap items-center gap-2.5">
                 <button @click="selectedIdx = null" x-show="selectedIdx !== null"
                         class="flex items-center gap-1.5 text-[12px] text-cream-subtle hover:text-cream transition-colors duration-200 group">
                     <svg class="w-3.5 h-3.5 transition-transform duration-200 group-hover:-translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
@@ -328,13 +460,20 @@ HTML_TEMPLATE = r"""
                     <template x-if="saveStatus === 'error'"><span class="cursor-pointer" @click.stop="doSave()">⚠ 点击重试</span></template>
                     <template x-if="!saveStatus"><span>● 就绪</span></template>
                 </span>
-                <button @click="compilePDF()" class="px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all duration-200 bg-gradient-to-b from-[#d4b468] to-[#b8923e] text-[#1a1408] shadow-[0_0_20px_rgba(200,164,92,0.25)] hover:shadow-[0_0_28px_rgba(200,164,92,0.40)] active:scale-[0.97] disabled:opacity-50 disabled:shadow-none" :disabled="isCompiling || !currentSubtitle">
+                <button type="button" class="theme-toggle" @click="toggleTheme()"
+                        :aria-label="theme === 'dark' ? '切换到明亮模式' : '切换到暗夜模式'"
+                        :title="theme === 'dark' ? '切换到明亮模式' : '切换到护眼暗夜模式'">
+                    <svg x-show="theme === 'dark'" class="theme-toggle-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 3v1.5M12 19.5V21M3 12h1.5M19.5 12H21M5.64 5.64l1.06 1.06M17.3 17.3l1.06 1.06M18.36 5.64 17.3 6.7M6.7 17.3l-1.06 1.06M16.5 12a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Z"/></svg>
+                    <svg x-show="theme === 'light'" class="theme-toggle-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M20.5 15.5A8.5 8.5 0 0 1 8.5 3.5a8.5 8.5 0 1 0 12 12Z"/></svg>
+                    <span class="text-[12px] font-medium" x-text="theme === 'dark' ? 'Light' : 'Dark'"></span>
+                </button>
+                <button @click="compilePDF()" class="primary-action px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all duration-200 disabled:opacity-50 disabled:shadow-none" :disabled="isCompiling || !currentSubtitle">
                     <span class="flex items-center gap-1.5">
                         <span x-show="!isCompiling">📄 编译全卷</span>
                         <span x-show="isCompiling" class="animate-pulse">⏳ 编译中...</span>
                     </span>
                 </button>
-                <button @click="distributePDFs()" class="px-4 py-2.5 text-[13px] font-medium rounded-lg transition-all duration-200 bg-ink-elevated border border-white/[0.03] text-cream-muted hover:text-cream hover:border-white/8 hover:bg-ink-input active:scale-[0.97] disabled:opacity-40" :disabled="isDistributing || !currentSubtitle">
+                <button @click="distributePDFs()" class="secondary-action px-4 py-2.5 text-[13px] font-medium rounded-lg transition-all duration-200 bg-ink-elevated border border-white/[0.03] text-cream-muted hover:text-cream hover:border-white/8 hover:bg-ink-input active:scale-[0.97] disabled:opacity-40" :disabled="isDistributing || !currentSubtitle">
                     <span class="flex items-center gap-1.5">
                         <span x-show="!isDistributing">📦 分发 PDF</span>
                         <span x-show="isDistributing" class="animate-pulse">⏳ 分发中...</span>
@@ -347,9 +486,9 @@ HTML_TEMPLATE = r"""
             <span class="whitespace-normal" x-text="toast.msg"></span>
         </div>
 
-        <div class="flex gap-5" style="height:calc(100vh - 140px);">
+        <div class="workspace-shell flex gap-5">
 
-            <div class="w-[220px] shrink-0 ink-card rounded-2xl p-4 flex flex-col overflow-hidden">
+            <div class="problem-sidebar w-[220px] shrink-0 ink-card rounded-2xl p-4 flex flex-col overflow-hidden">
                 <div class="flex items-center justify-between mb-4 px-1 shrink-0">
                     <h2 class="font-serif text-[15px] font-semibold text-cream tracking-wide">题目列表</h2>
                     <span class="text-[11px] text-cream-subtle font-mono" x-text="problems.length + ' 题'"></span>
@@ -376,7 +515,7 @@ HTML_TEMPLATE = r"""
                 </div>
             </div>
 
-            <div x-show="activePage === 'layout'" class="flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
+            <div x-show="activePage === 'layout'" class="workspace-panel flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
                 <div x-show="selectedIdx === null" class="absolute inset-0 overflow-y-auto">
                     <!-- Empty set: no problems loaded yet -->
                     <div x-show="problems.length === 0" class="absolute inset-0 flex flex-col items-center justify-center">
@@ -444,14 +583,16 @@ HTML_TEMPLATE = r"""
                                 </div>
                             </div>
                             <!-- Cover preview thumbnail -->
-                            <div class="mt-3" x-show="pdfPages.length > 0">
-                                <p class="text-[10px] font-medium text-cream-subtle mb-2">封面预览</p>
-                                <div class="rounded-lg overflow-hidden border border-white/[0.02] bg-ink-bg relative">
-                                    <img :src="'/api/pdf-page/' + encodeURIComponent(currentSubtitle) + '/0?t=' + pdfRefresh"
-                                         class="w-full block" style="filter: brightness(0.92) contrast(0.95)">
-                                    <div class="absolute inset-0 bg-black/20 pointer-events-none"></div>
+                            <template x-if="currentSubtitle && pdfPages.length > 0">
+                                <div class="mt-3" data-testid="cover-preview">
+                                    <p class="text-[10px] font-medium text-cream-subtle mb-2">封面预览</p>
+                                    <div class="rounded-lg overflow-hidden border border-white/[0.02] bg-ink-bg relative">
+                                        <img :src="'/api/pdf-page/' + encodeURIComponent(currentSubtitle) + '/0?t=' + pdfRefresh"
+                                             class="w-full block" :style="theme === 'light' ? 'filter:none' : 'filter:brightness(0.92) contrast(0.95)'">
+                                        <div x-show="theme === 'dark'" class="absolute inset-0 bg-black/20 pointer-events-none"></div>
+                                    </div>
                                 </div>
-                            </div>
+                            </template>
                         </div>
 
                         <!-- Difficulty Distribution -->
@@ -593,7 +734,7 @@ HTML_TEMPLATE = r"""
                                 </div>
                                 <template x-for="(level, li) in difficultyLevels" :key="level.label">
                                     <div class="absolute w-3.5 h-3.5 rounded-full transition-all duration-300 z-10"
-                                         :style="'left:calc(' + (li / 5 * 100) + '% - 7px); background:' + (getDifficulty(selectedIdx) >= li ? level.color : '#1e212b') + '; border: 2px solid ' + (getDifficulty(selectedIdx) >= li ? level.color : '#3a3d48') + ';' + (getDifficulty(selectedIdx) === li ? 'transform: scale(1.7); box-shadow: 0 0 12px ' + level.color + '99;' : '')"
+                                         :style="'left:calc(' + (li / 5 * 100) + '% - 7px); background:' + (getDifficulty(selectedIdx) >= li ? level.color : 'rgb(var(--ink-input))') + '; border: 2px solid ' + (getDifficulty(selectedIdx) >= li ? level.color : 'rgb(var(--ink-border))') + ';' + (getDifficulty(selectedIdx) === li ? 'transform: scale(1.7); box-shadow: 0 0 12px ' + level.color + '99;' : '')"
                                          @click.stop="setDifficulty(selectedIdx, li)"></div>
                                 </template>
                             </div>
@@ -601,7 +742,7 @@ HTML_TEMPLATE = r"""
                             <div class="flex justify-between mt-1">
                                 <template x-for="(level, li) in difficultyLevels" :key="level.label">
                                     <span class="text-[9px] font-medium transition-colors duration-300 select-none"
-                                          :style="getDifficulty(selectedIdx) === li ? 'color:' + level.color : 'color:#5f5e59'"
+                                          :style="getDifficulty(selectedIdx) === li ? 'color:' + level.color : 'color:rgb(var(--cream-subtle))'"
                                           x-text="level.label"></span>
                                 </template>
                             </div>
@@ -610,7 +751,7 @@ HTML_TEMPLATE = r"""
                         <!-- Quote expandable section -->
                         <template x-if="hasQuote()">
                             <div x-show="true" x-collapse>
-                                <div class="p-4 rounded-xl space-y-4 border-l-2 border-gold/30" style="background:rgba(200,164,92,0.04);">
+                                <div class="soft-gold-panel p-4 rounded-xl space-y-4 border-l-2 border-gold/30">
                                     <div>
                                         <label class="block text-[11px] font-medium tracking-wide text-cream-muted uppercase mb-1.5">引言内容</label>
                                         <textarea x-model="problems[selectedIdx].statement.quote.text" rows="3"
@@ -633,31 +774,31 @@ HTML_TEMPLATE = r"""
 
                         <div class="space-y-6 pt-4 border-t border-white/[0.02]">
                             <div>
-                                <div class="grid grid-cols-2 gap-4 mb-2">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Description</label>
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full opacity-0"></div> Live Preview</label>
                                 </div>
-                                <div class="grid grid-cols-2 gap-4">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <textarea x-model="problems[selectedIdx].statement.description" rows="8" class="w-full h-56 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
                                     <div class="w-full h-56 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.descPreview, problems[selectedIdx]?.statement?.description)" x-ref="descPreview"></div>
                                 </div>
                             </div>
 
                             <div>
-                                <div class="grid grid-cols-2 gap-4 mb-2">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Input Format</label>
                                 </div>
-                                <div class="grid grid-cols-2 gap-4">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <textarea x-model="problems[selectedIdx].statement.input" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
                                     <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.inputPreview, problems[selectedIdx]?.statement?.input)" x-ref="inputPreview"></div>
                                 </div>
                             </div>
 
                             <div>
-                                <div class="grid grid-cols-2 gap-4 mb-2">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Output Format</label>
                                 </div>
-                                <div class="grid grid-cols-2 gap-4">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <textarea x-model="problems[selectedIdx].statement.output" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
                                     <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.outputPreview, problems[selectedIdx]?.statement?.output)" x-ref="outputPreview"></div>
                                 </div>
@@ -677,7 +818,7 @@ HTML_TEMPLATE = r"""
                                 <template x-if="problems[selectedIdx].problem.samples && problems[selectedIdx].problem.samples.length > 0">
                                     <div class="space-y-3">
                                         <template x-for="(sample, si) in problems[selectedIdx].problem.samples" :key="si">
-                                            <div class="p-4 rounded-xl border border-white/[0.02]" style="background:rgba(255,255,255,0.015);">
+                                            <div class="soft-panel p-4 rounded-xl border border-white/[0.02]">
                                                 <div class="flex items-center justify-between mb-2.5">
                                                     <span class="text-[11px] font-mono text-gold tracking-wide" x-text="'样例 #' + (si + 1)"></span>
                                                     <button @click="removeSample(si)" class="text-[11px] text-cream-subtle hover:text-danger transition-colors px-2 py-0.5 rounded hover:bg-danger/10" x-show="problems[selectedIdx].problem.samples.length > 1">✕ 移除</button>
@@ -703,10 +844,10 @@ HTML_TEMPLATE = r"""
                             </div>
 
                             <div>
-                                <div class="grid grid-cols-2 gap-4 mb-2">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Notes & Constraints</label>
                                 </div>
-                                <div class="grid grid-cols-2 gap-4">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <textarea x-model="problems[selectedIdx].statement.notes" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
                                     <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.notesPreview, problems[selectedIdx]?.statement?.notes)" x-ref="notesPreview"></div>
                                 </div>
@@ -717,7 +858,7 @@ HTML_TEMPLATE = r"""
                 </template>
             </div>
 
-            <div x-show="activePage === 'sandbox'" class="flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
+            <div x-show="activePage === 'sandbox'" class="workspace-panel flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
                 <div class="space-y-6 animate-fade-in">
                     <div class="flex items-start justify-between gap-4">
                         <div>
@@ -742,7 +883,7 @@ HTML_TEMPLATE = r"""
                             </p>
                         </div>
                         <button @click="runSandbox()"
-                                class="px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all duration-200 bg-gradient-to-b from-[#d4b468] to-[#b8923e] text-[#1a1408] shadow-[0_0_18px_rgba(200,164,92,0.18)] hover:shadow-[0_0_24px_rgba(200,164,92,0.30)] active:scale-[0.97] disabled:opacity-40 disabled:shadow-none"
+                                class="primary-action px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all duration-200 disabled:opacity-40 disabled:shadow-none"
                                 :disabled="sandboxRunning || !sandboxInfo || !sandboxInfo.runnable">
                             <span x-show="!sandboxRunning">▶ 运行沙箱评测</span>
                             <span x-show="sandboxRunning" class="animate-pulse">● 评测中...</span>
@@ -754,7 +895,7 @@ HTML_TEMPLATE = r"""
                         <p x-show="selectedIdx !== null && sandboxInfo && !sandboxInfo.matched">未找到匹配的题目目录，请检查该题 `meta.json` 的 `display_name`。</p>
                     </div>
 
-                    <div x-show="sandboxInfo && sandboxInfo.matched" class="grid grid-cols-5 gap-3">
+                    <div x-show="sandboxInfo && sandboxInfo.matched" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
                             <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Problem Dir</p>
                             <p class="font-mono text-[13px] text-cream truncate" x-text="sandboxInfo?.dir || '-'"></p>
@@ -799,7 +940,7 @@ HTML_TEMPLATE = r"""
                             </div>
                             <span x-show="submissionLastRunAt" class="text-[10px] font-mono text-cream-subtle" x-text="submissionLastRunAt"></span>
                         </div>
-                        <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-3 items-center">
+                        <div class="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-3 items-center">
                             <label class="flex items-center gap-3 px-4 py-3 rounded-lg border border-dashed border-white/10 bg-ink-input/50 cursor-pointer hover:border-gold/35 transition-colors">
                                 <input x-ref="submissionFile" type="file" accept=".cpp,text/x-c++src" class="hidden" @change="handleSubmissionFile($event)">
                                 <span class="text-gold">＋</span>
@@ -841,14 +982,14 @@ HTML_TEMPLATE = r"""
                                     </table>
                                 </div>
                             </div>
-                            <div x-show="submissionLogs" class="rounded-lg bg-[#090b0f] overflow-hidden">
+                            <div x-show="submissionLogs" class="terminal-panel rounded-lg overflow-hidden">
                                 <button @click="submissionLogOpen = !submissionLogOpen" class="w-full px-3 py-2 flex justify-between text-[10px] text-cream-subtle"><span>提交日志</span><span x-text="submissionLogOpen ? '收起' : '展开'"></span></button>
                                 <pre x-show="submissionLogOpen" class="max-h-56 overflow-auto px-3 pb-3 whitespace-pre-wrap text-[10px] font-mono text-cream-muted" x-text="submissionLogs"></pre>
                             </div>
                         </div>
                     </div>
 
-                    <div class="grid grid-cols-4 gap-3" x-show="selectedIdx !== null && sandboxResult">
+                    <div class="grid grid-cols-2 xl:grid-cols-4 gap-3" x-show="selectedIdx !== null && sandboxResult">
                         <template x-for="card in sandboxCards()" :key="card.key">
                             <div class="rounded-xl border p-4 transition-colors"
                                  :class="card.ok ? 'bg-success/10 border-success/20' : (card.warn ? 'bg-gold/10 border-gold/20' : 'bg-danger/10 border-danger/25')">
@@ -906,7 +1047,7 @@ HTML_TEMPLATE = r"""
                         </div>
                         <div class="divide-y divide-white/[0.02]">
                             <template x-for="exp in sandboxExpectationRows()" :key="exp.program">
-                                <div class="px-4 py-3 grid grid-cols-[minmax(0,1.4fr)_auto_minmax(0,1fr)_minmax(0,1.4fr)] gap-4 items-center text-[11px]">
+                                <div class="px-4 py-3 grid grid-cols-1 md:grid-cols-[minmax(0,1.4fr)_auto_minmax(0,1fr)_minmax(0,1.4fr)] gap-2 md:gap-4 items-center text-[11px]">
                                     <div>
                                         <p class="font-mono text-cream" x-text="exp.program"></p>
                                         <p class="text-cream-subtle mt-1" x-text="'status ' + (exp.expected_statuses || []).join('/') + ' · forbid ' + ((exp.forbidden_statuses || []).join('/') || '-')"></p>
@@ -919,7 +1060,7 @@ HTML_TEMPLATE = r"""
                         </div>
                     </div>
 
-                    <div x-show="selectedIdx !== null" class="rounded-xl border border-white/[0.02] bg-[#090b0f] overflow-hidden">
+                    <div x-show="selectedIdx !== null" class="terminal-panel rounded-xl overflow-hidden">
                         <button @click="sandboxLogOpen = !sandboxLogOpen" class="w-full px-4 py-3 flex items-center justify-between text-left">
                             <span class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">原始日志</span>
                             <span class="text-[11px] text-cream-subtle" x-text="sandboxLogOpen ? '收起' : '展开'"></span>
@@ -935,6 +1076,7 @@ HTML_TEMPLATE = r"""
     <script>
         document.addEventListener('alpine:init', () => {
             Alpine.data('probhub', () => ({
+                theme: document.documentElement.dataset.theme || 'dark',
                 subtitles: [],
                 currentSubtitle: '',
                 problems: [],
@@ -973,7 +1115,14 @@ HTML_TEMPLATE = r"""
                 _coverSaveTimer: null,
                 toast: { show: false, msg: '', isError: false },
 
+                toggleTheme() {
+                    this.theme = this.theme === 'dark' ? 'light' : 'dark';
+                    document.documentElement.dataset.theme = this.theme;
+                    localStorage.setItem('probhub-theme', this.theme);
+                },
+
                 initApp() {
+                    document.documentElement.dataset.theme = this.theme;
                     // 1. 初始化时拉取所有可用的排版集目录
                     fetch('/api/subtitles').then(res => res.json()).then(subs => {
                         this.subtitles = subs;
@@ -982,6 +1131,7 @@ HTML_TEMPLATE = r"""
                             this.currentSubtitle = subs[0];
                             this.loadData();
                             this.loadConfig();
+                            this.loadPdfPages();
                         }
                     });
                 },
@@ -1004,14 +1154,17 @@ HTML_TEMPLATE = r"""
 
                 loadPdfPages() {
                     if (!this.currentSubtitle) { this.pdfPages = []; return; }
-                    fetch(`/api/pdf-pages/${encodeURIComponent(this.currentSubtitle)}`)
+                    const requestedSubtitle = this.currentSubtitle;
+                    fetch(`/api/pdf-pages/${encodeURIComponent(requestedSubtitle)}`)
                         .then(res => res.json())
                         .then(data => {
+                            if (this.currentSubtitle !== requestedSubtitle) return;
                             this.pdfPages = data.pages > 0 ? Array.from({length: data.pages}, (_, i) => i) : [];
                         });
                 },
 
                 switchSubtitle() {
+                    this.pdfPages = [];
                     this.loadData();
                     this.loadConfig();
                     this.pdfRefresh = Date.now();
@@ -2716,7 +2869,7 @@ def serve_pdf_page(subtitle, page):
     if not os.path.exists(png_path):
         return "Render failed", 500
 
-    return send_file(png_path, mimetype='image/png')
+    return send_file(os.path.abspath(png_path), mimetype='image/png')
 
 
 def open_browser():
