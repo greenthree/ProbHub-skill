@@ -9,7 +9,12 @@ from .doctor import run_doctor
 from .errors import ProbHubError
 from .io import write_yaml
 from .judging import judge_problem
-from .linting import lint_workspace, problem_status
+from .linting import (
+    compute_collection_hash,
+    compute_workspace_hash,
+    lint_workspace,
+    problem_status,
+)
 from .package_tools import verify_package
 from .stressing import stress_problem
 from .typesetting import compile_collection, extract_problem_pdfs
@@ -129,10 +134,19 @@ def command_lint(args):
 
 def command_status(args):
     root, workspace = workspace_context(args)
+    workspace_hash = compute_workspace_hash(root, workspace)
+    collection_hash = compute_collection_hash(root, workspace)
     result = {}
     for entry in select_entries(workspace, args.problem):
         problem_dir, config = load_problem(root, entry)
-        result[entry["id"]] = problem_status(problem_dir, config, root, workspace)
+        result[entry["id"]] = problem_status(
+            problem_dir,
+            config,
+            root,
+            workspace,
+            workspace_hash=workspace_hash,
+            collection_hash=collection_hash,
+        )
     return {"ok": all(item["state"] == "current" for item in result.values()), "problems": result}
 
 

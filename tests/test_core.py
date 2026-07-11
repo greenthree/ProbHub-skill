@@ -7,7 +7,13 @@ from pathlib import Path
 from probhub.cli import build_parser, main as cli_main
 from probhub.hashing import hash_file
 from probhub.io import write_json, write_yaml
-from probhub.linting import compute_data_hash, compute_source_hash, lint_workspace, problem_status
+from probhub.linting import (
+    BUILD_MANIFEST_SCHEMA_VERSION,
+    compute_data_hash,
+    compute_source_hash,
+    lint_workspace,
+    problem_status,
+)
 from probhub.metadata import build_meta
 from probhub.workspace import load_problem, load_workspace, problem_entries
 
@@ -96,6 +102,7 @@ class CoreWorkspaceTests(unittest.TestCase):
             (problem / "problem.pdf").write_bytes(b"%PDF-1.4\n")
             (root / "A.zip").write_bytes(b"zip")
             manifest = {
+                "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
                 "source_hash": compute_source_hash(problem, config),
                 "data_hash": compute_data_hash(problem, config),
                 "pdf_hash": hash_file(problem / "problem.pdf"),
@@ -103,6 +110,15 @@ class CoreWorkspaceTests(unittest.TestCase):
             }
             write_json(problem / ".probhub/build-manifest.json", manifest)
             self.assertEqual(problem_status(problem, config)["state"], "current")
+
+            manifest["schema_version"] = 1
+            write_json(problem / ".probhub/build-manifest.json", manifest)
+            status = problem_status(problem, config)
+            self.assertEqual(status["state"], "stale")
+            self.assertEqual(status["stale_fields"], ["manifest_schema"])
+
+            manifest["schema_version"] = BUILD_MANIFEST_SCHEMA_VERSION
+            write_json(problem / ".probhub/build-manifest.json", manifest)
             with (problem / "problem.md").open("a", encoding="utf-8") as stream:
                 stream.write("\nchanged\n")
             status = problem_status(problem, config)

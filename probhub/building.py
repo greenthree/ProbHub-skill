@@ -6,7 +6,14 @@ from .errors import ProbHubError
 from .hashing import hash_file
 from .io import write_json
 from .judging import judge_problem
-from .linting import compute_data_hash, compute_source_hash, compute_workspace_hash, lint_workspace
+from .linting import (
+    BUILD_MANIFEST_SCHEMA_VERSION,
+    compute_collection_hash,
+    compute_data_hash,
+    compute_source_hash,
+    compute_workspace_hash,
+    lint_workspace,
+)
 from .package_tools import build_package, generate_domjudge_config, validate_output_validator_source, verify_package
 from .typesetting import compile_collection, extract_problem_pdfs
 from .workspace import load_problem
@@ -16,13 +23,20 @@ def load_selected(root, entries):
     return [load_problem(root, entry) for entry in entries]
 
 
-def write_manifest(root, workspace, problem_dir, config, package_path):
+def write_manifest(
+    problem_dir,
+    config,
+    package_path,
+    workspace_hash,
+    collection_hash,
+):
     manifest = {
-        "schema_version": 1,
+        "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
         "problem_id": config["id"],
         "source_hash": compute_source_hash(problem_dir, config),
         "data_hash": compute_data_hash(problem_dir, config),
-        "workspace_hash": compute_workspace_hash(root, workspace),
+        "workspace_hash": workspace_hash,
+        "collection_hash": collection_hash,
         "pdf_hash": hash_file(problem_dir / "problem.pdf"),
         "package_hash": hash_file(package_path),
         "built_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
@@ -67,6 +81,8 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
             }
             if not result["ok"]:
                 raise ProbHubError(f"sandbox failed for {config['id']}: {result.get('final')}")
+    workspace_hash = compute_workspace_hash(root, workspace)
+    collection_hash = compute_collection_hash(root, workspace)
     typst_dir, main_pdf, _ = compile_collection(root, workspace, normalized)
     target_ids = {config["id"] for _, config in selected}
     pdfs = extract_problem_pdfs(main_pdf, normalized, only_ids=target_ids)
@@ -74,7 +90,13 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
     for problem_dir, config in selected:
         package_path, verification = package_problem(root, problem_dir, config, require_pdf=True)
         packages[config["id"]] = {"path": str(package_path), "verification": verification}
-        manifests[config["id"]] = write_manifest(root, workspace, problem_dir, config, package_path)
+        manifests[config["id"]] = write_manifest(
+            problem_dir,
+            config,
+            package_path,
+            workspace_hash,
+            collection_hash,
+        )
     return {
         "ok": True,
         "typst_dir": str(typst_dir),

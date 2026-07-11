@@ -138,11 +138,15 @@ probhub status [ID...]
 
 状态：
 
-- `current`：规范源、数据、工作区、PDF、ZIP 与 Manifest 一致。
+- `current`：规范源、数据、工作区、整场排版输入、PDF、ZIP 与 Manifest 一致。
 - `stale`：至少一个哈希与 Manifest 不一致；读取 `stale_fields` 定位。
 - `never-built`：缺少 Manifest 或正式产物。
 
 `status` 非 `current` 时返回非零退出码。
+
+Manifest 中的 `collection_hash` 根据工作区/模板以及所有题目实际生成 Typst metadata 的输入计算。其他题的题面、样例、展示配置或题序变化可能改变当前题的页码、总页数或单题 PDF，因此会使当前题变为 `stale`；其他题仅修改不参与排版的 secret 数据不会使当前题过期。
+
+包含 `collection_hash` 的 Build Manifest 使用 schema v2。旧 v1 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
 
 ## 8. `judge`
 
@@ -358,6 +362,8 @@ probhub build [ID...] [--skip-judge] [--no-cache]
 6. 写入所选 `.probhub/build-manifest.json`。
 
 即使执行 `build L01`，也会为了题序与页码编译全卷，但只评测、提取、打包和更新 L01。
+
+执行 `build L01 L02 ...` 时，所选题目逐题评测，但完整 Typst 集合只编译一次。所有所选 Manifest 使用构建开始前同一份 `workspace_hash` 和 `collection_hash` 快照；构建期间规范排版输入发生变化时，后续 `status` 会报告 `collection_hash` 过期。
 
 选项：
 
