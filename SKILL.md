@@ -11,8 +11,9 @@ description: 当用户需要创作或维护算法竞赛题目、生成测试数�
 
 1. 从当前目录向上查找 `.probhub/workspace.yaml`。
 2. 找到时，必须使用 **Workspace Schema v1** 和 `probhub` CLI。
-3. 未找到时，才读取并执行 `references/legacy-workflow.md`。
-4. 不得混用两种模式：Schema v1 禁止手工维护 Legacy 元数据或构建产物。
+3. 创建、迁移、审查或修改 Schema v1 工作区时，必须先读取 `references/workspace-schema-v1.md`，再修改 `.probhub/workspace.yaml`、`probhub.yaml` 或目录结构。
+4. 未找到时，才读取并执行 `references/legacy-workflow.md`。
+5. 不得混用两种模式：Schema v1 禁止手工维护 Legacy 元数据或构建产物。
 
 # 2. Schema v1 的事实来源
 
