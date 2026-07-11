@@ -7,7 +7,7 @@
   sans: ("Microsoft YaHei", "simsun"),
   song: ("New Computer Modern Math", "Simsun"),
   zsong: ("STZhongSong", "STZhongSong"),
-  kaishu: ("FZKai-Z03",),
+  kaishu: ("KaiTi",),
   mono: ("New Computer Modern Mono","New Computer Modern Mono")
 )
 #set text(font: fonts.song)
