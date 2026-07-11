@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import BoundedSemaphore, Lock, Thread, Timer
 
 import yaml
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, request, render_template_string, send_file
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PACKAGE_ROOT = next(
@@ -49,6 +49,7 @@ from probhub.webui_workspace import (
     save_contest_config as save_schema_contest_config,
     save_editor_data,
     schema_workspace_for_subtitle,
+    statement_asset_path,
 )
 from probhub.workspace import load_workspace, problem_entries
 
@@ -1142,8 +1143,9 @@ HTML_TEMPLATE = r"""
                 tagDraft: '',
                 coverConfig: { title: '', subtitle: '', author: '', date: '', logo: 'usts.png', logo_width: '9cm', logo_space_above: '0em', logo_space_below: '0em' },
                 _saveTimer: null,
-                _savePromise: Promise.resolve(true),
+                _writerPromise: Promise.resolve(true),
                 _coverSaveTimer: null,
+                _coverDirty: false,
                 toast: { show: false, msg: '', isError: false },
 
                 toggleTheme() {
@@ -1331,27 +1333,48 @@ HTML_TEMPLATE = r"""
                     if (!this.currentSubtitle) return;
                     fetch(`/api/config/${encodeURIComponent(this.currentSubtitle)}`)
                         .then(res => res.json())
-                        .then(data => { if (data.success) this.coverConfig = data.config; });
+                        .then(data => {
+                            if (data.success) {
+                                this.coverConfig = data.config;
+                                this._coverDirty = false;
+                            }
+                        });
                 },
 
                 autoSaveCover() {
                     clearTimeout(this._coverSaveTimer);
+                    this._coverDirty = true;
                     this._coverSaveTimer = setTimeout(() => this.saveConfig(), 800);
                 },
 
                 saveConfig() {
-                    if (!this.currentSubtitle) return;
-                    fetch(`/api/config/${encodeURIComponent(this.currentSubtitle)}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(this.coverConfig)
-                    }).then(async res => ({ status: res.status, data: await res.json() })).then(({ status, data }) => {
-                        if (data.success) {
-                            this.coverConfig = data.config || this.coverConfig;
-                        } else if (status === 409) {
-                            this.showToast('封面保存冲突：工作区已被其他会话修改，请刷新后重试。', true, 8000);
+                    clearTimeout(this._coverSaveTimer);
+                    return this._queueWriter(() => this._performConfigSave());
+                },
+
+                async _performConfigSave() {
+                    if (!this.currentSubtitle || !this._coverDirty) return true;
+                    try {
+                        const result = await this._postWriterJson(
+                            `/api/config/${encodeURIComponent(this.currentSubtitle)}`,
+                            this.coverConfig
+                        );
+                        if (result.data.success) {
+                            this.coverConfig = result.data.config || this.coverConfig;
+                            this._coverDirty = false;
+                            return true;
                         }
-                    });
+                        const message = result.data.code === 'source_conflict'
+                            ? '封面保存冲突：工作区已被其他会话修改，请刷新后重试。'
+                            : (result.data.code === 'build_busy'
+                                ? '其他 ProbHub 写操作仍在进行，请稍后重试。'
+                                : (result.data.error || '封面保存失败'));
+                        this.showToast(message, true, 8000);
+                        return false;
+                    } catch (_) {
+                        this.showToast('封面保存请求失败，请确认 WebUI 服务仍在运行。', true, 8000);
+                        return false;
+                    }
                 },
 
                 // ── Dashboard stats ─────────────────────────────────────────
@@ -1717,6 +1740,25 @@ HTML_TEMPLATE = r"""
                         return;
                     }
                     el.innerHTML = marked.parse(text);
+                    const problemId = this.problems[this.selectedIdx]?._id;
+                    if (problemId && this.currentSubtitle) {
+                        const base = new URL(`/workspace/${encodeURIComponent(problemId)}/`, window.location.origin);
+                        el.querySelectorAll('img[src]').forEach(img => {
+                            const source = img.getAttribute('src') || '';
+                            if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(source)) return;
+                            const resolved = new URL(source, base);
+                            const prefix = `/workspace/${encodeURIComponent(problemId)}/`;
+                            if (!resolved.pathname.startsWith(prefix)) return;
+                            let asset;
+                            try {
+                                asset = resolved.pathname.slice(prefix.length).split('/').map(decodeURIComponent);
+                            } catch (_) {
+                                return;
+                            }
+                            if (!asset.length || asset.some(part => !part || part === '.' || part === '..')) return;
+                            img.src = `/api/problem-assets/${encodeURIComponent(this.currentSubtitle)}/${encodeURIComponent(problemId)}/${asset.map(encodeURIComponent).join('/')}`;
+                        });
+                    }
                     if (window.MathJax && window.MathJax.typesetPromise) {
                         MathJax.typesetClear([el]);
                         MathJax.typesetPromise([el]).catch(err => console.error('MathJax:', err));
@@ -1748,34 +1790,61 @@ HTML_TEMPLATE = r"""
                 },
 
                 _queueSave() {
-                    this._savePromise = this._savePromise.then(() => this._performSave());
-                    return this._savePromise;
+                    return this._queueWriter(() => this._performSave());
                 },
 
-                _performSave() {
+                _queueWriter(operation) {
+                    const queued = this._writerPromise.then(operation, operation);
+                    this._writerPromise = queued.catch(() => false);
+                    return queued;
+                },
+
+                async _postWriterJson(url, payload, retries = 4) {
+                    for (let attempt = 0; ; attempt++) {
+                        const response = await fetch(url, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+                        let data;
+                        try {
+                            data = await response.json();
+                        } catch (_) {
+                            data = { success: false, error: `HTTP ${response.status}` };
+                        }
+                        if (data.code !== 'build_busy' || attempt >= retries) {
+                            return { ok: response.ok, status: response.status, data };
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 250 * (2 ** attempt)));
+                    }
+                },
+
+                async _performSave() {
                     if (!this.currentSubtitle) return Promise.resolve(false);
                     const subtitle = this.currentSubtitle;
                     const payload = JSON.parse(JSON.stringify(this.problems));
                     this.saveStatus = 'saving';
-                    return fetch('/api/data', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ subtitle, problems: payload })
-                    }).then(async res => ({ ok: res.ok, status: res.status, data: await res.json() })).then(({ status, data }) => {
+                    try {
+                        const { data } = await this._postWriterJson('/api/data', { subtitle, problems: payload });
                         if (data.success) {
                             if (subtitle !== this.currentSubtitle) return true;
                             if (Array.isArray(data.problems)) this._mergeSavedMetadata(data.problems);
                             this.saveStatus = 'saved';
                             setTimeout(() => { if (this.saveStatus === 'saved') this.saveStatus = ''; }, 2500);
                             return true;
-                        } else {
-                            this.saveStatus = 'error';
-                            const message = status === 409
-                                ? '保存冲突：题目已被其他会话修改，请刷新后重试。'
-                                : (data.error || '保存失败');
-                            this.showToast(message, true, 8000);
-                            return false;
                         }
-                    }).catch(() => { this.saveStatus = 'error'; return false; });
+                        this.saveStatus = 'error';
+                        const message = data.code === 'source_conflict'
+                            ? '保存冲突：题目已被其他会话修改，请刷新后重试。'
+                            : (data.code === 'build_busy'
+                                ? '其他 ProbHub 写操作仍在进行，请稍后重试。'
+                                : (data.error || '保存失败'));
+                        this.showToast(message, true, 8000);
+                        return false;
+                    } catch (_) {
+                        this.saveStatus = 'error';
+                        return false;
+                    }
                 },
 
                 doSave() {
@@ -1786,50 +1855,62 @@ HTML_TEMPLATE = r"""
                 async compilePDF() {
                     if (!this.currentSubtitle) return;
                     clearTimeout(this._saveTimer);
-                    if (!(await this.doSave())) return;
+                    clearTimeout(this._coverSaveTimer);
                     this.isCompiling = true;
-                    fetch('/api/compile', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ subtitle: this.currentSubtitle })
-                    }).then(res => res.json()).then(data => {
-                        this.isCompiling = false;
-                        if (data.success) {
-                            this.pdfRefresh = Date.now();
-                            this.loadPdfPages();
-                            this.showToast(`[${this.currentSubtitle}] Typst compile OK`);
-                        } else {
+                    return this._queueWriter(async () => {
+                        if (!(await this._performSave()) || !(await this._performConfigSave())) {
+                            this.isCompiling = false;
+                            return false;
+                        }
+                        try {
+                            const { data } = await this._postWriterJson('/api/compile', { subtitle: this.currentSubtitle });
+                            this.isCompiling = false;
+                            if (data.success) {
+                                this.pdfRefresh = Date.now();
+                                this.loadPdfPages();
+                                this.showToast(`[${this.currentSubtitle}] Typst compile OK`);
+                                return true;
+                            }
                             const message = data.message || data.error || 'Typst 编译失败';
                             const suggestion = data.suggestion ? `建议：${data.suggestion}` : '建议：查看终端中的 Typst 报错定位具体语法位置。';
                             this.showToast(`${message}。${suggestion}`, true, 8000);
+                            return false;
+                        } catch (_) {
+                            this.isCompiling = false;
+                            this.showToast('编译请求失败。建议：确认 ui.py 服务仍在运行，并检查终端日志。', true, 8000);
+                            return false;
                         }
-                    }).catch(() => {
-                        this.isCompiling = false;
-                        this.showToast('编译请求失败。建议：确认 ui.py 服务仍在运行，并检查终端日志。', true, 8000);
                     });
                 },
                 async distributePDFs() {
                     if (!this.currentSubtitle) return;
                     clearTimeout(this._saveTimer);
-                    if (!(await this.doSave())) return;
+                    clearTimeout(this._coverSaveTimer);
                     this.isDistributing = true;
-                    fetch('/api/distribute', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ subtitle: this.currentSubtitle })
-                    }).then(res => res.json()).then(data => {
-                        this.isDistributing = false;
-                        if (data.success) {
-                            let msg = `[${this.currentSubtitle}] PDF distribution done`;
-                            if (data.distributed && data.distributed.length > 0) {
-                                let ok = data.distributed.filter(d => d.status === 'ok').length;
-                                let zipUpdated = data.distributed.filter(d => d.zip === 'updated').length;
-                                msg += ` — ${ok}/${data.distributed.length} PDFs extracted`;
-                                if (zipUpdated > 0) msg += `, ${zipUpdated} zip(s) updated`;
+                    return this._queueWriter(async () => {
+                        if (!(await this._performSave()) || !(await this._performConfigSave())) {
+                            this.isDistributing = false;
+                            return false;
+                        }
+                        try {
+                            const { data } = await this._postWriterJson('/api/distribute', { subtitle: this.currentSubtitle });
+                            this.isDistributing = false;
+                            if (data.success) {
+                                let msg = `[${this.currentSubtitle}] PDF distribution done`;
+                                if (data.distributed && data.distributed.length > 0) {
+                                    let ok = data.distributed.filter(d => d.status === 'ok').length;
+                                    let zipUpdated = data.distributed.filter(d => d.zip === 'updated').length;
+                                    msg += ` — ${ok}/${data.distributed.length} PDFs extracted`;
+                                    if (zipUpdated > 0) msg += `, ${zipUpdated} zip(s) updated`;
+                                }
+                                this.showToast(msg);
+                                return true;
                             }
-                            this.showToast(msg);
-                        } else {
-                            this.showToast('Distribution failed', true);
+                            this.showToast(data.error || 'Distribution failed', true);
+                            return false;
+                        } catch (_) {
+                            this.isDistributing = false;
+                            return false;
                         }
                     });
                 },
@@ -1881,6 +1962,18 @@ def get_data():
         print(f"[-] Data Load Error: {e}")
         return jsonify([])
 
+
+@app.route('/api/problem-assets/<subtitle>/<problem_id>/<path:asset_path>', methods=['GET'])
+def get_problem_asset(subtitle, problem_id, asset_path):
+    try:
+        schema = _schema_workspace(subtitle)
+        if schema is None:
+            return "Not found", 404
+        root, workspace = schema
+        return send_file(statement_asset_path(root, workspace, problem_id, asset_path))
+    except (ProbHubError, OSError, ValueError):
+        return "Not found", 404
+
 @app.route('/api/data', methods=['POST'])
 def save_data():
     payload = request.json
@@ -1912,7 +2005,7 @@ def save_data():
         sync_problem_limits_to_files(new_data)
         return jsonify({"success": True})
     except ProbHubError as e:
-        status = 409 if e.code == "source_conflict" else 400
+        status = 409 if e.code in {"source_conflict", "build_busy"} else 400
         return jsonify({"success": False, "error": str(e), "code": e.code}), status
     except Exception as e:
         print(f"[-] Save Data Error: {e}")
@@ -2969,7 +3062,7 @@ def save_contest_config(subtitle):
         _write_contest_config(subtitle, config)
         return jsonify({"success": True})
     except ProbHubError as e:
-        status = 409 if e.code == "source_conflict" else 400
+        status = 409 if e.code in {"source_conflict", "build_busy"} else 400
         return jsonify({"success": False, "error": str(e), "code": e.code}), status
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})

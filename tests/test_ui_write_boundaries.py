@@ -48,6 +48,8 @@ class UiWriteBoundaryTests(unittest.TestCase):
             "## 输入格式\n\nInput.\n\n## 输出格式\n\nOutput.\n",
             encoding="utf-8",
         )
+        (problem / "diagram.png").write_bytes(b"fixture image")
+        (problem / "code/hidden.png").write_bytes(b"not a statement asset")
         (problem / "data/sample/1.in").write_text("1\n", encoding="utf-8")
         (problem / "data/sample/1.ans").write_text("1\n", encoding="utf-8")
         (problem / "data/secret/1.in").write_text("2\n", encoding="utf-8")
@@ -106,6 +108,17 @@ class UiWriteBoundaryTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/data?subtitle=Contest").status_code, 200)
         self.assertEqual(self.client.get("/api/config/Contest").status_code, 200)
         self.assertEqual(self.client.get("/api/pdf-pages/Contest").status_code, 200)
+        self.assertEqual(self.file_state(), before)
+
+    def test_schema_statement_assets_are_served_read_only_with_path_boundaries(self):
+        before = self.file_state()
+        response = self.client.get("/api/problem-assets/Contest/A/diagram.png")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"fixture image")
+        response.close()
+        self.assertEqual(self.client.get("/api/problem-assets/Contest/A/code/hidden.png").status_code, 404)
+        self.assertEqual(self.client.get("/api/problem-assets/Contest/A/problem.md").status_code, 404)
+        self.assertEqual(self.client.get("/api/problem-assets/Contest/A/%2E%2E/outside.png").status_code, 404)
         self.assertEqual(self.file_state(), before)
 
     def test_schema_cover_save_updates_workspace_without_touching_typst_sources(self):
@@ -246,6 +259,17 @@ class UiWriteBoundaryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["code"], "build_busy")
 
+    def test_schema_save_reports_writer_conflict_as_http_409(self):
+        payload = self.load_payload()
+        with mock.patch.object(
+            self.ui,
+            "workspace_build_lock",
+            side_effect=self.ui.ProbHubError("busy", code="build_busy"),
+        ):
+            response = self.client.post("/api/data", json={"subtitle": "Contest", "problems": payload})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "build_busy")
+
     def test_schema_sandbox_selection_uses_workspace_id_not_generated_meta(self):
         info = self.ui._sandbox_problem_info("Contest", 0)
         self.assertTrue(info["matched"])
@@ -257,8 +281,10 @@ class UiWriteBoundaryTests(unittest.TestCase):
         self.assertIn('html[data-theme="light"]', html)
         self.assertIn('html[data-theme="dark"]', html)
         self.assertIn('data-testid="cover-preview"', html)
-        self.assertIn("fetch('/api/compile'", html)
-        self.assertIn("fetch('/api/distribute'", html)
+        self.assertIn("_postWriterJson('/api/compile'", html)
+        self.assertIn("_postWriterJson('/api/distribute'", html)
+        self.assertIn("_queueWriter(operation)", html)
+        self.assertIn("/api/problem-assets/", html)
 
 
 if __name__ == "__main__":

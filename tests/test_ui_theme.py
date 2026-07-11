@@ -59,8 +59,8 @@ class UiThemeTests(unittest.TestCase):
         self.assertIn("rgb(var(--ink-bg) / <alpha-value>)", html)
         self.assertIn('x-data="probhub()"', html)
         self.assertIn("fetch('/api/subtitles')", html)
-        self.assertIn("fetch('/api/compile'", html)
-        self.assertIn("fetch('/api/distribute'", html)
+        self.assertIn("_postWriterJson('/api/compile'", html)
+        self.assertIn("_postWriterJson('/api/distribute'", html)
         self.assertIn("fetch('/api/submission/run'", html)
 
     def test_pdf_preview_renders_into_process_temp_cache(self):
