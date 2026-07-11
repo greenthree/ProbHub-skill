@@ -4,12 +4,12 @@ import json
 import os
 import re
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
 from .errors import ProbHubError
-from .linting import lint_workspace
+from .linting import STATEMENT_ASSET_IGNORED_DIRS, STATEMENT_ASSET_SUFFIXES, lint_workspace
 from .metadata import build_meta, natural_key
 from .statement import render_statement
 from .workspace import WORKSPACE_FILE, load_problem, load_workspace, problem_entries
@@ -25,6 +25,35 @@ def schema_workspace_for_subtitle(root, subtitle):
     if subtitle and typst_dir.name != subtitle:
         return None
     return loaded_root, workspace
+
+
+def statement_asset_path(root, workspace, problem_id, asset_path):
+    root = Path(root).resolve()
+    entry = next((item for item in problem_entries(workspace) if item["id"] == problem_id), None)
+    if entry is None or not isinstance(asset_path, str) or not asset_path.strip() or "\\" in asset_path:
+        raise ProbHubError("statement asset not found", code="statement_asset_not_found")
+    problem_dir, _ = load_problem(root, entry)
+    relative = PurePosixPath(asset_path)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ProbHubError("invalid statement asset path", code="invalid_asset_path")
+    unresolved = problem_dir.joinpath(*relative.parts)
+    cursor = problem_dir
+    for part in relative.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise ProbHubError("statement asset not found", code="statement_asset_not_found")
+    candidate = unresolved.resolve()
+    try:
+        candidate_relative = candidate.relative_to(problem_dir)
+    except ValueError as exc:
+        raise ProbHubError("statement asset path escapes the problem directory", code="invalid_asset_path") from exc
+    if (
+        not candidate.is_file()
+        or candidate.suffix.lower() not in STATEMENT_ASSET_SUFFIXES
+        or any(part in STATEMENT_ASSET_IGNORED_DIRS for part in candidate_relative.parts[:-1])
+    ):
+        raise ProbHubError("statement asset not found", code="statement_asset_not_found")
+    return candidate
 
 
 def _hash_files(root, paths):
