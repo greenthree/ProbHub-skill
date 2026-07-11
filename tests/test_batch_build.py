@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from probhub.build_lock import workspace_build_lock
 from probhub.building import build_workspace
 from probhub.cli import command_status
 from probhub.errors import ProbHubError
+from probhub.hashing import hash_file
 from probhub.io import write_yaml
 from probhub.linting import problem_status
 from probhub.workspace import load_problem, load_workspace, problem_entries
@@ -161,6 +163,90 @@ class BatchBuildTests(unittest.TestCase):
                         problem_status(problem_dir, config, root, workspace)["state"],
                         "current",
                     )
+
+    def test_build_publishes_compiled_binaries_with_matching_cache_entries(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+
+            def fake_judge(root, problem_dir, use_cache=True):
+                binary = problem_dir / "code/std.exe"
+                binary.write_bytes(b"compiled-" + problem_dir.name.encode("ascii"))
+                compile_entries = {
+                    "code/std.cpp": {
+                        "fingerprint": "fixture",
+                        "binary_digest": hash_file(binary),
+                    },
+                    "code/missing.cpp": {
+                        "fingerprint": "missing",
+                        "binary_digest": "0" * 64,
+                    },
+                    "../escape.cpp": {
+                        "fingerprint": "escape",
+                        "binary_digest": hash_file(binary),
+                    },
+                    "C:/escape.cpp": {
+                        "fingerprint": "drive",
+                        "binary_digest": hash_file(binary),
+                    },
+                    "..\\escape.cpp": {
+                        "fingerprint": "backslash",
+                        "binary_digest": hash_file(binary),
+                    },
+                }
+                cache_path = problem_dir / ".probhub/sandbox-cache-v1.json"
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(
+                    json.dumps({
+                        "schema_version": 2,
+                        "compile": compile_entries,
+                        "validator": {},
+                        "case": {},
+                    }),
+                    encoding="utf-8",
+                )
+                return {
+                    "ok": True,
+                    "returncode": 0,
+                    "final": {"type": "final", "status": "passed", "code": "all_expectations_met"},
+                }
+
+            def fake_extract(main_pdf, loaded, only_ids=None):
+                outputs = {}
+                for problem_dir, config in loaded:
+                    if only_ids and config["id"] not in only_ids:
+                        continue
+                    output = problem_dir / "problem.pdf"
+                    output.write_bytes(b"%PDF-1.4\n" + config["id"].encode("ascii"))
+                    outputs[config["id"]] = {"path": str(output), "pages": 1}
+                return outputs
+
+            with (
+                patch("probhub.building.judge_problem", side_effect=fake_judge),
+                patch(
+                    "probhub.building.compile_collection",
+                    side_effect=lambda root, workspace, loaded: self.write_compiled_fixture(root, loaded),
+                ),
+                patch("probhub.building.extract_problem_pdfs", side_effect=fake_extract),
+                patch("probhub.building.package_problem", side_effect=self.write_package_fixture),
+            ):
+                build_workspace(root, workspace, entries)
+
+            for entry in entries:
+                problem_dir, _ = load_problem(root, entry)
+                with self.subTest(problem_id=entry["id"]):
+                    binary = problem_dir / "code/std.exe"
+                    self.assertEqual(
+                        binary.read_bytes(),
+                        b"compiled-" + entry["id"].encode("ascii"),
+                    )
+                    cache = json.loads(
+                        (problem_dir / ".probhub/sandbox-cache-v1.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    self.assertEqual(list(cache["compile"]), ["code/std.cpp"])
+            self.assertFalse((root.parent / "escape.exe").exists())
 
     def test_collection_hash_tracks_other_problem_typeset_inputs_only(self):
         with tempfile.TemporaryDirectory() as temp:

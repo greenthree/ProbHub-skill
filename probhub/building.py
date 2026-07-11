@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import shutil
 import tempfile
@@ -6,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import __version__
 from .build_lock import workspace_build_lock
@@ -348,6 +349,20 @@ def _publish_output_validators(source, destination):
         ) from exc
 
 
+def _cached_binary_relative(cache_key):
+    if not isinstance(cache_key, str) or "\\" in cache_key:
+        return None
+    path = PurePosixPath(cache_key)
+    if path.is_absolute() or not path.parts or any(
+        part in {"", ".", ".."} for part in path.parts
+    ):
+        return None
+    relative = Path(*path.parts).with_suffix(".exe")
+    if relative.is_absolute() or relative.drive:
+        return None
+    return relative
+
+
 def _publish_cache(source_problem, destination_problem):
     source = source_problem / ".probhub/sandbox-cache-v1.json"
     if not source.is_file():
@@ -359,9 +374,50 @@ def _publish_cache(source_problem, destination_problem):
     )
     try:
         try:
-            shutil.copyfile(source, temporary)
+            cache = json.loads(source.read_text(encoding="utf-8"))
+            compile_entries = cache.get("compile")
+            if not isinstance(compile_entries, dict):
+                compile_entries = {}
+            published_compile = {}
+            source_root = source_problem.resolve()
+            destination_root = destination_problem.resolve()
+            for cache_key, entry in compile_entries.items():
+                relative = _cached_binary_relative(cache_key)
+                if relative is None or not isinstance(entry, dict):
+                    continue
+                staged_binary = source_problem / relative
+                expected_digest = entry.get("binary_digest")
+                if (
+                    not staged_binary.is_file()
+                    or not isinstance(expected_digest, str)
+                    or hash_file(staged_binary) != expected_digest
+                ):
+                    continue
+                live_binary = destination_problem / relative
+                try:
+                    staged_binary.resolve().relative_to(source_root)
+                    live_binary.resolve().relative_to(destination_root)
+                except ValueError:
+                    continue
+                live_binary.parent.mkdir(parents=True, exist_ok=True)
+                binary_temporary = live_binary.with_name(
+                    live_binary.name + f".{uuid.uuid4().hex}.tmp"
+                )
+                try:
+                    shutil.copyfile(staged_binary, binary_temporary)
+                    os.replace(binary_temporary, live_binary)
+                finally:
+                    if binary_temporary.exists():
+                        binary_temporary.unlink()
+                published_compile[cache_key] = entry
+
+            cache["compile"] = published_compile
+            temporary.write_text(
+                json.dumps(cache, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
             os.replace(temporary, destination)
-        except OSError:
+        except (OSError, ValueError, TypeError):
             pass
     finally:
         if temporary.exists():
