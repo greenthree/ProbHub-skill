@@ -11,6 +11,7 @@ from .workspace import load_problem, problem_entries
 
 DEFAULT_FORBIDDEN = ("TODO", "FIXME", "114514", "待补充")
 BUILD_MANIFEST_SCHEMA_VERSION = 2
+TYPST_LENGTH_PATTERN = re.compile(r"^-?(?:\d+(?:\.\d+)?|\.\d+)(?:pt|mm|cm|in|em|fr|%)$")
 STATEMENT_ASSET_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
 STATEMENT_ASSET_IGNORED_DIRS = {
     ".preview",
@@ -378,6 +379,19 @@ def lint_workspace(root, workspace, selected=None):
     ids = [entry["id"] for entry in problem_entries(workspace)]
     duplicate_ids = sorted({item for item in ids if ids.count(item) > 1})
     errors = [f"duplicate problem id: {item}" for item in duplicate_ids]
+    cover = ((workspace.get("typst") or {}).get("cover") or {})
+    if not isinstance(cover, dict):
+        errors.append("typst.cover must be a mapping")
+    else:
+        logo = cover.get("logo")
+        if logo is not None:
+            logo_path = Path(str(logo))
+            if logo_path.is_absolute() or ".." in logo_path.parts:
+                errors.append("typst.cover.logo must stay inside the Typst directory")
+        for field in ("logo_width", "logo_space_above", "logo_space_below"):
+            value = cover.get(field)
+            if value is not None and not TYPST_LENGTH_PATTERN.fullmatch(str(value).strip()):
+                errors.append(f"typst.cover.{field} must be a Typst length")
     return {"ok": not errors and all(item["ok"] for item in results), "errors": errors, "problems": results}
 
 
