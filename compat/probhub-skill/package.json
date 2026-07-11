@@ -1,6 +1,6 @@
 {
   "name": "probhub-skill",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Lightweight ProbHub command package that delegates to the complete probhub package.",
   "main": "bin/init.js",
   "bin": {
@@ -28,7 +28,7 @@
   },
   "homepage": "https://github.com/greenthree/ProbHub-skill#readme",
   "dependencies": {
-    "probhub": "0.3.4"
+    "probhub": "0.3.5"
   },
   "files": [
     "bin/*.js",
