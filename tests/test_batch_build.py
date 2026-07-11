@@ -534,12 +534,12 @@ class BatchBuildTests(unittest.TestCase):
                     raise PermissionError(13, "in use")
                 return real_open(path, flags)
 
-            with (
-                patch("probhub.building.os.name", "nt"),
-                patch("probhub.building.os.open", side_effect=locked_open),
+            with patch(
+                "probhub.building.os.open",
+                side_effect=locked_open,
             ):
                 with self.assertRaises(ProbHubError) as raised:
-                    _assert_publish_targets_available(plan)
+                    _assert_publish_targets_available(plan, platform_name="nt")
 
             self.assertEqual(raised.exception.code, "artifact_busy")
             self.assertIn(str(target), str(raised.exception))

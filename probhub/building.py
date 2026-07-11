@@ -447,8 +447,8 @@ def _publish_targets(plan):
     return targets
 
 
-def _assert_publish_targets_available(plan):
-    if os.name != "nt":
+def _assert_publish_targets_available(plan, platform_name=None):
+    if (platform_name or os.name) != "nt":
         return
 
     locked = []
