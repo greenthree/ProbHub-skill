@@ -26,13 +26,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 
 ## 快速安装
 
-只需临时注入 Skill 时，可以继续使用兼容包提供的经典命令：
-
-```bash
-npx probhub-skill
-```
-
-若需要持久的 `probhub` CLI，推荐全局安装完整主包后再执行 Skill 注入：
+若需要持久的 `probhub` CLI，安装完整主包后执行 Skill 注入：
 
 ```bash
 npm install -g probhub
@@ -40,16 +34,13 @@ probhub-skill
 probhub --version
 ```
 
-`probhub` 是包含 Python Core、CLI、WebUI、Skill 和 references 的唯一完整主包；`probhub-skill` 是同版本的轻量兼容包，只把既有命令转发到 `probhub`。因此旧命令仍然可用，但功能实现不会维护两份。
-
-旧的全局安装方式也继续兼容：
+只需临时注入 Skill 时，使用轻量入口包：
 
 ```bash
-npm install -g probhub-skill
-probhub --version
+npx probhub-skill
 ```
 
-不建议同时全局安装两个包，因为它们都会注册 `probhub` 与 `probhub-skill` 命令。需要切换时先卸载另一个包。
+`probhub` 包含 Python Core、CLI、WebUI、Skill 和 references；`probhub-skill` 依赖相同版本的 `probhub` 并提供命令转发，不复制功能实现。
 
 安装脚本会把 skill 注入到两个常见 Agent 目录：
 
@@ -69,12 +60,6 @@ npx probhub-skill --local
 ```text
 ./.claude/skills/probhub
 ./.agents/skills/probhub
-```
-
-也可以通过社区 Skills 框架安装，但目前更推荐本项目脚手架，因为它会复制完整脚本和参考文件：
-
-```bash
-npx skills add greenthree/ProbHub-skill
 ```
 
 ---
@@ -461,7 +446,7 @@ ProbHub-skill/
 │   ├── init.js               # Skill 注入入口（probhub-skill）
 │   └── probhub.js            # CLI 入口（probhub）
 ├── compat/
-│   └── probhub-skill/        # 旧 npm 包名的轻量转发兼容包
+│   └── probhub-skill/        # 轻量 npm 命令转发包
 ├── references/
 │   ├── cli.md                # Workspace Schema v1 完整 CLI 手册
 │   ├── checker-interactor.md # Checker 与交互题协议和模板
@@ -493,7 +478,7 @@ ProbHub-skill/
 从 `0.3.3` 开始同时维护两个 npm package：
 
 - `probhub`：完整主包，是 Core、CLI、WebUI、Skill 与 references 的唯一事实来源；
-- `probhub-skill`：轻量兼容包，依赖完全相同版本的 `probhub`，保留 `npx probhub-skill` 和旧全局安装方式。
+- `probhub-skill`：轻量入口包，依赖完全相同版本的 `probhub`，提供 `npx probhub-skill` 安装入口。
 
 发布前执行：
 
@@ -506,7 +491,7 @@ npm publish --dry-run
 Pop-Location
 ```
 
-正式发布必须先发布主包，再发布兼容包：
+正式发布必须先发布主包，再发布入口包：
 
 ```powershell
 npm publish
@@ -517,7 +502,7 @@ Pop-Location
 npm view probhub-skill@0.3.3 version
 ```
 
-两个包的版本必须一致，兼容包的 `dependencies.probhub` 必须锁定精确版本，不能使用 `^` 或 `~`。不要在兼容包中复制 Python Core、WebUI、Skill 或 references。
+两个包的版本必须一致，入口包的 `dependencies.probhub` 必须锁定精确版本，不能使用 `^` 或 `~`。不要在入口包中复制 Python Core、WebUI、Skill 或 references。
 
 ---
 
