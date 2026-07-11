@@ -125,6 +125,23 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(status["state"], "stale")
             self.assertIn("source_hash", status["stale_fields"])
 
+    def test_source_hash_tracks_problem_statement_assets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            assets = problem / "assets"
+            assets.mkdir()
+            image = assets / "diagram.png"
+            image.write_bytes(b"first image")
+            with (problem / "problem.md").open("a", encoding="utf-8") as stream:
+                stream.write("\n![diagram](assets/diagram.png)\n")
+
+            root, workspace = load_workspace(root)
+            _, config = load_problem(root, problem_entries(workspace)[0])
+            first_hash = compute_source_hash(problem, config)
+            image.write_bytes(b"second image")
+            self.assertNotEqual(first_hash, compute_source_hash(problem, config))
+
     def test_lint_validates_custom_checker_and_interactor_configuration(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

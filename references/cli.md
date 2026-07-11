@@ -144,7 +144,7 @@ probhub status [ID...]
 
 `status` 非 `current` 时返回非零退出码。
 
-Manifest 中的 `collection_hash` 根据工作区/模板以及所有题目实际生成 Typst metadata 的输入计算。其他题的题面、样例、展示配置或题序变化可能改变当前题的页码、总页数或单题 PDF，因此会使当前题变为 `stale`；其他题仅修改不参与排版的 secret 数据不会使当前题过期。
+Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以及所有题目实际生成 Typst metadata 的输入计算。其他题的题面、题面图片、样例、展示配置或题序变化可能改变当前题的页码、总页数或单题 PDF，因此会使当前题变为 `stale`；其他题仅修改不参与排版的 secret 数据不会使当前题过期。
 
 包含 `collection_hash` 的 Build Manifest 使用 schema v2。旧 v1 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
 

@@ -11,6 +11,15 @@ from .workspace import load_problem, problem_entries
 
 DEFAULT_FORBIDDEN = ("TODO", "FIXME", "114514", "待补充")
 BUILD_MANIFEST_SCHEMA_VERSION = 2
+STATEMENT_ASSET_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
+STATEMENT_ASSET_IGNORED_DIRS = {
+    ".preview",
+    ".probhub",
+    "__pycache__",
+    "code",
+    "data",
+    "output_validators",
+}
 
 
 def _problem_relative_path(problem_dir, value):
@@ -23,6 +32,29 @@ def _problem_relative_path(problem_dir, value):
     except ValueError:
         return None
     return candidate
+
+
+def problem_statement_asset_paths(problem_dir):
+    problem_dir = Path(problem_dir).resolve()
+    paths = []
+    for path in problem_dir.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        relative = path.relative_to(problem_dir)
+        if any(part in STATEMENT_ASSET_IGNORED_DIRS for part in relative.parts[:-1]):
+            continue
+        if path.suffix.lower() in STATEMENT_ASSET_SUFFIXES:
+            paths.append(path)
+    return paths
+
+
+def compute_statement_assets_hash(problem_dir):
+    problem_dir = Path(problem_dir).resolve()
+    relative_paths = [
+        path.relative_to(problem_dir)
+        for path in problem_statement_asset_paths(problem_dir)
+    ]
+    return hash_paths(problem_dir, relative_paths)[0]
 
 
 def problem_source_paths(problem_dir, config):
@@ -49,6 +81,7 @@ def problem_source_paths(problem_dir, config):
             candidate = _problem_relative_path(problem_dir, stress.get(key))
             if candidate:
                 paths.append(candidate)
+    paths.extend(problem_statement_asset_paths(problem_dir))
     return paths
 
 
@@ -85,6 +118,7 @@ def compute_collection_hash(root, workspace):
         snapshot["problems"].append({
             "id": config["id"],
             "metadata": build_meta(problem_dir, config),
+            "statement_assets_hash": compute_statement_assets_hash(problem_dir),
         })
     payload = json.dumps(
         snapshot,

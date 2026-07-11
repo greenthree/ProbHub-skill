@@ -160,6 +160,8 @@ All problem-local C++ sources and locally compiled executables live under `code/
 <problem>/
 ├── probhub.yaml
 ├── problem.md
+├── assets/
+│   └── diagram.png
 ├── code/
 │   ├── std.cpp
 │   ├── brute.cpp
@@ -178,6 +180,8 @@ All problem-local C++ sources and locally compiled executables live under `code/
 ```
 
 `checker.cpp`, `interactor.cpp`, auxiliary solutions, and diagnostic C++ programs also belong in `code/`. Generated DOMjudge validator files remain under `output_validators/` because that directory is part of the package format rather than the source-code workspace.
+
+题面图片等媒体资源优先放在 `assets/`。Core 也会跟踪题目目录内、且不位于 `code/`、`data/`、`.probhub/` 或生成目录中的常见图片文件；修改这些文件会使本题 source hash 和整场 collection hash 过期。
 
 ## Statement file
 

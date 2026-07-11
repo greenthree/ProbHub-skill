@@ -22,6 +22,7 @@ description: 当用户需要创作或维护算法竞赛题目、生成测试数�
 | 赛事信息、Typst 集合、稳定题序 | `.probhub/workspace.yaml` |
 | 题目 ID、题名、限制、代码矩阵、数据路径 | `<题目>/probhub.yaml` |
 | 描述、输入、输出、提示 | `<题目>/problem.md` |
+| 题面图片等媒体资源 | `<题目>/assets/` 或题目目录内的常见图片文件 |
 | 样例 | `<题目>/data/sample/*.in` 与 `.ans` |
 | 隐藏数据 | `<题目>/data/secret/*.in` 与 `.ans` |
 | C++ 源码和本地可执行文件 | `<题目>/code/` |
@@ -155,7 +156,7 @@ probhub build L01 --skip-judge
    probhub build <ID> --no-cache
    ```
 
-8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 验证成功且 `status` 为 `current` 时才可交付。Manifest 的 `collection_hash` 会跟踪整场排版输入；其他题题面、样例、题序或模板变化后，受影响题目也必须重新构建。
+8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 验证成功且 `status` 为 `current` 时才可交付。Manifest 的 `collection_hash` 会跟踪整场排版输入；其他题题面、题面媒体、样例、题序或模板变化后，受影响题目也必须重新构建。
 
 # 5. 出题内容要求
 

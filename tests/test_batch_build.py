@@ -45,11 +45,11 @@ class BatchBuildTests(unittest.TestCase):
 
     def create_workspace(self, root):
         (root / ".probhub").mkdir(parents=True)
-        (root / "typst").mkdir()
-        (root / "typst/main.typ").write_text("// fixture\n", encoding="utf-8")
+        (root / "typst/contest").mkdir(parents=True)
+        (root / "typst/contest/main.typ").write_text("// fixture\n", encoding="utf-8")
         write_yaml(root / ".probhub/workspace.yaml", {
             "schema_version": 1,
-            "typst": {"directory": "typst"},
+            "typst": {"directory": "typst/contest"},
             "problems": [
                 {"id": "A", "directory": "A"},
                 {"id": "B", "directory": "B"},
@@ -72,9 +72,9 @@ class BatchBuildTests(unittest.TestCase):
                 }
 
             def fake_compile(root, workspace, loaded):
-                main_pdf = root / "typst/main.pdf"
+                main_pdf = root / "typst/contest/main.pdf"
                 main_pdf.write_bytes(b"%PDF-1.4\n")
-                return root / "typst", main_pdf, []
+                return root / "typst/contest", main_pdf, []
 
             def fake_extract(main_pdf, loaded, only_ids=None):
                 outputs = {}
@@ -134,11 +134,19 @@ class BatchBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root, workspace = self.create_workspace(Path(temp))
             entries = problem_entries(workspace)
+            problem_b, _ = load_problem(root, entries[1])
+            assets = problem_b / "assets"
+            assets.mkdir()
+            image = assets / "diagram.png"
+            original_image = b"first image"
+            image.write_bytes(original_image)
+            with (problem_b / "problem.md").open("a", encoding="utf-8") as stream:
+                stream.write("\n![diagram](assets/diagram.png)\n")
 
             def fake_compile(root, workspace, loaded):
-                main_pdf = root / "typst/main.pdf"
+                main_pdf = root / "typst/contest/main.pdf"
                 main_pdf.write_bytes(b"%PDF-1.4\n")
-                return root / "typst", main_pdf, []
+                return root / "typst/contest", main_pdf, []
 
             def fake_extract(main_pdf, loaded, only_ids=None):
                 problem_dir, config = loaded[0]
@@ -159,8 +167,17 @@ class BatchBuildTests(unittest.TestCase):
                 build_workspace(root, workspace, [entries[0]], run_judge=False)
 
             problem_a, config_a = load_problem(root, entries[0])
-            problem_b, _ = load_problem(root, entries[1])
             original_statement = (problem_b / "problem.md").read_text(encoding="utf-8")
+
+            image.write_bytes(b"second image")
+            status = problem_status(problem_a, config_a, root, workspace)
+            self.assertEqual(status["state"], "stale")
+            self.assertEqual(status["stale_fields"], ["collection_hash"])
+            image.write_bytes(original_image)
+            self.assertEqual(
+                problem_status(problem_a, config_a, root, workspace)["state"],
+                "current",
+            )
 
             (problem_b / "problem.md").write_text(
                 original_statement + "\nChanged.\n",
@@ -200,9 +217,9 @@ class BatchBuildTests(unittest.TestCase):
                     statement.read_text(encoding="utf-8") + "\nChanged during build.\n",
                     encoding="utf-8",
                 )
-                main_pdf = root / "typst/main.pdf"
+                main_pdf = root / "typst/contest/main.pdf"
                 main_pdf.write_bytes(b"%PDF-1.4\n")
-                return root / "typst", main_pdf, []
+                return root / "typst/contest", main_pdf, []
 
             def fake_extract(main_pdf, loaded, only_ids=None):
                 problem_dir, config = loaded[0]
