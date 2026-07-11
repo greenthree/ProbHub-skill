@@ -71,7 +71,7 @@ try {
     console.log('     > /probhub');
     console.log('  3. 或者直接跟它说你想出一道什么题。');
     console.log('  4. 注意：Skill 注入不会永久注册 probhub CLI。需要命令行入口时执行:');
-    console.log('     npm install -g probhub-skill');
+    console.log('     npm install -g probhub');
     console.log('=======================================\n');
 
 } catch (err) {

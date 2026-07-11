@@ -1,0 +1,38 @@
+{
+  "name": "probhub-skill",
+  "version": "0.3.3",
+  "description": "Compatibility package for ProbHub. Delegates the legacy probhub-skill command to the probhub package.",
+  "main": "bin/init.js",
+  "bin": {
+    "probhub-skill": "bin/init.js",
+    "probhub": "bin/probhub.js"
+  },
+  "scripts": {
+    "check": "node --check bin/init.js && node --check bin/probhub.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/greenthree/ProbHub-skill.git"
+  },
+  "keywords": [
+    "acm",
+    "icpc",
+    "problem-setting",
+    "probhub",
+    "compatibility"
+  ],
+  "author": "greenthree",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/greenthree/ProbHub-skill/issues"
+  },
+  "homepage": "https://github.com/greenthree/ProbHub-skill#readme",
+  "dependencies": {
+    "probhub": "0.3.3"
+  },
+  "files": [
+    "bin/*.js",
+    "README.md",
+    "LICENSE"
+  ]
+}
