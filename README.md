@@ -109,7 +109,7 @@ winget install typst
 
 - `New Computer Modern Math`
 - `New Computer Modern Mono`
-- `FZKai-Z03`
+- `KaiTi`
 - `STZhongSong`
 - `Microsoft YaHei`
 - `SimSun` / `simsun`
