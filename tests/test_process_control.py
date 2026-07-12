@@ -1,3 +1,4 @@
+import ctypes
 import os
 import sys
 import subprocess
@@ -6,7 +7,9 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import probhub.process_control as process_control
 from probhub.process_control import (
     CANCEL_FILE_ENV,
     ProcessCancelled,
@@ -18,6 +21,49 @@ from probhub.process_control import (
 
 
 class ProcessControlTests(unittest.TestCase):
+    def test_windows_job_termination_waits_for_all_processes_before_closing(self):
+        class Accounting(ctypes.Structure):
+            _fields_ = [("ActiveProcesses", ctypes.c_uint32)]
+
+        class Kernel32:
+            def __init__(self):
+                self.active = iter((2, 1, 0))
+                self.calls = []
+
+            def TerminateJobObject(self, handle, exit_code):
+                self.calls.append(("terminate", handle, exit_code))
+                return True
+
+            def QueryInformationJobObject(self, handle, info_class, pointer, size, returned):
+                active = next(self.active)
+                ctypes.cast(pointer, ctypes.POINTER(Accounting)).contents.ActiveProcesses = active
+                self.calls.append(("query", active))
+                return True
+
+            def CloseHandle(self, handle):
+                self.calls.append(("close", handle))
+                return True
+
+        kernel32 = Kernel32()
+        fake_api = {
+            "ctypes": ctypes,
+            "kernel32": kernel32,
+            "accounting_type": Accounting,
+        }
+        with mock.patch.object(process_control, "_WINDOWS_API", fake_api):
+            process_control.terminate_windows_job(123, timeout=0.2)
+
+        self.assertEqual(
+            kernel32.calls,
+            [
+                ("terminate", 123, 1),
+                ("query", 2),
+                ("query", 1),
+                ("query", 0),
+                ("close", 123),
+            ],
+        )
+
     def run_command(self, root, code, **limits):
         root = Path(root)
         return run_managed_to_files(

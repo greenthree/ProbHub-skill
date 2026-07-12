@@ -94,6 +94,18 @@ def _windows_api():
                 ("PeakJobMemoryUsed", size_t),
             ]
 
+        class BasicAccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_int64),
+                ("TotalKernelTime", ctypes.c_int64),
+                ("ThisPeriodTotalUserTime", ctypes.c_int64),
+                ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
         kernel32.SetInformationJobObject.argtypes = [
@@ -102,6 +114,8 @@ def _windows_api():
         kernel32.SetInformationJobObject.restype = wintypes.BOOL
         kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
         kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
         kernel32.QueryInformationJobObject.argtypes = [
             wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p
         ]
@@ -112,6 +126,7 @@ def _windows_api():
             "ctypes": ctypes,
             "kernel32": kernel32,
             "info_type": ExtendedLimitInformation,
+            "accounting_type": BasicAccountingInformation,
         }
     except Exception:
         _WINDOWS_API = {}
@@ -177,14 +192,46 @@ def close_windows_handle(handle):
         pass
 
 
+def terminate_windows_job(handle, timeout=2.0):
+    """Terminate a Windows Job and wait until every associated process exits."""
+    api = _windows_api()
+    if not handle or not api:
+        close_windows_handle(handle)
+        return
+    ctypes = api["ctypes"]
+    kernel32 = api["kernel32"]
+    accounting_type = api["accounting_type"]
+    try:
+        if kernel32.TerminateJobObject(handle, 1):
+            deadline = time.perf_counter() + float(timeout)
+            while True:
+                accounting = accounting_type()
+                queried = kernel32.QueryInformationJobObject(
+                    handle,
+                    1,
+                    ctypes.byref(accounting),
+                    ctypes.sizeof(accounting),
+                    None,
+                )
+                if not queried or int(accounting.ActiveProcesses) == 0:
+                    break
+                if time.perf_counter() >= deadline:
+                    break
+                time.sleep(0.01)
+    except Exception:
+        pass
+    finally:
+        close_windows_handle(handle)
+
+
 def terminate_process(proc, job_handle=None):
     """Terminate a direct process and every descendant, then reap it."""
     if proc is None:
-        close_windows_handle(job_handle)
+        terminate_windows_job(job_handle)
         return
     if platform.system() == "Windows":
         if job_handle:
-            close_windows_handle(job_handle)
+            terminate_windows_job(job_handle)
             job_handle = None
         elif proc.poll() is None:
             try:

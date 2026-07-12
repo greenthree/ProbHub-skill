@@ -57,6 +57,15 @@ class UiThemeTests(unittest.TestCase):
     def test_theme_uses_css_variables_without_changing_api_markup(self):
         html = self.ui.HTML_TEMPLATE
         self.assertIn("rgb(var(--ink-bg) / <alpha-value>)", html)
+        self.assertIn("--primary-top: 235 199 124", html)
+        self.assertIn("--primary-top: 226 198 139", html)
+        self.assertIn("--editor-surface: 250 247 241", html)
+        self.assertIn("--editor-surface: 36 42 36", html)
+        self.assertIn("--preview-surface: 253 251 247", html)
+        self.assertIn("--preview-surface: 30 35 30", html)
+        self.assertIn("background: linear-gradient(180deg, rgb(var(--primary-top)), rgb(var(--primary-bottom)))", html)
+        self.assertIn('class="editor-surface w-full h-56', html)
+        self.assertIn('class="preview-surface w-full h-56', html)
         self.assertIn('x-data="probhub()"', html)
         self.assertIn("fetch('/api/subtitles')", html)
         self.assertIn("_postWriterJson('/api/compile'", html)
