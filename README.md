@@ -500,11 +500,11 @@ Pop-Location
 
 ```powershell
 npm publish
-npm view probhub@0.3.5 version
+npm view probhub@0.3.6 version
 Push-Location compat/probhub-skill
 npm publish
 Pop-Location
-npm view probhub-skill@0.3.5 version
+npm view probhub-skill@0.3.6 version
 ```
 
 两个包的版本必须一致，入口包的 `dependencies.probhub` 必须锁定精确版本，不能使用 `^` 或 `~`。不要在入口包中复制 Python Core、WebUI、Skill 或 references。
