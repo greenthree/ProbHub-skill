@@ -15,7 +15,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 - **可复现差分测试**：`probhub stress` 按 seed 反复生成小数据，对拍 accepted 与 brute，并保存首个可 replay 的反例。
 - **跨平台资源控制**：共享 `probhub/process_control.py` 为普通程序、Checker、Validator、编译器、Interactor 和 stress 提供完整进程树清理、时间/内存/输出/进程数限制，并报告 TLE/MLE/OLE/RE/WA/AC。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
-- **WebUI 出题工作台**：提供响应式明暗双主题控制台，支持题目导航与排序、Markdown 和题面图片预览、题面/样例/封面编辑、revision 冲突保护、隔离 PDF 编译预览及临时代码沙箱评测；正式分发统一调用 Core，浏览和预览不会改写正式产物。
+- **WebUI 出题工作台**：提供响应式明暗双主题控制台，支持题目导航与排序、Markdown 和题面图片预览、题面/样例/封面编辑、revision 冲突保护、隔离 PDF 编译预览及临时代码沙箱评测，正式分发统一调用 Core。
 - **可重复构建 Core**：Workspace Schema v1、源文件/数据/整场排版依赖哈希、构建 Manifest、过期检测和统一 `probhub` CLI。
 - **DOMjudge 兼容**：从规范源文件生成 `problem.yaml`、`domjudge-problem.ini` 和确定性 `.zip`。
 
