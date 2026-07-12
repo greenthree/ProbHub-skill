@@ -300,6 +300,10 @@ HTML_TEMPLATE = r"""
             --gold-light: 181 128 37;
             --gold-muted: 125 94 45;
             --gold-dim: 151 133 101;
+            --primary-top: 235 199 124;
+            --primary-bottom: 207 153 57;
+            --editor-surface: 250 247 241;
+            --preview-surface: 253 251 247;
             --cream: 43 45 39;
             --cream-muted: 91 91 81;
             --cream-subtle: 125 122 109;
@@ -322,6 +326,10 @@ HTML_TEMPLATE = r"""
             --gold-light: 226 198 139;
             --gold-muted: 164 139 88;
             --gold-dim: 112 100 72;
+            --primary-top: 226 198 139;
+            --primary-bottom: 202 164 92;
+            --editor-surface: 36 42 36;
+            --preview-surface: 30 35 30;
             --cream: 222 219 204;
             --cream-muted: 166 164 150;
             --cream-subtle: 122 126 114;
@@ -386,12 +394,14 @@ HTML_TEMPLATE = r"""
         .theme-toggle:hover { color: rgb(var(--cream)); background: rgb(var(--ink-input)); border-color: rgb(var(--gold) / .28); transform: translateY(-1px); }
         .theme-toggle-icon { width: 1rem; height: 1rem; color: rgb(var(--gold)); }
         .primary-action {
-            color: rgb(var(--ink-deep)); background: linear-gradient(180deg, rgb(var(--gold-light)), rgb(var(--gold)));
+            color: rgb(var(--ink-deep)); background: linear-gradient(180deg, rgb(var(--primary-top)), rgb(var(--primary-bottom)));
             box-shadow: 0 9px 24px rgb(var(--gold) / .19), inset 0 1px 0 rgb(255 255 255 / .25);
         }
         .primary-action:hover { filter: saturate(1.06) brightness(1.04); box-shadow: 0 12px 30px rgb(var(--gold) / .28); transform: translateY(-1px); }
         .primary-action:active { transform: scale(.97); }
         .secondary-action { box-shadow: inset 0 1px 0 rgb(var(--cream) / .025); }
+        .editor-surface { background-color: rgb(var(--editor-surface)) !important; }
+        .preview-surface { background-color: rgb(var(--preview-surface)) !important; }
         .terminal-panel { background: rgb(var(--terminal)); border: 1px solid rgb(var(--cream) / .055); }
         .soft-gold-panel { background: rgb(var(--gold) / .055) !important; }
         .soft-panel { background: rgb(var(--cream) / .025) !important; }
@@ -786,7 +796,7 @@ HTML_TEMPLATE = r"""
                                     <div>
                                         <label class="block text-[11px] font-medium tracking-wide text-cream-muted uppercase mb-1.5">引言内容</label>
                                         <textarea x-model="problems[selectedIdx].statement.quote.text" rows="3"
-                                                  class="w-full px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg
+                                                  class="editor-surface w-full px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg
                                                          text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed
                                                          focus:border-gold/40 focus:outline-none transition-colors resize-none"
                                                   placeholder="这是出题人最喜欢的一段话..."></textarea>
@@ -810,8 +820,8 @@ HTML_TEMPLATE = r"""
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full opacity-0"></div> Live Preview</label>
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <textarea x-model="problems[selectedIdx].statement.description" rows="8" class="w-full h-56 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="w-full h-56 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.descPreview, problems[selectedIdx]?.statement?.description)" x-ref="descPreview"></div>
+                                    <textarea x-model="problems[selectedIdx].statement.description" rows="8" class="editor-surface w-full h-56 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="preview-surface w-full h-56 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.descPreview, problems[selectedIdx]?.statement?.description)" x-ref="descPreview"></div>
                                 </div>
                             </div>
 
@@ -820,8 +830,8 @@ HTML_TEMPLATE = r"""
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Input Format</label>
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <textarea x-model="problems[selectedIdx].statement.input" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.inputPreview, problems[selectedIdx]?.statement?.input)" x-ref="inputPreview"></div>
+                                    <textarea x-model="problems[selectedIdx].statement.input" class="editor-surface w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.inputPreview, problems[selectedIdx]?.statement?.input)" x-ref="inputPreview"></div>
                                 </div>
                             </div>
 
@@ -830,8 +840,8 @@ HTML_TEMPLATE = r"""
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Output Format</label>
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <textarea x-model="problems[selectedIdx].statement.output" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.outputPreview, problems[selectedIdx]?.statement?.output)" x-ref="outputPreview"></div>
+                                    <textarea x-model="problems[selectedIdx].statement.output" class="editor-surface w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.outputPreview, problems[selectedIdx]?.statement?.output)" x-ref="outputPreview"></div>
                                 </div>
                             </div>
 
@@ -858,13 +868,13 @@ HTML_TEMPLATE = r"""
                                                     <div>
                                                         <label class="block text-[10px] font-medium tracking-wide text-cream-muted uppercase mb-1">Input</label>
                                                         <textarea x-model="sample.input" rows="3"
-                                                                  class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
+                                                                  class="editor-surface w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
                                                                   placeholder="3 5 7"></textarea>
                                                     </div>
                                                     <div>
                                                         <label class="block text-[10px] font-medium tracking-wide text-cream-muted uppercase mb-1">Output</label>
                                                         <textarea x-model="sample.output" rows="3"
-                                                                  class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
+                                                                  class="editor-surface w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
                                                                   placeholder="2"></textarea>
                                                     </div>
                                                 </div>
@@ -879,8 +889,8 @@ HTML_TEMPLATE = r"""
                                     <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Notes & Constraints</label>
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <textarea x-model="problems[selectedIdx].statement.notes" class="w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.notesPreview, problems[selectedIdx]?.statement?.notes)" x-ref="notesPreview"></div>
+                                    <textarea x-model="problems[selectedIdx].statement.notes" class="editor-surface w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.notesPreview, problems[selectedIdx]?.statement?.notes)" x-ref="notesPreview"></div>
                                 </div>
                             </div>
 
