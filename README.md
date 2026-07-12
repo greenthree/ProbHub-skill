@@ -128,6 +128,9 @@ probhub status
 probhub judge L01
 probhub judge L01 --no-cache  # 强制完整重跑并刷新缓存
 probhub stress L01 --rounds 10000 --seed 12345
+probhub checkpoint L01        # 发布并行组卷使用的不可变草稿
+probhub seal L01 --no-cache   # 验证、冻结并生成一版完整试卷
+probhub generation-status
 probhub typeset L01
 probhub package L01
 probhub build L01
@@ -160,7 +163,9 @@ L01/data/secret/           # 隐藏数据唯一来源
 - `problem.pdf`、全卷 PDF 和 DOMjudge ZIP
 - `.probhub/build-manifest.json`
 
-本地诊断目录 `.probhub/stress/` 保存差分反例，不属于正式构建产物，也不应提交。
+本地诊断目录 `.probhub/stress/` 保存差分反例；`.probhub/checkpoints/` 保存题目 revision，`.probhub/generations/` 保存内容寻址的完整试卷预览。这些目录都不属于正式构建产物，也不应提交。
+
+并行出题时，每个任务可在开发过程中运行 `checkpoint`，完成 lint、judge 和配置的 stress 后运行 `seal`。`seal` 只读取其他题目最后发布的 checkpoint，并立即返回一份隔离的完整试卷；其他任务可以继续修改 live 目录，不需要等待统一构建。预览 generation 不覆盖正式 PDF、ZIP、metadata 或 Manifest，完整协议见 [`references/generations.md`](references/generations.md)。
 
 `probhub build` 会先取得跨平台工作区写锁并建立输入快照，再在同卷临时工作区完成 lint、沙箱、元数据生成、Typst 编译、单题 PDF、DOMjudge 配置、ZIP 验证和 Manifest。多 ID build 只编译一次完整 Typst 集合；全部准备阶段成功且 live 输入哈希未变化后才发布正式产物。所有所选 Manifest 记录同一 `batch_id`。`probhub status` 会比较源文件、数据、工作区、整场排版输入、PDF 和 ZIP 哈希，报告 `current`、`stale` 或 `never-built`。
 

@@ -8,10 +8,17 @@ from .build_lock import workspace_build_lock
 from .building import build_workspace, package_problem
 from .doctor import run_doctor
 from .errors import ProbHubError
+from .generations import (
+    assemble_exam_generation,
+    create_problem_checkpoint,
+    generation_status,
+)
 from .io import write_yaml
 from .judging import judge_problem
 from .linting import (
     compute_collection_hash,
+    compute_data_hash,
+    compute_source_hash,
     compute_workspace_hash,
     lint_workspace,
     problem_status,
@@ -51,6 +58,11 @@ def _ensure_local_gitignore(root):
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     required = [
         "**/.probhub/build.lock",
+        "**/.probhub/checkpoints/",
+        "**/.probhub/checkpoint-tmp/",
+        "**/.probhub/generation.lock",
+        "**/.probhub/generations/",
+        "**/.probhub/generation-tmp/",
         "**/.probhub/sandbox-cache-v1.json",
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",
@@ -180,6 +192,111 @@ def command_stress(args):
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
 
 
+def _single_problem_context(args):
+    root, workspace = workspace_context(args)
+    entries = select_entries(workspace, [args.problem_id])
+    return root, workspace, entries[0]
+
+
+def command_checkpoint(args):
+    root, workspace, entry = _single_problem_context(args)
+    _ensure_local_gitignore(root)
+    checkpoint = create_problem_checkpoint(
+        root,
+        workspace,
+        entry,
+        state="draft",
+    )
+    return {"ok": True, "checkpoint": checkpoint}
+
+
+def command_seal(args):
+    root, workspace, entry = _single_problem_context(args)
+    _ensure_local_gitignore(root)
+    lint = lint_workspace(root, workspace, [entry])
+    if not lint["ok"]:
+        messages = list(lint.get("errors", []))
+        for result in lint["problems"]:
+            messages.extend(result["errors"])
+        raise ProbHubError(
+            f"cannot seal {entry['id']}: " + "; ".join(messages),
+            code="seal_lint_failed",
+        )
+
+    problem_dir, config = load_problem(root, entry)
+    source_hash = compute_source_hash(problem_dir, config)
+    data_hash = compute_data_hash(problem_dir, config)
+    judge = judge_problem(root, problem_dir, use_cache=not args.no_cache)
+    if not judge["ok"]:
+        raise ProbHubError(
+            f"cannot seal {entry['id']}: sandbox failed: {judge.get('final')}",
+            code="seal_judge_failed",
+        )
+
+    stress = None
+    if config.get("stress"):
+        stress = stress_problem(
+            root,
+            problem_dir,
+            config,
+            rounds=args.rounds,
+            master_seed=args.seed,
+        )
+        if not stress["ok"]:
+            raise ProbHubError(
+                f"cannot seal {entry['id']}: stress failed: {stress.get('reason')}",
+                code="seal_stress_failed",
+            )
+
+    _, current_config = load_problem(root, entry)
+    if (
+        compute_source_hash(problem_dir, current_config) != source_hash
+        or compute_data_hash(problem_dir, current_config) != data_hash
+    ):
+        raise ProbHubError(
+            f"cannot seal {entry['id']}: inputs changed during verification",
+            code="inputs_changed",
+        )
+
+    evidence = {
+        "lint": {
+            "ok": True,
+            "warnings": lint["problems"][0].get("warnings", []),
+        },
+        "judge": {
+            "ok": judge["ok"],
+            "returncode": judge["returncode"],
+            "final": judge["final"],
+            "cache": judge.get("cache", {}),
+        },
+        "stress": stress,
+    }
+    checkpoint = create_problem_checkpoint(
+        root,
+        workspace,
+        entry,
+        state="sealed",
+        evidence=evidence,
+    )
+    generation = assemble_exam_generation(root)
+    return {
+        "ok": True,
+        "checkpoint": checkpoint,
+        "generation": generation,
+    }
+
+
+def command_assemble(args):
+    root, _ = workspace_context(args)
+    _ensure_local_gitignore(root)
+    return assemble_exam_generation(root)
+
+
+def command_generation_status(args):
+    root, _ = workspace_context(args)
+    return generation_status(root)
+
+
 def command_typeset(args):
     root, workspace = workspace_context(args)
     with workspace_build_lock(root):
@@ -262,6 +379,23 @@ def build_parser():
     stress.add_argument("--seed", type=int, help="master seed; round seeds increase from this value")
     stress.add_argument("--replay", help="counterexample directory/input path, or 'latest'")
     stress.set_defaults(handler=command_stress)
+
+    checkpoint = sub.add_parser("checkpoint")
+    checkpoint.add_argument("problem_id")
+    checkpoint.set_defaults(handler=command_checkpoint)
+
+    seal = sub.add_parser("seal")
+    seal.add_argument("problem_id")
+    seal.add_argument("--no-cache", action="store_true")
+    seal.add_argument("--rounds", type=int, help="override stress.rounds")
+    seal.add_argument("--seed", type=int, default=12345, help="stress master seed")
+    seal.set_defaults(handler=command_seal)
+
+    assemble = sub.add_parser("assemble")
+    assemble.set_defaults(handler=command_assemble)
+
+    generation = sub.add_parser("generation-status")
+    generation.set_defaults(handler=command_generation_status)
 
     verify = sub.add_parser("verify-package")
     verify.add_argument("zip_path")

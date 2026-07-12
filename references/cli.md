@@ -315,6 +315,41 @@ probhub stress L01 --replay "L01/.probhub/stress/<artifact>/input.in"
 
 多题执行只有全部题目通过才返回 `0`。完整字段、Generator 示例、Checker 调用、反例文件和失败 reason 见 `references/stress.md`。
 
+## 9.1 `checkpoint`、`seal` 与 `assemble`
+
+并行开发期间发布当前题目的不可变草稿：
+
+```powershell
+probhub checkpoint L10
+```
+
+题目完成后执行自动验证、冻结 revision 并生成一份完整试卷：
+
+```powershell
+probhub seal L10 --no-cache --seed 12345
+probhub seal L10 --rounds 3000 --seed 12345
+```
+
+`seal` 执行：
+
+1. 单题 lint；
+2. judge，`--no-cache` 时完整重跑；
+3. 若配置了 `stress`，按配置或 `--rounds` 执行固定 seed 差分测试；
+4. 复核 live source/data hash 未在验证期间变化；
+5. 写入 sealed checkpoint 和验证证据；
+6. 使用所有题目的最新 checkpoint 组装完整试卷 generation。
+
+单独组装和检查当前 generation：
+
+```powershell
+probhub assemble
+probhub generation-status
+```
+
+generation 存放在 `.probhub/generations/<generation-id>/`，包含 `main.pdf`、逐题 PDF 和 `manifest.json`。它是内容寻址的隔离预览，不覆盖正式 Typst `main.pdf`、ZIP 或 Build Manifest。没有可用 checkpoint 的题目使用开发中占位页；`complete`、`all_sealed` 和逐题 `state` 会明确报告实际状态。
+
+组装使用独立 `.probhub/generation.lock`。并发请求等待当前组装结束，随后按最新 revision 集合生成或复用版本，不占用正式 `build.lock`。详细存储和并行语义见 `references/generations.md`。
+
 ## 10. `typeset`
 
 ```powershell
