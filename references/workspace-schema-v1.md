@@ -241,6 +241,14 @@ Schema v1 WebUI 遵循以下写入边界：
 
 `<workspace>/.probhub/build.lock` 是 `build`、`typeset` 和 `package` 共享的跨平台 OS 文件锁载体。锁文件可在命令结束后保留；不得通过删除文件或检查文件是否存在来判断锁状态。新工作区会把它加入 `.gitignore`。
 
+并行出题期间，`checkpoint`、`seal` 和 `assemble` 使用以下本地产物：
+
+- `<workspace>/.probhub/checkpoints/`：不可变题目 revision；
+- `<workspace>/.probhub/generations/`：不可变完整试卷预览；
+- `<workspace>/.probhub/generation.lock`：组卷 single-writer OS 锁。
+
+这些路径不属于 Schema 规范源，不得提交或手工编辑。generation 不替换正式 PDF、ZIP、metadata 或 Build Manifest。完整语义见 `references/generations.md`。
+
 `<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results. Relevant source, header, input, answer, time/memory/output/process limit, compiler, platform, sandbox policy, or cache-schema changes invalidate entries automatically. Use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run and refresh the cache.
 
 `<problem>/.probhub/stress/` is a separate ignored diagnostic directory containing replayable counterexamples and `latest.json`; stress does not reuse the sandbox cache. Resource-control semantics are versioned in the cache Schema, so older cached AC/RE/TLE results cannot bypass newer OLE or process-tree policies. Do not package or commit either local artifact.

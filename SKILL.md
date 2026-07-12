@@ -37,7 +37,7 @@ description: 当用户需要创作或维护算法竞赛题目、生成测试数�
 - `problem.pdf`、全卷 PDF、`<ID>.zip`
 - `.probhub/build-manifest.json`
 
-`.probhub/build.lock` 是可保留的 OS 文件锁载体，不能用“文件是否存在”判断是否占用；`.probhub/sandbox-cache-v1.json` 是本地缓存，`.probhub/stress/` 保存可重放差分反例。这些路径都应被 Git 忽略，禁止提交或手工维护。
+`.probhub/build.lock` 与 `.probhub/generation.lock` 是可保留的 OS 文件锁载体，不能用“文件是否存在”判断是否占用；`.probhub/sandbox-cache-v1.json` 是本地缓存，`.probhub/stress/` 保存可重放差分反例，`.probhub/checkpoints/` 与 `.probhub/generations/` 保存并行出题期间的不可变本地版本。这些路径都应被 Git 忽略，禁止提交或手工维护。
 
 # 3. CLI 操作规则
 
@@ -88,6 +88,10 @@ probhub build
 | `status [ID...]` | 报告 `current`、`stale`、`never-built` |
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
 | `stress ID...` | 反复生成小数据，对拍 accepted 与 brute，保存首个可重放反例 |
+| `checkpoint ID` | 发布当前题目的不可变 draft checkpoint，供并行组卷使用 |
+| `seal ID` | lint、judge、stress 后冻结 revision，并自动生成一版完整试卷 |
+| `assemble` | 使用各题最新 checkpoint 生成隔离的完整试卷 generation |
+| `generation-status` | 校验并报告当前预览 generation |
 | `typeset [ID...]` | 编译全卷并提取指定单题 PDF |
 | `package [ID...]` | 从当前产物构建并验证指定 ZIP |
 | `build [ID...]` | lint → judge → 全卷排版 → 单题 PDF → ZIP → Manifest |
@@ -95,13 +99,22 @@ probhub build
 
 `typeset <ID>` 和 `build <ID>` 为保证正式题号与页码正确，仍会编译整个 Typst 集合，但只提取、打包和更新所选题目。
 
-批量出题时，所有目标题完成审查并冻结 source/data hash 后，应由一个协调者执行单次多题构建：
+批量出题时不要求题目任务等待统一协调者。每个任务在开发中定期发布 checkpoint，完成自动验证后执行 seal：
+
+```powershell
+probhub checkpoint L01
+probhub seal L01 --no-cache --seed 12345
+```
+
+`seal` 会生成一份隔离的完整试卷 generation：本题使用 sealed revision，其他题使用最后发布的 checkpoint，没有 checkpoint 时使用占位页。组装不读取其他 Agent 正在编辑的文件，不覆盖正式 PDF、ZIP、metadata 或 Manifest。完整协议见 `references/generations.md`。
+
+所有题目 sealed 后，任意任务或本地 worker 再执行一次正式多题构建：
 
 ```powershell
 probhub build L01 L02 L03 --no-cache
 ```
 
-一次多题 `build` 只编译一次完整 Typst 集合，再分别提取、打包和更新所选题目。Core 会持有跨平台 OS 写锁，在临时快照中完成全部准备和 ZIP 验证，发布前复核 live source/data/collection hash；输入变化返回 `inputs_changed`，并发 writer 返回 `build_busy`。所有所选 Manifest 记录同一 `batch_id`。不要让多个 Agent 依次运行单题 `build`，否则仍会重复工作并产生不必要的新批次。
+一次多题 `build` 只编译一次完整 Typst 集合，再分别提取、打包和更新所选题目。Core 会持有跨平台 OS 写锁，在临时快照中完成全部准备和 ZIP 验证，发布前复核 live source/data/collection hash；输入变化返回 `inputs_changed`，并发 writer 返回 `build_busy`。所有所选 Manifest 记录同一 `batch_id`。不要让多个 Agent 依次运行单题正式 `build`。
 
 沙箱默认复用内容寻址缓存。需要忽略旧结果、完整重跑并刷新缓存时使用：
 
