@@ -39,3 +39,7 @@ __pycache__/
 
 # Local WebUI submission workspaces
 **/.probhub/submissions/
+
+# Typst template build artifacts; keep only the documented showcase sample
+typst-template/**/*.pdf
+!typst-template/正式赛/main.pdf

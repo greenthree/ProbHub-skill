@@ -22,6 +22,8 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 示例 PDF：
 [真实赛事 Typst 题面排版示例](https://github.com/greenthree/ProbHub-skill/blob/main/typst-template/%E6%AD%A3%E5%BC%8F%E8%B5%9B/main.pdf)
 
+> 该 PDF 是有意入库的排版效果样例；`typst-template/` 下的其他 PDF 均视为构建产物，已被 `.gitignore` 排除。
+
 ---
 
 ## 快速安装
