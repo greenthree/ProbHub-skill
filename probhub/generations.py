@@ -538,14 +538,19 @@ def assemble_exam_generation(root, workspace=None):
         generation_dir = root / GENERATIONS_DIR / generation_id
         manifest_path = generation_dir / "manifest.json"
         if manifest_path.is_file() and (generation_dir / "main.pdf").is_file():
-            manifest = _read_generation_manifest(generation_dir)
-            atomic_write_json(
-                root / GENERATIONS_DIR / "current.json",
-                {"generation_id": generation_id, "updated_at": _now()},
-            )
-            return _generation_result(root, manifest, cached=True)
+            try:
+                manifest = _read_generation_manifest(generation_dir)
+            except ProbHubError:
+                manifest = None
+            if manifest is not None:
+                atomic_write_json(
+                    root / GENERATIONS_DIR / "current.json",
+                    {"generation_id": generation_id, "updated_at": _now()},
+                )
+                return _generation_result(root, manifest, cached=True)
 
         temporary_root = None
+        stage = None
         try:
             temporary_root = Path(tempfile.mkdtemp(
                 prefix=f".{root.name}-probhub-generation-",
@@ -638,7 +643,14 @@ def assemble_exam_generation(root, workspace=None):
             atomic_write_json(stage / "manifest.json", manifest)
             generation_dir.parent.mkdir(parents=True, exist_ok=True)
             if generation_dir.exists():
-                shutil.rmtree(stage, ignore_errors=True)
+                # Reuse an existing directory only after validating it; a
+                # corrupt leftover must never win over the freshly built stage.
+                try:
+                    manifest = _read_generation_manifest(generation_dir)
+                    shutil.rmtree(stage, ignore_errors=True)
+                except ProbHubError:
+                    shutil.rmtree(generation_dir)
+                    os.replace(stage, generation_dir)
             else:
                 os.replace(stage, generation_dir)
             atomic_write_json(
@@ -647,6 +659,8 @@ def assemble_exam_generation(root, workspace=None):
             )
             return _generation_result(root, manifest, cached=False)
         finally:
+            if stage is not None and stage.exists():
+                shutil.rmtree(stage, ignore_errors=True)
             if temporary_root is not None:
                 shutil.rmtree(temporary_root, ignore_errors=True)
 

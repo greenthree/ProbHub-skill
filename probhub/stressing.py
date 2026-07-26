@@ -136,7 +136,7 @@ def expand_generator_args(patterns, seed, round_number):
     for pattern in patterns:
         try:
             result.append(str(pattern).format(**values))
-        except (KeyError, ValueError) as exc:
+        except (IndexError, KeyError, ValueError) as exc:
             raise ProbHubError(f"invalid stress.args template: {pattern}") from exc
     return result
 

@@ -245,6 +245,52 @@ class GenerationTests(unittest.TestCase):
             }
             self.assertEqual(states["B"], "draft")
 
+    def test_assemble_replaces_corrupt_existing_generation_with_fresh_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            for entry in problem_entries(workspace):
+                create_problem_checkpoint(root, workspace, entry)
+
+            with (
+                patch("probhub.generations.compile_collection", side_effect=self.fake_compile),
+                patch("probhub.generations.extract_problem_pdfs", side_effect=self.fake_extract),
+            ):
+                first = assemble_exam_generation(root)
+                manifest_path = Path(first["path"]) / "manifest.json"
+                manifest_path.write_text("{}\n", encoding="utf-8")
+
+                second = assemble_exam_generation(root)
+
+            self.assertEqual(first["generation_id"], second["generation_id"])
+            self.assertFalse(second["cached"])
+            published = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(published["generation_id"], second["generation_id"])
+            tmp_root = root / ".probhub/generation-tmp"
+            self.assertEqual(
+                [] if not tmp_root.is_dir() else list(tmp_root.iterdir()),
+                [],
+            )
+
+    def test_assemble_cleans_stage_after_late_publish_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            for entry in problem_entries(workspace):
+                create_problem_checkpoint(root, workspace, entry)
+
+            with (
+                patch("probhub.generations.compile_collection", side_effect=self.fake_compile),
+                patch("probhub.generations.extract_problem_pdfs", side_effect=self.fake_extract),
+                patch("probhub.generations.os.replace", side_effect=OSError("disk full")),
+            ):
+                with self.assertRaises(OSError):
+                    assemble_exam_generation(root)
+
+            tmp_root = root / ".probhub/generation-tmp"
+            self.assertEqual(
+                [] if not tmp_root.is_dir() else list(tmp_root.iterdir()),
+                [],
+            )
+
     def test_seal_records_evidence_and_requests_generation(self):
         with tempfile.TemporaryDirectory() as temp:
             root, workspace = self.create_workspace(Path(temp))

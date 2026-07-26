@@ -236,8 +236,14 @@ def temporary_submission_workspace(
             source_path=source_path,
         )
     finally:
+        # A delayed Windows handle release must not raise here and swallow
+        # the in-flight judging result; stale directories are reclaimed by
+        # cleanup_stale_submission_workspaces on the next startup.
         if task_root.exists():
-            shutil.rmtree(task_root)
+            try:
+                shutil.rmtree(task_root)
+            except OSError:
+                pass
         try:
             submissions_root.rmdir()
         except OSError:

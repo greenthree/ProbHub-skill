@@ -13,6 +13,8 @@ def _command_version(command, args=("--version",)):
         proc = subprocess.run([path, *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
         text = (proc.stdout or proc.stderr).strip().splitlines()
         return {"ok": proc.returncode == 0, "path": path, "version": text[0] if text else "unknown"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "path": path, "version": "timed out after 10s"}
     except OSError as exc:
         return {"ok": False, "path": path, "version": str(exc)}
 
