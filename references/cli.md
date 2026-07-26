@@ -112,9 +112,28 @@ probhub new L07 --name "交互题" --judge interactive
 - 错解枚举与数据强度纪律见 `references/mistake-taxonomy.md`；示例的 `overflow` 组演示了 `data.groups` + `targets` + `expected` 的定向击杀写法。
 - `new` 会持有工作区写锁并原子写入 `workspace.yaml`；并发写入返回 `build_busy`。
 
-`probhub.yaml` 默认声明 `code/validator.cpp`、`code/std.cpp`、`code/brute.cpp`、`code/wrong.cpp` 和 `code/inmaker.cpp`，但仍需实际编写这些文件。
+## 5. `gen`
 
-## 5. `doctor`
+按 `data.recipes` 配方生成或校验 secret 数据（配方格式见 `references/workspace-schema-v1.md`）：
+
+```powershell
+probhub gen L05                 # plan：只报告，不写任何文件
+probhub gen L05 --apply         # 全部成功后写入 new/changed 测试点
+probhub gen L05 --case max01    # 只处理指定配方（可重复）
+```
+
+执行流程：编译生成器与首个 accepted → 按配方运行生成器 → Validator 全量过检 → accepted 产 `.ans` → 与磁盘现状比较。plan 输出逐测试点 `new` / `changed` / `unchanged` / `manual` 状态与新旧 SHA-256；`changed` 意味着配方结果与磁盘不一致（数据被手改、生成器或 accepted 变化），`--apply` 前先核对差异，不会静默覆盖。
+
+要点：
+
+- **失败即零写入**：任一配方出现生成器崩溃、Validator 拒绝或 accepted 非正常退出，整次 `gen` 以 `gen_failed` 失败（exit 1），不写任何数据文件。
+- 输出统一 LF 归一，同一配方在 Windows 与 Linux 复现相同字节；plan 的 `unchanged` 即字节一致性验证。
+- `manual: true` 的测试点不被触碰；文件缺失时给 warning。
+- 生成证据（generator/args/输入与答案哈希）写入本地 `.probhub/gen-manifest.json`，属本地产物不提交。
+- 没有配方的 secret 测试点由 lint 以 warning 报告；数量低于数据强度纪律（`references/mistake-taxonomy.md`）时同样给 warning。
+- accepted 改动后重跑 `gen`：plan 会把所有答案变化列为 `changed` 并给出新旧哈希——先审阅差异再 `--apply`。
+
+## 6. `doctor`
 
 检查环境：
 
@@ -124,7 +143,7 @@ probhub doctor
 
 用于确认 Python、Node/npm、Typst、g++ 和 Python 依赖。首次安装、换机器或 CI 失败时优先运行。
 
-## 6. `lint`
+## 7. `lint`
 
 ```powershell
 probhub lint [ID...]
@@ -148,7 +167,7 @@ probhub lint L01 L03
 probhub lint
 ```
 
-## 7. `status`
+## 8. `status`
 
 ```powershell
 probhub status [ID...]
@@ -166,7 +185,7 @@ Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以
 
 包含 `collection_hash` 的 Build Manifest 使用 schema v2。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`；缺失时显示 `stale_fields: ["batch_id", ...]`。旧 v1 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
 
-## 8. `judge`
+## 9. `judge`
 
 ```powershell
 probhub judge [ID...] [--no-cache]
@@ -262,7 +281,7 @@ probhub judge L01 --no-cache
 
 缓存事件包含 `mode`、`compile_hits/misses`、`validator_hits/misses`、`case_hits/misses`。进程树、OLE 或资源限制语义变化会提升缓存 Schema，防止旧结果绕过新策略。
 
-## 9. `stress`
+## 10. `stress`
 
 ```powershell
 probhub stress ID... [--rounds N] [--seed S]
@@ -333,7 +352,7 @@ probhub stress L01 --replay "L01/.probhub/stress/<artifact>/input.in"
 
 多题执行只有全部题目通过才返回 `0`。完整字段、Generator 示例、Checker 调用、反例文件和失败 reason 见 `references/stress.md`。
 
-## 9.1 `checkpoint`、`seal` 与 `assemble`
+## 10.1 `checkpoint`、`seal` 与 `assemble`
 
 并行开发期间发布当前题目的不可变草稿：
 
@@ -368,7 +387,7 @@ generation 存放在 `.probhub/generations/<generation-id>/`，包含 `main.pdf`
 
 组装使用独立 `.probhub/generation.lock`。并发请求等待当前组装结束，随后按最新 revision 集合生成或复用版本，不占用正式 `build.lock`。详细存储和并行语义见 `references/generations.md`。
 
-## 10. `typeset`
+## 11. `typeset`
 
 ```powershell
 probhub typeset [ID...]
@@ -382,7 +401,7 @@ probhub typeset [ID...]
 
 它不会运行沙箱、构建 ZIP 或写 Manifest。
 
-## 11. `package`
+## 12. `package`
 
 ```powershell
 probhub package [ID...]
@@ -399,7 +418,7 @@ probhub package L01 --allow-missing-pdf
 
 `package` 不自动执行 lint、judge 或 typeset。正式流程优先使用 `build`。
 
-## 12. `build`
+## 13. `build`
 
 ```powershell
 probhub build [ID...] [--skip-judge] [--no-cache]
@@ -432,7 +451,7 @@ probhub build L01 --skip-judge   # 跳过沙箱，仅用于已有可信评测的
 
 不要把 `--skip-judge` 作为首次构建或正式正确性证明。
 
-## 13. `verify-package`
+## 14. `verify-package`
 
 ```powershell
 probhub verify-package L01.zip
@@ -449,7 +468,7 @@ probhub verify-package L01.zip --require-pdf
 
 正式题目包使用 `--require-pdf`。
 
-## 14. 推荐流程
+## 15. 推荐流程
 
 ### 单题开发
 
@@ -489,7 +508,7 @@ probhub status L01
 probhub verify-package L01.zip --require-pdf
 ```
 
-## 15. 常见问题
+## 16. 常见问题
 
 ### `probhub` 未识别
 

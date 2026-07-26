@@ -23,6 +23,7 @@ from .linting import (
     lint_workspace,
     problem_status,
 )
+from .datagen import generate_problem_data
 from .package_tools import verify_package
 from .scaffold import JUDGE_TYPES, scaffold_config, scaffold_files
 from .stressing import stress_problem
@@ -67,6 +68,7 @@ def _ensure_local_gitignore(root):
         "**/.probhub/sandbox-cache-v1.json",
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",
+        "**/.probhub/gen-manifest.json",
         "**/.probhub-*.typ",
     ]
     present = {line.strip() for line in existing.splitlines()}
@@ -127,6 +129,18 @@ def command_new(args):
         "judge": judge_type,
         "files": sorted([*files, "probhub.yaml"]),
     }
+
+
+def command_gen(args):
+    root, workspace, entry = _single_problem_context(args)
+    _ensure_local_gitignore(root)
+    problem_dir, config = load_problem(root, entry)
+    return generate_problem_data(
+        problem_dir,
+        config,
+        apply_changes=args.apply,
+        only=args.case,
+    )
 
 
 def command_doctor(args):
@@ -352,6 +366,12 @@ def build_parser():
     new.add_argument("--directory")
     new.add_argument("--judge", choices=list(JUDGE_TYPES), default="standard")
     new.set_defaults(handler=command_new)
+
+    gen = sub.add_parser("gen")
+    gen.add_argument("problem_id")
+    gen.add_argument("--apply", action="store_true")
+    gen.add_argument("--case", action="append")
+    gen.set_defaults(handler=command_gen)
 
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(handler=command_doctor)

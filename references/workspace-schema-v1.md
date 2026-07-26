@@ -82,9 +82,21 @@ data:
       role: brute-killer
       patterns: [secret/stress*]
       targets: [code/brute.cpp]
+  recipes:
+    - case: greedy01            # secret 测试点主名（不含扩展名）
+      args: ["greedy", "1"]     # 生成器 argv；同一 argv 必须复现同一字节
+    - case: max01
+      generator: code/inmaker.cpp   # 可省略，默认取 generators 第一项
+      args: ["max", "7"]
+    - case: handmade01
+      manual: true              # 字节本身是事实来源，gen 不触碰
 domjudge:
   include_pdf: true
 ```
+
+### Test recipes (`data.recipes`)
+
+每个 secret 测试点可声明来源配方：`manual: true`（手工数据，字节即事实来源），或生成器调用（可选 `generator` 路径 + 精确 `args` 列表）。`probhub gen <ID>` 依配方生成输入 → Validator 过检 → 用首个 accepted 产 `.ans`，plan 模式报告 new/changed/unchanged，`--apply` 才写入（全部成功后逐文件原子替换）。输出统一 LF 归一，保证 Windows/Linux 字节一致；生成证据写入本地 `.probhub/gen-manifest.json`（不提交）。没有配方的 secret 测试点在 lint 中以 warning 呈现（存量数据兼容，不硬失败）。stress 反例固化后也应登记为配方（generator=stress 生成器、args=[seed, round]）。
 
 ### Resource limits
 
