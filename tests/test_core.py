@@ -106,8 +106,13 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(config["judge"]["validator"], "code/validator.cpp")
             self.assertEqual(config["limits"]["output"], 64)
             self.assertEqual(config["limits"]["processes"], 32)
-            self.assertEqual(config["solutions"]["accepted"], ["code/std.cpp"])
+            self.assertEqual(
+                [entry["file"] for entry in config["solutions"]["accepted"]],
+                ["code/std.cpp", "code/std2.cpp"],
+            )
             self.assertEqual(config["generators"], ["code/inmaker.cpp"])
+            self.assertTrue((root / "B/code/std.cpp").is_file())
+            self.assertTrue((root / "B/data/sample/1.in").is_file())
             _, workspace = load_workspace(root)
             self.assertEqual([entry["id"] for entry in problem_entries(workspace)], ["A", "B"])
 

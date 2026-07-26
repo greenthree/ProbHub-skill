@@ -75,24 +75,42 @@ probhub init [directory] --title "Contest" --subtitle "正式赛" --author "Team
 
 ## 4. `new`
 
-创建新题骨架并加入稳定题序：
+创建**可编译、可直接评测**的新题骨架并加入稳定题序：
 
 ```powershell
 probhub new L05 --name "新题"
 probhub new L05 --name "新题" --directory problems/L05
+probhub new L06 --name "构造题" --judge custom
+probhub new L07 --name "交互题" --judge interactive
 ```
 
-生成：
+骨架是一道完整可工作的 A+B 示例题：lint 零错误，`judge` 开箱即 `all_expectations_met`；作者在保留结构的前提下替换为正式内容。生成：
 
 ```text
 <directory>/
-├── probhub.yaml
-├── problem.md
+├── probhub.yaml            # 双 accepted + 双 wrong 期望矩阵、overflow 定向数据组
+├── problem.md              # 按题面守则书写的示例题面
 ├── code/
+│   ├── validator.cpp       # testlib 严格校验样板
+│   ├── std.cpp             # 主标程
+│   ├── std2.cpp            # 独立第二实现槽位（交叉验证）
+│   ├── brute.cpp           # 暴力槽位；写好后自行登记进 solutions.brute
+│   ├── wrong.cpp           # 思路层示例错解（被样例击杀）
+│   ├── wrong2.cpp          # 实现层示例错解（被 overflow 定向组击杀）
+│   ├── inmaker.cpp         # testlib 生成器骨架（<type> <seed>）
+│   ├── checker.cpp         # 仅 --judge custom
+│   └── interactor.cpp      # 仅 --judge interactive
 └── data/
-    ├── sample/
-    └── secret/
+    ├── sample/             # 1.in / 1.ans
+    └── secret/             # random01、overflow01（定向卡 wrong2）
 ```
+
+要点：
+
+- `--judge` 可选 `standard`（默认）、`custom`、`interactive`；custom 附 Checker 骨架，interactive 附 Interactor 骨架并使用带刷新的标程模板。
+- `solutions.brute` 初始为空：judge 对已登记的 brute 要求至少一个 TLE/MLE，脚手架数据尚无 brute-killer，实现真实暴力并准备击杀数据后再登记。
+- 错解枚举与数据强度纪律见 `references/mistake-taxonomy.md`；示例的 `overflow` 组演示了 `data.groups` + `targets` + `expected` 的定向击杀写法。
+- `new` 会持有工作区写锁并原子写入 `workspace.yaml`；并发写入返回 `build_busy`。
 
 `probhub.yaml` 默认声明 `code/validator.cpp`、`code/std.cpp`、`code/brute.cpp`、`code/wrong.cpp` 和 `code/inmaker.cpp`，但仍需实际编写这些文件。
 

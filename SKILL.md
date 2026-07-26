@@ -83,7 +83,7 @@ probhub build
 | 命令 | 作用 |
 |---|---|
 | `doctor` | 检查 Python、Node、Typst、g++ 和依赖 |
-| `new <ID>` | 创建 Schema v1 题目骨架与 `code/` 目录 |
+| `new <ID>` | 创建可编译、judge 开箱即过的题目骨架（`--judge` 可选 standard/custom/interactive），含双 accepted、示例错解与定向数据组 |
 | `lint [ID...]` | 检查规范源文件、代码路径和数据配对 |
 | `status [ID...]` | 报告 `current`、`stale`、`never-built` |
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
