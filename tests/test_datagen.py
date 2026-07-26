@@ -26,6 +26,7 @@ def run_cli(arguments):
 def set_recipes(problem_dir, recipes):
     config_path = Path(problem_dir) / "probhub.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["limits"]["time"] = 5  # headroom for loaded CI runners
     config.setdefault("data", {})["recipes"] = recipes
     with config_path.open("w", encoding="utf-8", newline="\n") as stream:
         yaml.safe_dump(config, stream, allow_unicode=True, sort_keys=False)

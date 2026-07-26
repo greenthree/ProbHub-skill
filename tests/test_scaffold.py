@@ -114,6 +114,17 @@ class ScaffoldTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("g++"), "g++ is required for scaffold judge integration tests")
 class ScaffoldJudgeIntegrationTests(unittest.TestCase):
+    def relax_time_limit(self, problem_dir):
+        # Loaded CI runners need headroom over the production default of 1s,
+        # especially for interactive judging with its extra process startup.
+        import yaml
+
+        config_path = problem_dir / "probhub.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["limits"]["time"] = 5
+        with config_path.open("w", encoding="utf-8", newline="\n") as stream:
+            yaml.safe_dump(config, stream, allow_unicode=True, sort_keys=False)
+
     def test_fresh_scaffold_passes_judge_for_all_three_judge_types(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -126,6 +137,7 @@ class ScaffoldJudgeIntegrationTests(unittest.TestCase):
                     "new", problem_id, "--judge", judge_type,
                 ])
                 self.assertEqual(code, 0)
+                self.relax_time_limit(root / problem_id)
                 result = judge_problem(root, root / problem_id)
                 self.assertTrue(
                     result["ok"],

@@ -26,6 +26,7 @@ def run_cli(arguments):
 def add_stress_config(problem_dir):
     config_path = Path(problem_dir) / "probhub.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["limits"]["time"] = 5  # headroom for loaded CI runners
     config["stress"] = {
         "generator": "code/inmaker.cpp",
         "args": ["{seed}"],
