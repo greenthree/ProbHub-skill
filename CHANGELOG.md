@@ -4,6 +4,8 @@
 
 ## [0.3.7] - 2026-07-26
 
+npm：`probhub@0.3.7`、`probhub-skill@0.3.7`；Git tag `v0.3.7`（发布提交 `e0842ef`）。
+
 审计修复与出题方法论版本（原计划的 0.3.8 文档里程碑并入本次发布）。
 
 - P0 正确性修复（PR #23）：组卷不再静默缺题——checkpoint 锁忙有界重试后以 `checkpoint_busy` 显式失败，占位题目连同原因经顶层与 manifest `missing` 字段报告；Windows 子进程改为挂起创建 → 入 Job → 恢复，消除 Job Object 逃逸窗口；CLI judge 与 output validator g++ 编译纳入受控超时与输出限额；`write_yaml`/`write_json` 全部原子化；损坏 build manifest 报告为结构化 `never-built` 而非 traceback；临时 `.probhub-*.typ` 从 workspace hash、快照与 gitignore 三处统一排除。

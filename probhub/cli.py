@@ -24,6 +24,7 @@ from .linting import (
     problem_status,
 )
 from .package_tools import verify_package
+from .scaffold import JUDGE_TYPES, scaffold_config, scaffold_files
 from .stressing import stress_problem
 from .typesetting import compile_collection, extract_problem_pdfs
 from .workspace import WORKSPACE_FILE, find_workspace, load_problem, load_workspace, problem_entries, select_entries
@@ -97,44 +98,35 @@ def command_init(args):
 
 
 def command_new(args):
-    root, workspace = workspace_context(args, allow_empty=True)
+    root, _ = workspace_context(args, allow_empty=True)
     problem_id = args.problem_id.strip()
-    if any(entry["id"] == problem_id for entry in problem_entries(workspace)):
-        raise ProbHubError(f"problem id already exists: {problem_id}")
-    directory = args.directory or problem_id
-    problem_dir = root / directory
-    if problem_dir.exists() and any(problem_dir.iterdir()):
-        raise ProbHubError(f"problem directory is not empty: {problem_dir}")
-    (problem_dir / "code").mkdir(parents=True, exist_ok=True)
-    (problem_dir / "data/sample").mkdir(parents=True, exist_ok=True)
-    (problem_dir / "data/secret").mkdir(parents=True, exist_ok=True)
+    judge_type = getattr(args, "judge", None) or "standard"
     name = args.name or problem_id
-    write_yaml(problem_dir / "probhub.yaml", {
-        "schema_version": 1,
+    directory = args.directory or problem_id
+    files = scaffold_files(name, judge_type)
+    config = scaffold_config(problem_id, name, judge_type)
+    with workspace_build_lock(root):
+        _, workspace = load_workspace(root, allow_empty=True)
+        if any(entry["id"] == problem_id for entry in problem_entries(workspace)):
+            raise ProbHubError(f"problem id already exists: {problem_id}")
+        problem_dir = root / directory
+        if problem_dir.exists() and any(problem_dir.iterdir()):
+            raise ProbHubError(f"problem directory is not empty: {problem_dir}")
+        for relative, content in files.items():
+            path = problem_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8", newline="\n") as stream:
+                stream.write(content)
+        write_yaml(problem_dir / "probhub.yaml", config)
+        workspace.setdefault("problems", []).append({"id": problem_id, "directory": directory})
+        write_yaml(root / WORKSPACE_FILE, workspace)
+    return {
+        "ok": True,
         "id": problem_id,
-        "name": name,
-        "display_name": name,
-        "difficulty": None,
-        "tags": [],
-        "limits": {"time": 1, "memory": 256, "output": 64, "processes": 32},
-        "statement": {"source": "problem.md"},
-        "judge": {"type": "standard", "validator": "code/validator.cpp"},
-        "solutions": {
-            "accepted": ["code/std.cpp"],
-            "brute": ["code/brute.cpp"],
-            "wrong": ["code/wrong.cpp"],
-        },
-        "generators": ["code/inmaker.cpp"],
-        "data": {"sample_dir": "data/sample", "secret_dir": "data/secret"},
-        "domjudge": {"include_pdf": True},
-    })
-    (problem_dir / "problem.md").write_text(
-        f"# {name}\n\n## 题目描述\n\n待补充。\n\n## 输入格式\n\n待补充。\n\n## 输出格式\n\n待补充。\n",
-        encoding="utf-8",
-    )
-    workspace.setdefault("problems", []).append({"id": problem_id, "directory": directory})
-    write_yaml(root / WORKSPACE_FILE, workspace)
-    return {"ok": True, "id": problem_id, "directory": str(problem_dir)}
+        "directory": str(problem_dir),
+        "judge": judge_type,
+        "files": sorted([*files, "probhub.yaml"]),
+    }
 
 
 def command_doctor(args):
@@ -358,6 +350,7 @@ def build_parser():
     new.add_argument("problem_id")
     new.add_argument("--name")
     new.add_argument("--directory")
+    new.add_argument("--judge", choices=list(JUDGE_TYPES), default="standard")
     new.set_defaults(handler=command_new)
 
     doctor = sub.add_parser("doctor")
