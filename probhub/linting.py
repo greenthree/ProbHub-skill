@@ -7,6 +7,7 @@ from pathlib import Path
 from .hashing import files_under, hash_file, hash_paths
 from .metadata import build_meta
 from .statement import parse_statement
+from .typesetting import is_temporary_typst_source
 from .workspace import load_problem, problem_entries
 
 DEFAULT_FORBIDDEN = ("TODO", "FIXME", "114514", "待补充")
@@ -103,6 +104,8 @@ def compute_workspace_hash(root, workspace):
     if typst_root.exists():
         for path in typst_root.rglob("*"):
             if not path.is_file() or ".preview" in path.parts:
+                continue
+            if is_temporary_typst_source(path):
                 continue
             if path.suffix.lower() in {".typ", ".png", ".jpg", ".jpeg", ".svg"}:
                 paths.append(path)
@@ -395,11 +398,21 @@ def lint_workspace(root, workspace, selected=None):
     return {"ok": not errors and all(item["ok"] for item in results), "errors": errors, "problems": results}
 
 
-def load_manifest(problem_dir):
+def _read_manifest(problem_dir):
     path = problem_dir / ".probhub/build-manifest.json"
     if not path.is_file():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
+        return None, None
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return None, f"unreadable build manifest: {exc}"
+    if not isinstance(manifest, dict):
+        return None, "invalid build manifest: expected a JSON object"
+    return manifest, None
+
+
+def load_manifest(problem_dir):
+    return _read_manifest(problem_dir)[0]
 
 
 def problem_status(
@@ -410,7 +423,7 @@ def problem_status(
     workspace_hash=None,
     collection_hash=None,
 ):
-    manifest = load_manifest(problem_dir)
+    manifest, manifest_error = _read_manifest(problem_dir)
     current = {
         "source_hash": compute_source_hash(problem_dir, config),
         "data_hash": compute_data_hash(problem_dir, config),
@@ -429,7 +442,11 @@ def problem_status(
             else collection_hash
         )
     if not manifest:
-        return {"state": "never-built", **current}
+        return {
+            "state": "never-built",
+            **({"manifest_error": manifest_error} if manifest_error else {}),
+            **current,
+        }
     stale = []
     if manifest.get("schema_version") != BUILD_MANIFEST_SCHEMA_VERSION:
         stale.append("manifest_schema")

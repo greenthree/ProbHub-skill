@@ -12,6 +12,12 @@ from .process_control import run_managed_to_files
 
 TYPST_TIMEOUT_SECONDS = 120
 TYPST_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
+TYPST_TEMP_SOURCE_PREFIX = ".probhub-"
+
+
+def is_temporary_typst_source(path):
+    path = Path(path)
+    return path.name.startswith(TYPST_TEMP_SOURCE_PREFIX) and path.suffix.lower() == ".typ"
 
 
 def _typst_string(value):
@@ -31,10 +37,17 @@ def _configured_typst_sources(root, workspace, main_typ):
             value = _typst_string(contest[key])
             main_text = re.sub(rf'({key}:\s*)"[^"]*"', rf'\g<1>"{value}"', main_text, count=1)
 
-    generated = []
     lib_typ = main_typ.parent.parent / "lib.typ"
-    if cover and lib_typ.is_file():
-        generated_lib = lib_typ.with_name(f".probhub-lib-{token}.typ")
+    if cover and not lib_typ.is_file():
+        raise ProbHubError(
+            f"Typst cover config requires the shared library: {lib_typ}",
+            code="typeset_failed",
+        )
+
+    generated_lib = None
+    lib_text = None
+    if cover:
+        generated_lib = lib_typ.with_name(f"{TYPST_TEMP_SOURCE_PREFIX}lib-{token}.typ")
         lib_text = lib_typ.read_text(encoding="utf-8")
         logo = _typst_string(cover.get("logo", "usts.png"))
         width = str(cover.get("logo_width", "9cm")).strip() or "9cm"
@@ -58,25 +71,25 @@ def _configured_typst_sources(root, workspace, main_typ):
             lib_text,
             count=1,
         )
-        generated_lib.write_text(lib_text, encoding="utf-8")
-        generated.append(generated_lib)
         main_text = re.sub(
             r'(#import\s+")\.\./lib\.typ("\s*:)',
             rf'\g<1>../{generated_lib.name}\g<2>',
             main_text,
             count=1,
         )
-    elif cover:
+
+    generated_main = main_typ.with_name(f"{TYPST_TEMP_SOURCE_PREFIX}main-{token}.typ")
+    generated = []
+    try:
+        if generated_lib is not None:
+            generated.append(generated_lib)
+            generated_lib.write_text(lib_text, encoding="utf-8")
+        generated.append(generated_main)
+        generated_main.write_text(main_text, encoding="utf-8")
+    except BaseException:
         for path in generated:
             path.unlink(missing_ok=True)
-        raise ProbHubError(
-            f"Typst cover config requires the shared library: {lib_typ}",
-            code="typeset_failed",
-        )
-
-    generated_main = main_typ.with_name(f".probhub-main-{token}.typ")
-    generated_main.write_text(main_text, encoding="utf-8")
-    generated.append(generated_main)
+        raise
     return generated_main, generated
 
 

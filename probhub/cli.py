@@ -66,6 +66,7 @@ def _ensure_local_gitignore(root):
         "**/.probhub/sandbox-cache-v1.json",
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",
+        "**/.probhub-*.typ",
     ]
     present = {line.strip() for line in existing.splitlines()}
     missing = [line for line in required if line not in present]
