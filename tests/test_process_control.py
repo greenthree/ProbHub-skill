@@ -160,28 +160,32 @@ class ProcessControlTests(unittest.TestCase):
 
     @unittest.skipUnless(platform.system() == "Windows", "Windows job containment only")
     def test_windows_spawn_resume_failure_kills_process(self):
-        pids = []
+        procs = []
+        real_assign = process_control.windows_assign_job
 
-        def fail_resume(pid):
-            pids.append(pid)
-            return False
+        def record_assign(proc, memory_limit_mb=None, process_limit=None):
+            procs.append(proc)
+            return real_assign(proc, memory_limit_mb, process_limit)
 
-        with mock.patch.object(process_control, "windows_resume_process", side_effect=fail_resume):
+        with (
+            mock.patch.object(process_control, "windows_assign_job", side_effect=record_assign),
+            mock.patch.object(process_control, "windows_resume_process", return_value=False),
+        ):
             with self.assertRaises(OSError):
                 process_control.spawn_managed(
                     [sys.executable, "-c", "print('x')"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-        self.assertEqual(len(pids), 1)
-        self.wait_until_dead(pids[0])
+        self.assertEqual(len(procs), 1)
+        self.wait_until_reaped(procs[0])
 
     @unittest.skipUnless(platform.system() == "Windows", "Windows job containment only")
     def test_windows_containment_failure_kills_suspended_process(self):
-        pids = []
+        procs = []
 
         def fail_assign(proc, memory_limit_mb=None, process_limit=None):
-            pids.append(proc.pid)
+            procs.append(proc)
             return None
 
         with mock.patch.object(process_control, "windows_assign_job", side_effect=fail_assign):
@@ -191,8 +195,23 @@ class ProcessControlTests(unittest.TestCase):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-        self.assertEqual(len(pids), 1)
-        self.wait_until_dead(pids[0])
+        self.assertEqual(len(procs), 1)
+        self.wait_until_reaped(procs[0])
+
+    @unittest.skipUnless(platform.system() == "Windows", "Windows-specific liveness semantics")
+    def test_process_alive_reports_exited_child_dead_while_handle_is_held(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "print('x')"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            proc.wait(timeout=10)
+            # The Popen object still holds the process handle, which keeps the
+            # PID reserved; a correct implementation must still report it dead.
+            self.assertFalse(process_alive(proc.pid))
+        finally:
+            proc.kill()
 
     def run_command(self, root, code, **limits):
         root = Path(root)
@@ -212,6 +231,15 @@ class ProcessControlTests(unittest.TestCase):
         while process_alive(pid) and time.time() < deadline:
             time.sleep(0.05)
         self.assertFalse(process_alive(pid), f"child process {pid} survived")
+
+    def wait_until_reaped(self, proc):
+        # Holding the Popen reference pins the PID (no reuse) and, with the
+        # exit-code-aware process_alive, makes the death check deterministic.
+        deadline = time.time() + 5
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIsNotNone(proc.poll(), f"child process {proc.pid} survived")
+        self.assertFalse(process_alive(proc.pid), f"exited child {proc.pid} still reported alive")
 
     def test_fast_output_flood_is_ole_and_capture_is_truncated(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -328,19 +328,34 @@ def process_alive(pid):
             import ctypes
             from ctypes import wintypes
 
+            ERROR_ACCESS_DENIED = 5
+            STILL_ACTIVE = 259
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
             kernel32.OpenProcess.restype = wintypes.HANDLE
             kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
             handle = kernel32.OpenProcess(0x1000, False, int(pid))
             if not handle:
-                return False
-            kernel32.CloseHandle(handle)
-            return True
+                # A live process owned by another user opens with ACCESS_DENIED;
+                # report it alive instead of pretending it exited.
+                return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+            try:
+                exit_code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return True
+                # An exited process stays openable while any handle is held
+                # (including our own Popen object); only STILL_ACTIVE means alive.
+                return exit_code.value == STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
         except Exception:
             return False
     try:
         os.kill(int(pid), 0)
+        return True
+    except PermissionError:
         return True
     except (OSError, ProcessLookupError):
         return False
