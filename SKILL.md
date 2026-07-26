@@ -88,7 +88,7 @@ probhub build
 | `lint [ID...]` | 检查规范源文件、代码路径和数据配对 |
 | `status [ID...]` | 报告 `current`、`stale`、`never-built` |
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
-| `stress ID...` | 反复生成小数据，对拍 accepted 与 brute，保存首个可重放反例 |
+| `stress ID...` | 反复生成小数据，对拍 accepted 与 brute，保存首个可重放反例；`--against <解法>` 反向找刀，`--fixate <case>` 把命中一步固化为 secret 数据 + 配方 + 定向数据组 |
 | `checkpoint ID` | 发布当前题目的不可变 draft checkpoint，供并行组卷使用 |
 | `seal ID` | lint、judge、stress 后冻结 revision，并自动生成一版完整试卷 |
 | `assemble` | 使用各题最新 checkpoint 生成隔离的完整试卷 generation |
@@ -202,7 +202,7 @@ probhub build L01 --skip-judge
 - Checker/Interactor 返回 `FAIL`：这是题目基础设施错误，不得当作错解被击杀；检查官方答案、协议和评测程序。
 - brute 出现 WA：修复 brute、标程或答案；不得忽略。
 - brute 没有任何 TLE/MLE：检查复杂度与数据强度。
-- wrong 全 AC：补充针对性数据或修正错解模型。
+- wrong 全 AC：用 `probhub stress <ID> --against <该错解> --fixate <case>` 找刀并一步固化；`not_separated` 时加强生成器分布或修正错解模型（见 `references/stress.md` 第 8 节）。
 - 出现 `OLE`：先检查程序是否无限输出，再判断 `limits.output` 是否确实过小；不得用放宽上限掩盖错误程序。
 - 出现 `process limit exceeded`：检查递归创建进程或未回收子进程；官方 Validator、Checker、Interactor、Generator 或编译器触发限制时按基础设施错误处理。
 - 评测结束后仍有后代进程、Windows Job 建立失败或资源控制异常：视为沙箱基础设施错误，不得继续无保护运行；读取 `references/process-control.md`。
