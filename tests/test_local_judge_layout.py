@@ -71,5 +71,12 @@ class LocalJudgeLayoutTests(unittest.TestCase):
                 "code/validator.cpp",
             )
 
+    def test_failed_status_requires_peak_memory_evidence_for_mle(self):
+        self.assertEqual(MODULE._failed_status(-11, b"", True, 10.0, 256), "RE")
+        self.assertEqual(MODULE._failed_status(1, b"", True, None, 256), "RE")
+        self.assertEqual(MODULE._failed_status(-9, b"", True, 255.0, 256), "MLE")
+        self.assertEqual(MODULE._failed_status(-11, b"", False, 300.0, 256), "RE")
+
+
 if __name__ == "__main__":
     unittest.main()

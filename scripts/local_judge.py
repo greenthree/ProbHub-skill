@@ -613,21 +613,13 @@ def read_problem_output_limit(prob_dir, config=None):
     return max(output_limit, 1), max(process_limit, 1)
 
 
-def _looks_like_memory_error(stderr):
-    if not stderr:
-        return False
-    text = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else str(stderr)
-    text = text.lower()
-    markers = ("bad_alloc", "out of memory", "cannot allocate", "memoryerror", "std::bad_alloc")
-    return any(marker in text for marker in markers)
-
-
 def _failed_status(returncode, stderr, memory_enforced, peak_memory_mb, memory_limit):
-    if not memory_enforced:
-        return "RE"
-    if peak_memory_mb is not None and peak_memory_mb >= memory_limit * 0.98:
-        return "MLE"
-    if returncode < 0 or not stderr or _looks_like_memory_error(stderr):
+    """MLE requires peak-memory evidence; everything else is RE (matches stress)."""
+    if (
+        memory_enforced
+        and peak_memory_mb is not None
+        and peak_memory_mb >= memory_limit * 0.98
+    ):
         return "MLE"
     return "RE"
 
