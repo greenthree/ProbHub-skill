@@ -2,6 +2,16 @@
 
 本文件整理自 README 历史快照、GitHub PR 与 npm 发布记录（首次建立于 2026-07-26）。此前版本的条目为事后补记，粒度以 PR 为准。
 
+## [0.4.0] - 2026-07-26
+
+数据工坊版本（ROADMAP 0.4.0：secret 数据从"裸字节"变成"可执行配方"，错解从"手工找刀"变成"一条命令找刀"，新题从"手写样板"变成"开箱即编译"）。
+
+- **`new` 可编译脚手架**（PR #29）：生成完整可工作的 A+B 示例题——testlib validator 样板、双 accepted（std + 独立 std2 槽位）、未登记 brute 槽位、思路层/实现层双示例错解（后者由 overflow 定向数据组击杀，示范期望矩阵写法）、testlib 生成器骨架与样例/隐藏数据；三种 judge 模式（standard/custom/interactive）lint 零错误、judge 开箱 `all_expectations_met`；工作区注册纳入写锁与原子写。
+- **`probhub gen` 测试点配方**（PR #30）：`data.recipes` 为每个 secret 测试点声明来源（`manual` 或生成器 + 精确 args）；gen 编译生成器与首个 accepted，按配方生成 → Validator 过检 → 产 `.ans`，plan 模式报告 new/changed/unchanged（即字节一致性验证），`--apply` 才写入且任一失败零写入；输出 LF 归一保证跨平台字节一致；lint 报告无配方测试点（存量兼容 warning）。
+- **`stress --against` 错解找刀**（PR #32）：对拍 accepted 与任意目标解法，语义翻转——不一致即 `killer_found`（反例可 replay），全程一致报 `not_separated`；`--fixate` 一步固化命中为归一化 secret 数据 + gen 配方（stress 生成器与命中轮精确 argv）+ 定向 `wrong-solution-killer` 数据组；stress 生成器输出统一 LF 归一（修复 Windows CRLF 被 Linux 语义 validator 拒绝）。
+- 修复 `process_alive` 存活判定（PR #31）：Windows 用退出码判定而非"可打开即存活"（句柄挂住的僵尸/PID 复用不再误判），Unix EPERM 判存活；容器化测试改为持句柄确定性断言。
+- CI 加固（PR #33）：push 只跑 main + concurrency 取消过期运行（消除同 commit 双跑），集成测试对脚手架题放宽 TL 余量。
+
 ## [0.3.7] - 2026-07-26
 
 npm：`probhub@0.3.7`、`probhub-skill@0.3.7`；Git tag `v0.3.7`（发布提交 `e0842ef`）。
