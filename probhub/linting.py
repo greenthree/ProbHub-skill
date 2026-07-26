@@ -154,7 +154,7 @@ def lint_problem(root, workspace, entry):
     memory = limits.get("memory")
     output_limit = limits.get("output", 64)
     process_limit = limits.get("processes", 32)
-    if not isinstance(time_limit, int) or time_limit <= 0:
+    if isinstance(time_limit, bool) or not isinstance(time_limit, int) or time_limit <= 0:
         errors.append("limits.time must be a positive integer")
     if not isinstance(memory, int) or memory < 256 or memory & (memory - 1):
         errors.append("limits.memory must be a power of two and at least 256")
@@ -304,7 +304,7 @@ def lint_problem(root, workspace, entry):
                 for arg in args:
                     try:
                         str(arg).format(seed=1, round=1)
-                    except (KeyError, ValueError):
+                    except (IndexError, KeyError, ValueError):
                         errors.append(f"invalid stress.args template: {arg}")
             rounds = stress.get("rounds", 1000)
             if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds <= 0:

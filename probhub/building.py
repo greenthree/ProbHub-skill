@@ -347,10 +347,21 @@ def _remove_generated_path(path):
 
 
 def _publish_output_validators(source, destination):
+    destination = Path(destination)
     try:
-        _remove_generated_path(destination)
-        if source.is_dir():
-            shutil.copytree(source, destination)
+        if not source.is_dir():
+            _remove_generated_path(destination)
+            return
+        # Stage the full copy next to the destination first so the old
+        # validators are only removed once the replacement is complete.
+        stage = destination.with_name(f"{destination.name}.stage-{uuid.uuid4().hex}")
+        shutil.copytree(source, stage)
+        try:
+            _remove_generated_path(destination)
+            os.replace(stage, destination)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage, ignore_errors=True)
     except OSError as exc:
         raise ProbHubError(
             f"failed to publish {destination}: {exc}",
