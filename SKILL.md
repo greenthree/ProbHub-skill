@@ -84,6 +84,7 @@ probhub build
 |---|---|
 | `doctor` | 检查 Python、Node、Typst、g++ 和依赖 |
 | `new <ID>` | 创建可编译、judge 开箱即过的题目骨架（`--judge` 可选 standard/custom/interactive），含双 accepted、示例错解与定向数据组 |
+| `gen <ID>` | 按 `data.recipes` 配方生成/校验 secret 数据；默认 plan 只报告，`--apply` 才写入，失败零写入 |
 | `lint [ID...]` | 检查规范源文件、代码路径和数据配对 |
 | `status [ID...]` | 报告 `current`、`stale`、`never-built` |
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
@@ -189,6 +190,7 @@ probhub build L01 --skip-judge
 - 非唯一答案和浮点题使用 `judge.type: custom` 与 `code/checker.cpp`；交互题使用 `judge.type: interactive` 与 `code/interactor.cpp`。实现前读取 `references/checker-interactor.md`。
 - Checker/Interactor 必须使用附带的 DOMjudge/testlib 协议；交互题按需设置 `judge.interactive.idle_limit` 和 `transcript_limit`。Core 负责本地编译以及生成 `output_validators/validate/`，不得手工维护该生成目录。
 - 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
+- secret 数据优先通过 `data.recipes` 配方生成（`probhub gen`）：生成器 + 精确 args 可复现同一字节，手工数据显式 `manual: true`；没有配方的测试点 lint 会给 warning。配方格式见 `references/workspace-schema-v1.md`。
 - 为定向卡错解和复杂度数据配置 `data.groups` 与结构化 `solutions.*[].expected`；实现或审查时读取 `references/data-groups-expectations.md`。要求错解必须 WA 时显式写 `status: WA`，不得用偶然 RE/TLE 代替。
 - `limits.time` 使用正数秒；`limits.memory` 至少为 `256MB` 且为 2 的幂；`limits.output` 使用正整数 MiB，默认 `64`；`limits.processes` 使用正整数，默认 `32`。
 - 复杂生成器读取 `references/cyaron.md`；简单 C++ 生成器读取 `references/fast.md`。用于差分测试的 Generator 必须把单个测试点写到 stdout，并只由 `{seed}` / `{round}` 参数控制随机性；读取 `references/stress.md`。

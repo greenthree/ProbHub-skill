@@ -4,6 +4,8 @@ import math
 import re
 from pathlib import Path
 
+from .datagen import recipe_coverage
+from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
 from .metadata import build_meta
 from .statement import parse_statement
@@ -373,6 +375,37 @@ def lint_problem(root, workspace, entry):
             errors.append(f"{kind} inputs without answers: {', '.join(sorted(inputs - answers))}")
         if answers - inputs:
             errors.append(f"{kind} answers without inputs: {', '.join(sorted(answers - inputs))}")
+
+    try:
+        recipes, uncovered = recipe_coverage(problem_dir, config)
+    except ProbHubError as exc:
+        errors.append(str(exc))
+    else:
+        if recipes:
+            recipe_generators = {
+                recipe.get("generator")
+                for recipe in recipes
+                if not recipe.get("manual") and recipe.get("generator")
+            }
+            for generator in sorted(recipe_generators):
+                generator_path = _problem_relative_path(problem_dir, generator)
+                if generator_path is None:
+                    errors.append(
+                        f"recipe generator must stay inside the problem directory: {generator}"
+                    )
+                elif not generator_path.is_file():
+                    errors.append(f"recipe generator not found: {generator}")
+        if uncovered:
+            if recipes:
+                warnings.append(
+                    f"{len(uncovered)} secret case(s) have no generation recipe "
+                    f"(first: {uncovered[0]})"
+                )
+            else:
+                warnings.append(
+                    f"secret data has no generation recipes "
+                    f"({len(uncovered)} case(s) not reproducible)"
+                )
     return {"id": entry["id"], "ok": not errors, "errors": errors, "warnings": warnings, "source_hash": compute_source_hash(problem_dir, config), "data_hash": compute_data_hash(problem_dir, config)}
 
 
