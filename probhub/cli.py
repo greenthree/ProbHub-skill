@@ -185,6 +185,8 @@ def command_stress(args):
     entries = select_entries(workspace, args.problem)
     if args.replay is not None and len(entries) != 1:
         raise ProbHubError("stress --replay requires exactly one problem id")
+    if args.against is not None and len(entries) != 1:
+        raise ProbHubError("stress --against requires exactly one problem id")
     results = {}
     for entry in entries:
         problem_dir, config = load_problem(root, entry)
@@ -195,6 +197,9 @@ def command_stress(args):
             rounds=args.rounds,
             master_seed=args.seed,
             replay=args.replay,
+            against=args.against,
+            fixate=args.fixate,
+            fixate_group=args.group,
         )
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
 
@@ -392,6 +397,9 @@ def build_parser():
     stress.add_argument("--rounds", type=int, help="override stress.rounds")
     stress.add_argument("--seed", type=int, help="master seed; round seeds increase from this value")
     stress.add_argument("--replay", help="counterexample directory/input path, or 'latest'")
+    stress.add_argument("--against", help="hunt a killer for this solution instead of comparing with brute")
+    stress.add_argument("--fixate", help="on a killer hit, persist it as this secret case with recipe and data group")
+    stress.add_argument("--group", help="data group name for --fixate (defaults to the case name)")
     stress.set_defaults(handler=command_stress)
 
     checkpoint = sub.add_parser("checkpoint")

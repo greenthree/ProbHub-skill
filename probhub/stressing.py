@@ -2,6 +2,7 @@ import json
 import math
 import os
 import platform
+import re
 import secrets
 import shutil
 import sys
@@ -11,13 +12,16 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .build_lock import workspace_build_lock
 from .errors import ProbHubError
-from .io import write_json
+from .io import atomic_write_bytes, normalize_newlines, read_yaml, write_json, write_yaml
 from .output_compare import compare_standard_output
 from .process_control import DEFAULT_PROCESS_LIMIT, run_managed_to_files
 
 
 DEFAULT_ROUNDS = 1000
+# Keep in sync with datagen.CASE_NAME_PATTERN (importing datagen here would cycle).
+_CASE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 DEFAULT_TOOL_TIMEOUT = 5.0
 
 
@@ -67,7 +71,7 @@ def _resolve_problem_file(problem_dir, value, label):
     return path
 
 
-def _stress_config(problem_dir, config):
+def _stress_config(problem_dir, config, against=None):
     stress = config.get("stress")
     if not isinstance(stress, dict):
         raise ProbHubError("stress configuration is required in probhub.yaml")
@@ -76,7 +80,12 @@ def _stress_config(problem_dir, config):
         raise ProbHubError("probhub stress does not support interactive judging")
     generator_rel = stress.get("generator")
     accepted_rel = stress.get("accepted") or _first_solution(config, "accepted")
-    brute_rel = stress.get("brute") or _first_solution(config, "brute")
+    if against is not None:
+        # Killer hunt: the accepted solution is compared against the target
+        # instead of the brute; a mismatch is the desired outcome.
+        brute_rel = against
+    else:
+        brute_rel = stress.get("brute") or _first_solution(config, "brute")
     validator_rel = ((config.get("judge") or {}).get("validator"))
     checker_rel = ((config.get("judge") or {}).get("checker")) if judge_type == "custom" else None
     args = stress.get("args", ["{seed}"])
@@ -382,7 +391,9 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
             configured["output_limit"],
             configured["process_limit"],
         )
-        input_data = generator["stdout"]
+        # Windows text-mode generators emit CRLF; validators are compiled with
+        # Linux line-ending semantics, so normalise like `gen` does.
+        input_data = normalize_newlines(generator["stdout"])
         if generator["status"] != "AC":
             return {
                 "ok": False,
@@ -633,11 +644,109 @@ def _public_run(result):
     return public
 
 
-def stress_problem(root, problem_dir, config, rounds=None, master_seed=None, replay=None):
+def _is_killer_outcome(outcome):
+    return (
+        outcome.get("kind") == "counterexample"
+        and (
+            outcome.get("reason") == "output_mismatch"
+            or str(outcome.get("reason", "")).startswith("brute_")
+        )
+    )
+
+
+def _fixate_killer(root, problem_dir, config, configured, outcome, case_name, group_name, against_rel):
+    """Persist a found killer: secret data + gen recipe + targeted data group."""
+    if not _CASE_NAME_PATTERN.match(case_name or ""):
+        raise ProbHubError(f"invalid fixate case name: {case_name!r}", code="fixate_invalid")
+    data_config = config.get("data") or {}
+    secret_dir = problem_dir / data_config.get("secret_dir", "data/secret")
+    input_path = secret_dir / f"{case_name}.in"
+    answer_path = secret_dir / f"{case_name}.ans"
+    if input_path.exists() or answer_path.exists():
+        raise ProbHubError(
+            f"fixate target already exists: {case_name}",
+            code="fixate_exists",
+        )
+    input_bytes = normalize_newlines(outcome.get("input") or b"")
+    accepted = outcome.get("accepted") or {}
+    answer_bytes = normalize_newlines(accepted.get("stdout") or b"")
+    generator_args = [str(item) for item in outcome.get("generator_args") or []]
+    group = group_name or case_name
+    target = str(against_rel).replace("\\", "/")
+    pattern = f"secret/{case_name}"
+    config_path = problem_dir / "probhub.yaml"
+    with workspace_build_lock(root):
+        live = read_yaml(config_path)
+        data = live.setdefault("data", {})
+        recipes = data.setdefault("recipes", [])
+        if any(isinstance(item, dict) and item.get("case") == case_name for item in recipes):
+            raise ProbHubError(
+                f"a recipe already exists for case: {case_name}",
+                code="fixate_exists",
+            )
+        recipes.append({
+            "case": case_name,
+            "generator": configured["generator_rel"],
+            "args": generator_args,
+        })
+        groups = data.setdefault("groups", [])
+        existing = next(
+            (item for item in groups if isinstance(item, dict) and item.get("name") == group),
+            None,
+        )
+        if existing is None:
+            groups.append({
+                "name": group,
+                "role": "wrong-solution-killer",
+                "patterns": [pattern],
+                "targets": [target],
+            })
+        else:
+            patterns = existing.get("patterns") or existing.get("cases") or []
+            patterns = [patterns] if isinstance(patterns, str) else list(patterns)
+            if pattern not in patterns:
+                patterns.append(pattern)
+            existing["patterns"] = patterns
+            existing.pop("cases", None)
+            targets = existing.get("targets") or []
+            targets = [targets] if isinstance(targets, str) else list(targets)
+            if target not in targets:
+                targets.append(target)
+            existing["targets"] = targets
+        # Data files first so the config never references missing files.
+        atomic_write_bytes(input_path, input_bytes)
+        atomic_write_bytes(answer_path, answer_bytes)
+        write_yaml(config_path, live)
+    return {
+        "case": case_name,
+        "group": group,
+        "generator": configured["generator_rel"],
+        "args": generator_args,
+        "input": str(input_path.relative_to(problem_dir).as_posix()),
+        "answer": str(answer_path.relative_to(problem_dir).as_posix()),
+        "target": target,
+    }
+
+
+def stress_problem(
+    root,
+    problem_dir,
+    config,
+    rounds=None,
+    master_seed=None,
+    replay=None,
+    against=None,
+    fixate=None,
+    fixate_group=None,
+):
     root = Path(root).resolve()
     problem_dir = Path(problem_dir).resolve()
     problem_id = str(config.get("id") or problem_dir.name)
-    configured = _stress_config(problem_dir, config)
+    if fixate is not None and against is None:
+        raise ProbHubError("--fixate requires --against")
+    if fixate is not None and replay is not None:
+        raise ProbHubError("--fixate cannot be combined with --replay")
+    configured = _stress_config(problem_dir, config, against=against)
     requested_rounds = configured["rounds"] if rounds is None else rounds
     if not _is_int(requested_rounds) or requested_rounds <= 0:
         raise ProbHubError("--rounds must be a positive integer")
@@ -683,11 +792,17 @@ def stress_problem(root, problem_dir, config, rounds=None, master_seed=None, rep
                     round_temp,
                     input_data=input_path.read_bytes(),
                 )
+            ok = bool(outcome["ok"])
+            status = "passed" if ok else outcome["kind"]
+            if against is not None and not ok and _is_killer_outcome(outcome):
+                ok = True
+                status = "killer_confirmed"
             return {
-                "ok": bool(outcome["ok"]),
-                "status": "passed" if outcome["ok"] else outcome["kind"],
+                "ok": ok,
+                "status": status,
                 "problem_id": problem_id,
                 "replay": True,
+                "against": configured["brute_rel"] if against is not None else None,
                 "artifact": str(artifact),
                 "input": str(input_path),
                 "seed": seed,
@@ -723,7 +838,7 @@ def stress_problem(root, problem_dir, config, rounds=None, master_seed=None, rep
                     outcome,
                 )
                 relative = artifact.relative_to(root).as_posix()
-                return {
+                result = {
                     "ok": False,
                     "status": outcome["kind"],
                     "problem_id": problem_id,
@@ -743,7 +858,43 @@ def stress_problem(root, problem_dir, config, rounds=None, master_seed=None, rep
                     "metadata": metadata,
                     "compile": compile_events,
                 }
+                if against is not None:
+                    result["against"] = configured["brute_rel"]
+                    if _is_killer_outcome(outcome):
+                        # In a killer hunt a mismatch is the desired result.
+                        result["ok"] = True
+                        result["status"] = "killer_found"
+                        if fixate is not None:
+                            result["fixated"] = _fixate_killer(
+                                root,
+                                problem_dir,
+                                config,
+                                configured,
+                                outcome,
+                                fixate,
+                                fixate_group,
+                                configured["brute_rel"],
+                            )
+                return result
 
+    if against is not None:
+        return {
+            "ok": True,
+            "status": "not_separated",
+            "problem_id": problem_id,
+            "judge_type": configured["judge_type"],
+            "against": configured["brute_rel"],
+            "rounds_requested": requested_rounds,
+            "rounds_completed": requested_rounds,
+            "master_seed": master_seed,
+            "counterexample": None,
+            "message": (
+                "target matched accepted on every round; it is not separated by "
+                "the current generator distribution — strengthen the generator "
+                "or drop the wrong-solution model"
+            ),
+            "compile": compile_events,
+        }
     return {
         "ok": True,
         "status": "passed",

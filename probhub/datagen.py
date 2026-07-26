@@ -12,14 +12,12 @@ Windows and Linux (matching DOMjudge expectations).
 """
 
 import hashlib
-import os
 import re
 import tempfile
-import uuid
 from pathlib import Path
 
 from .errors import ProbHubError
-from .io import atomic_write_json
+from .io import atomic_write_bytes, atomic_write_json, normalize_newlines as _normalize_newlines
 from .stressing import _prepare_program, _run
 
 CASE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -27,10 +25,6 @@ TOOL_TIMEOUT_SECONDS = 60.0
 TOOL_MEMORY_LIMIT_MB = 2048
 GEN_MANIFEST_SCHEMA_VERSION = 1
 GEN_MANIFEST_PATH = Path(".probhub/gen-manifest.json")
-
-
-def _normalize_newlines(payload):
-    return payload.replace(b"\r\n", b"\n")
 
 
 def _sha256(payload):
@@ -139,17 +133,6 @@ def _first_accepted(config):
         "gen requires at least one accepted solution to produce answers",
         code="gen_config",
     )
-
-
-def _atomic_write_bytes(path, payload):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_bytes(payload)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def generate_problem_data(problem_dir, config, *, apply_changes=False, only=None):
@@ -358,8 +341,8 @@ def generate_problem_data(problem_dir, config, *, apply_changes=False, only=None
 
         if apply_changes and pending:
             for item in pending:
-                _atomic_write_bytes(secret_dir / f"{item['case']}.in", item["_input_bytes"])
-                _atomic_write_bytes(secret_dir / f"{item['case']}.ans", item["_answer_bytes"])
+                atomic_write_bytes(secret_dir / f"{item['case']}.in", item["_input_bytes"])
+                atomic_write_bytes(secret_dir / f"{item['case']}.ans", item["_answer_bytes"])
             applied = True
         if apply_changes:
             manifest_cases = {}

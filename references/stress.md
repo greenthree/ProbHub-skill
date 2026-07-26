@@ -253,3 +253,40 @@ CLI 退出码：
 - `130`：用户中断（Ctrl+C）。
 
 不要只匹配自然语言输出；自动化流程应检查退出码以及 `ok`、`status`、`reason` 和反例路径。
+
+## 8. `--against`：给错解找刀
+
+`stress --against <solution>` 把对拍对象从 brute 换成任意目标解法，语义随之翻转：**发现不一致就是成功**（产出 killer 候选），全部轮次一致则说明该错解在当前生成器分布下未被区分。
+
+```powershell
+probhub stress L05 --against code/wrong_greedy.cpp --rounds 200 --seed 7
+probhub stress L05 --against code/wrong_greedy.cpp --fixate greedy-kill01 --rounds 200 --seed 7
+probhub stress L05 --against code/wrong_greedy.cpp --fixate greedy-kill01 --group greedy-counterexample
+```
+
+状态语义（`--against` 模式）：
+
+| 情形 | `ok` | `status` | 说明 |
+|---|---|---|---|
+| 目标输出与 accepted 不一致，或目标 RE/TLE/MLE/OLE | `true` | `killer_found` | 反例保存到 `.probhub/stress/`，可 `--replay` |
+| 全部轮次一致 | `true` | `not_separated` | 加强生成器或放弃该错解模型 |
+| accepted 自身失败 | `false` | `counterexample` | 标程被随机数据击穿，按正常 stress 反例处理 |
+| Generator/Validator/Checker 失败 | `false` | `infrastructure` | 先修基础设施 |
+
+`--replay` 配合 `--against` 复核已保存反例时，确认击杀返回 `killer_confirmed`。
+
+### 一步固化（`--fixate`）
+
+命中 killer 时，`--fixate <case>` 原子完成三件事：
+
+1. 归一化后的输入与 accepted 输出写入 `data/secret/<case>.in` / `.ans`；
+2. `data.recipes` 追加配方（stress 生成器 + 命中轮的精确 argv）——之后 `probhub gen` 可字节一致地复现该测试点；
+3. `data.groups` 追加（或并入 `--group` 指定的既有组）`wrong-solution-killer` 组，pattern `secret/<case>`、target 指向目标解法。
+
+固化后按期望矩阵闭环：在 `solutions.wrong` 中为目标解法声明 `expected: {status: WA, groups: [<组名>], forbid: [FAIL]}`，再运行 `probhub judge` 确认击杀——期望矩阵仍是击杀判定的唯一事实来源。同名 case 或已有配方时固化以 `fixate_exists` 拒绝，不覆盖既有数据。
+
+### 工作流纪律
+
+- 先用小轮次（约 100）测量吞吐，再按预计时间至少 1.5 倍加 60 秒设置外层等待预算。
+- 定向构造优先、随机分布只作补充：`not_separated` 通常意味着生成器分布需要向该错法的"死亡模式"倾斜（见 `references/mistake-taxonomy.md` 第 7 节）。
+- `--against` 需要题目已有 `stress` 配置；尚未实现 brute 时可暂以 `stress.brute: code/std.cpp` 占位以通过 lint。

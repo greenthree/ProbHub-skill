@@ -26,6 +26,22 @@ def _atomic_write_text(path, text):
         temporary.unlink(missing_ok=True)
 
 
+def atomic_write_bytes(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(payload)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def normalize_newlines(payload):
+    """Normalise CRLF to LF so generated data is byte-identical across platforms."""
+    return payload.replace(b"\r\n", b"\n")
+
+
 def write_yaml(path, data):
     _atomic_write_text(path, yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=1000))
 
