@@ -175,12 +175,16 @@ probhub build L01 --skip-judge
 
 - 现有题面来源不得擅自改意，只修正格式；Idea 题应自行完成约束、算法与简洁题面。
 - 输入格式中的数据范围使用中文括号，紧跟变量第一次出现处，例如：`输入一个整数 $T$（$1\le T\le 100$）。`
+- 题面写法守则：
+  - 任务目标必须在题目描述阶段即可读懂，不得推迟到输入输出格式甚至样例才首次出现；关键定义、对象、操作在就近位置解释。
+  - 数据范围必须覆盖输入中每个量的完整前提：下界、字符集、互异性、是否保证有解、是否保证成树/连通等；浮点输出题写明误差判定标准，而不是只写"保留若干位小数"。
+  - 样例应有强度：多操作题覆盖不同操作，多答案类型题覆盖不同输出类型。样例解释不得泄露关键结论、核心公式或标准做法；读者可通过画图、手算或代入定义自行看懂时可不写。
 - 在 `code/` 中维护：
   - `std.cpp`：最优正确解。
   - `validator.cpp`：基于 testlib.h，严格验证范围与格式。
   - `brute.cpp`：朴素但绝对正确，允许 TLE/MLE，不允许 WA。
-  - `wrong*.cpp`：针对典型错误，必须被数据击杀。
-  - `inmaker.cpp` 或生成脚本：覆盖样例、随机、边界、极限和定向卡错解数据。
+  - `wrong*.cpp`：针对典型错误，必须被数据击杀。编写前先按 `references/mistake-taxonomy.md` 做三层（思路/复杂度/实现）题目特定枚举，每层至少一个错解或说明不适用；与正解等价的错解不得保留；不得只枚举 WA 型错法。
+  - `inmaker.cpp` 或生成脚本：覆盖样例、随机、边界、极限和定向卡错解数据。数量与配比遵循 `references/mistake-taxonomy.md` 的数据强度纪律：单测试文件 ≥30、多组测试 ≥20，边界/定向/近上界大数据占明显比例，纯随机只作补充，数据预算主动打满。
 - 普通唯一答案题使用 `judge.type: standard`：忽略整个输出首尾空白和每行末尾空格/Tab，但行内空格与内部换行仍需一致。需要 Token 级宽松比较时改用 Checker。
 - 非唯一答案和浮点题使用 `judge.type: custom` 与 `code/checker.cpp`；交互题使用 `judge.type: interactive` 与 `code/interactor.cpp`。实现前读取 `references/checker-interactor.md`。
 - Checker/Interactor 必须使用附带的 DOMjudge/testlib 协议；交互题按需设置 `judge.interactive.idle_limit` 和 `transcript_limit`。Core 负责本地编译以及生成 `output_validators/validate/`，不得手工维护该生成目录。
