@@ -9,7 +9,7 @@ from unittest.mock import patch
 from probhub.cli import build_parser, main as cli_main
 from probhub.errors import ProbHubError
 from probhub.hashing import hash_file
-from probhub.io import write_json, write_yaml
+from probhub.io import read_yaml, write_json, write_yaml
 from probhub.linting import (
     BUILD_MANIFEST_SCHEMA_VERSION,
     compute_data_hash,
@@ -162,6 +162,48 @@ class CoreWorkspaceTests(unittest.TestCase):
             status = problem_status(problem, config)
             self.assertEqual(status["state"], "stale")
             self.assertIn("source_hash", status["stale_fields"])
+
+    def test_status_treats_corrupt_manifest_as_never_built(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            root, workspace = load_workspace(root)
+            _, config = load_problem(root, problem_entries(workspace)[0])
+            manifest_path = problem / ".probhub/build-manifest.json"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            for payload in (b'{"schema_version": 2, "batch', b"", b"[1, 2]"):
+                manifest_path.write_bytes(payload)
+                status = problem_status(problem, config)
+                self.assertEqual(status["state"], "never-built", payload)
+                self.assertTrue(status["manifest_error"], payload)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = cli_main(["--workspace", str(root), "--json", "status"])
+            self.assertEqual(code, 1)
+            result = json.loads(output.getvalue())
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["problems"]["A"]["state"], "never-built")
+
+    def test_write_yaml_and_write_json_are_atomic(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            yaml_path = root / "nested/config.yaml"
+            json_path = root / "nested/config.json"
+            write_yaml(yaml_path, {"id": "A", "name": "Test"})
+            write_json(json_path, {"schema_version": 1})
+            self.assertEqual(sorted(yaml_path.parent.glob("*.tmp")), [])
+            self.assertEqual(read_yaml(yaml_path), {"id": "A", "name": "Test"})
+            json_text = json_path.read_text(encoding="utf-8")
+            self.assertEqual(json.loads(json_text), {"schema_version": 1})
+            self.assertTrue(json_text.endswith("\n"))
+            with patch("probhub.io.os.replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    write_yaml(yaml_path, {"id": "B"})
+                with self.assertRaises(OSError):
+                    write_json(json_path, {"schema_version": 2})
+            self.assertEqual(read_yaml(yaml_path), {"id": "A", "name": "Test"})
+            self.assertEqual(json_path.read_text(encoding="utf-8"), json_text)
+            self.assertEqual(sorted(yaml_path.parent.glob("*.tmp")), [])
 
     def test_source_hash_tracks_problem_statement_assets(self):
         with tempfile.TemporaryDirectory() as temp:

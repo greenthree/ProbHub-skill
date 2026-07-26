@@ -13,6 +13,7 @@ from pathlib import Path
 DEFAULT_PROCESS_LIMIT = 32
 DEFAULT_POLL_INTERVAL = 0.005
 CANCEL_FILE_ENV = "PROBHUB_CANCEL_FILE"
+WINDOWS_CREATE_SUSPENDED = 0x00000004
 
 
 class ProcessCancelled(Exception):
@@ -106,6 +107,17 @@ def _windows_api():
                 ("TotalTerminatedProcesses", wintypes.DWORD),
             ]
 
+        class ThreadEntry32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
         kernel32.SetInformationJobObject.argtypes = [
@@ -122,11 +134,22 @@ def _windows_api():
         kernel32.QueryInformationJobObject.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        kernel32.Thread32First.restype = wintypes.BOOL
+        kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        kernel32.Thread32Next.restype = wintypes.BOOL
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.ResumeThread.restype = wintypes.DWORD
         _WINDOWS_API = {
             "ctypes": ctypes,
             "kernel32": kernel32,
             "info_type": ExtendedLimitInformation,
             "accounting_type": BasicAccountingInformation,
+            "thread_entry_type": ThreadEntry32,
         }
     except Exception:
         _WINDOWS_API = {}
@@ -161,6 +184,45 @@ def windows_assign_job(proc, memory_limit_mb=None, process_limit=DEFAULT_PROCESS
         return job
     except Exception:
         return None
+
+
+def windows_resume_process(pid):
+    api = _windows_api()
+    if not api:
+        return False
+    ctypes = api["ctypes"]
+    kernel32 = api["kernel32"]
+    entry_type = api["thread_entry_type"]
+    try:
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+        if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+            return False
+        resumed = False
+        try:
+            entry = entry_type()
+            entry.dwSize = ctypes.sizeof(entry)
+            has_entry = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while has_entry:
+                if int(entry.th32OwnerProcessID) == int(pid):
+                    thread = kernel32.OpenThread(0x0002, False, entry.th32ThreadID)  # THREAD_SUSPEND_RESUME
+                    if thread:
+                        try:
+                            for _ in range(16):
+                                previous = int(kernel32.ResumeThread(thread))
+                                if previous == 0xFFFFFFFF:
+                                    return False
+                                resumed = True
+                                if previous <= 1:
+                                    break
+                        finally:
+                            kernel32.CloseHandle(thread)
+                entry.dwSize = ctypes.sizeof(entry)
+                has_entry = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return resumed
+    except Exception:
+        return False
 
 
 def windows_query_job_peak_memory(handle):
@@ -433,20 +495,31 @@ def spawn_managed(
     kwargs = dict(kwargs)
     if platform.system() == "Windows":
         kwargs.pop("preexec_fn", None)
+        kwargs["creationflags"] = int(kwargs.get("creationflags", 0)) | WINDOWS_CREATE_SUSPENDED
     else:
         kwargs.setdefault("start_new_session", True)
         kwargs.setdefault("preexec_fn", unix_preexec_memory_limit(memory_limit_mb))
     proc = subprocess.Popen(command, **kwargs)
     job_handle = None
     if platform.system() == "Windows":
-        job_handle = windows_assign_job(proc, memory_limit_mb, process_limit)
-        if containment_required and job_handle is None:
-            try:
-                proc.kill()
-                proc.wait(timeout=2)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-            raise OSError("Windows Job Object containment is unavailable")
+        started = False
+        try:
+            job_handle = windows_assign_job(proc, memory_limit_mb, process_limit)
+            if containment_required and job_handle is None:
+                raise OSError("Windows Job Object containment is unavailable")
+            if not windows_resume_process(proc.pid):
+                raise OSError("failed to resume suspended Windows process")
+            started = True
+        finally:
+            if not started:
+                if job_handle is not None:
+                    terminate_windows_job(job_handle)
+                    job_handle = None
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
     return ManagedProcess(
         proc=proc,
         job_handle=job_handle,

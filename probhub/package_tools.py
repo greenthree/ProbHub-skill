@@ -1,13 +1,13 @@
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .errors import ProbHubError
 from .io import write_yaml
+from .process_control import DEFAULT_PROCESS_LIMIT, run_managed_to_files
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 TESTLIB_PATH = PACKAGE_ROOT / "references" / "testlib.h"
@@ -80,18 +80,24 @@ def validate_output_validator_source(problem_dir, config):
         command = ["g++", str(source), "-o", str(output), "-O2", "-std=c++17", "-I", str(validate_dir)]
         if os.name == "nt":
             command.insert(4, "-static")
+        stdout_path = Path(temp) / "compiler.out"
+        stderr_path = Path(temp) / "compiler.stderr"
         try:
-            result = subprocess.run(
+            result = run_managed_to_files(
                 command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=60.0,
+                memory_limit_mb=2048,
+                output_limit_bytes=8 * 1024 * 1024,
+                process_limit=DEFAULT_PROCESS_LIMIT,
             )
         except OSError as exc:
             raise ProbHubError(f"failed to run g++ for output validator: {exc}") from exc
-        if result.returncode != 0:
-            raise ProbHubError(f"output validator failed to compile: {result.stderr.strip()}")
+        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+        if result["reason"] != "completed" or result["returncode"] != 0:
+            detail = stderr.strip() or result["message"] or result["reason"]
+            raise ProbHubError(f"output validator failed to compile: {detail}")
     return validate_dir
 
 

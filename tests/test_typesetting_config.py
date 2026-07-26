@@ -64,6 +64,46 @@ class TypesettingConfigTests(unittest.TestCase):
             self.assertEqual(lib.read_bytes(), original_lib)
             self.assertEqual(list(root.rglob(".probhub-*.typ")), [])
 
+    def test_main_write_failure_cleans_generated_lib(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            typst_dir = root / "typst/contest"
+            typst_dir.mkdir(parents=True)
+            main = typst_dir / "main.typ"
+            lib = typst_dir.parent / "lib.typ"
+            main.write_text(
+                '#import "../lib.typ": contest-conf\n'
+                '#show: contest-conf.with(title: "Old")\n',
+                encoding="utf-8",
+            )
+            lib.write_text(
+                'v(1em)\nalign(center, image("old.png", width: 9cm))\nv(2em)\n',
+                encoding="utf-8",
+            )
+            workspace = {
+                "contest": {"title": "New"},
+                "typst": {
+                    "directory": "typst/contest",
+                    "cover": {"logo": "new.png"},
+                },
+            }
+
+            original_write_text = Path.write_text
+
+            def failing_write_text(self, *args, **kwargs):
+                if self.name.startswith(".probhub-main-"):
+                    raise OSError("disk full")
+                return original_write_text(self, *args, **kwargs)
+
+            with (
+                mock.patch("probhub.typesetting.write_typst_collection", return_value=(typst_dir, [])),
+                mock.patch("pathlib.Path.write_text", autospec=True, side_effect=failing_write_text),
+            ):
+                with self.assertRaises(OSError):
+                    compile_collection(root, workspace, [])
+
+            self.assertEqual(list(root.rglob(".probhub-*.typ")), [])
+
     def test_typst_failure_returns_bounded_diagnostics_and_cleans_sources(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

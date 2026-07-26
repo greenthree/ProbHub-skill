@@ -3,9 +3,12 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
 
 from . import __version__
 from .build_lock import workspace_file_lock, workspace_generation_lock
@@ -13,7 +16,7 @@ from .errors import ProbHubError
 from .hashing import hash_file
 from .io import atomic_write_json, read_yaml, write_yaml
 from .linting import compute_data_hash, compute_source_hash, compute_workspace_hash
-from .typesetting import compile_collection, extract_problem_pdfs
+from .typesetting import compile_collection, extract_problem_pdfs, is_temporary_typst_source
 from .workspace import WORKSPACE_FILE, load_problem, load_workspace, problem_entries
 
 
@@ -23,6 +26,8 @@ CHECKPOINTS_DIR = Path(".probhub/checkpoints")
 CHECKPOINT_TMP_DIR = Path(".probhub/checkpoint-tmp")
 GENERATIONS_DIR = Path(".probhub/generations")
 GENERATION_TMP_DIR = Path(".probhub/generation-tmp")
+CHECKPOINT_BUSY_WAIT_SECONDS = 10.0
+CHECKPOINT_BUSY_POLL_SECONDS = 0.25
 
 
 def _now():
@@ -326,6 +331,9 @@ def _workspace_copy_ignore(root, entries):
             if candidate in excluded_problem_roots or name in ignored_directories:
                 result.append(name)
                 continue
+            if is_temporary_typst_source(candidate):
+                result.append(name)
+                continue
             if directory == root / ".probhub" and name != "workspace.yaml":
                 result.append(name)
                 continue
@@ -380,13 +388,50 @@ def _write_placeholder(problem_dir, entry):
 
 
 def _ensure_generation_checkpoint(root, workspace, entry):
-    checkpoint = latest_checkpoint(root, entry["id"])
+    """Return (checkpoint, placeholder_reason) for one workspace entry.
+
+    A missing or broken problem source keeps the documented placeholder-page
+    behaviour, but the reason is reported instead of being swallowed. A busy
+    checkpoint lock (concurrent seal/checkpoint) is transient: retry within a
+    bounded budget, then fail explicitly so an existing problem can never be
+    silently replaced by a placeholder. Infrastructure errors (OSError)
+    propagate to the caller.
+    """
+    problem_id = entry["id"]
+    checkpoint = latest_checkpoint(root, problem_id)
     if checkpoint:
-        return checkpoint
-    try:
-        return create_problem_checkpoint(root, workspace, entry, state="draft")
-    except (OSError, ProbHubError, ValueError):
-        return None
+        return checkpoint, None
+    deadline = time.monotonic() + CHECKPOINT_BUSY_WAIT_SECONDS
+    while True:
+        try:
+            return create_problem_checkpoint(root, workspace, entry, state="draft"), None
+        except ProbHubError as exc:
+            if exc.code != "checkpoint_busy":
+                return None, str(exc)
+            checkpoint = latest_checkpoint(root, problem_id)
+            if checkpoint:
+                return checkpoint, None
+            if time.monotonic() >= deadline:
+                raise ProbHubError(
+                    f"cannot assemble exam generation: problem {problem_id} has no "
+                    "checkpoint and its checkpoint lock stayed busy; retry after the "
+                    "concurrent seal or checkpoint operation finishes",
+                    code="checkpoint_busy",
+                ) from exc
+            time.sleep(CHECKPOINT_BUSY_POLL_SECONDS)
+        except (ValueError, yaml.YAMLError) as exc:
+            return None, str(exc)
+
+
+def _generation_missing(manifest):
+    missing = manifest.get("missing")
+    if isinstance(missing, list):
+        return missing
+    return [
+        {"problem_id": problem.get("problem_id"), "reason": "problem has no checkpoint"}
+        for problem in manifest.get("problems", [])
+        if isinstance(problem, dict) and problem.get("state") == "placeholder"
+    ]
 
 
 def _generation_result(root, manifest, cached):
@@ -396,6 +441,7 @@ def _generation_result(root, manifest, cached):
         "generation_id": manifest["generation_id"],
         "state": manifest["state"],
         "complete": manifest["complete"],
+        "missing": _generation_missing(manifest),
         "all_sealed": manifest["all_sealed"],
         "cached": cached,
         "path": str(generation_dir),
@@ -451,10 +497,13 @@ def assemble_exam_generation(root, workspace=None):
     with workspace_generation_lock(root):
         _, workspace = load_workspace(root) if workspace is None else (root, workspace)
         entries = problem_entries(workspace)
-        checkpoints = {
-            entry["id"]: _ensure_generation_checkpoint(root, workspace, entry)
-            for entry in entries
-        }
+        checkpoints = {}
+        placeholder_reasons = {}
+        for entry in entries:
+            checkpoint, reason = _ensure_generation_checkpoint(root, workspace, entry)
+            checkpoints[entry["id"]] = checkpoint
+            if checkpoint is None:
+                placeholder_reasons[entry["id"]] = reason or "problem has no checkpoint"
         live_workspace_hash = compute_workspace_hash(root, workspace)
         revision_records = []
         for entry in entries:
@@ -559,6 +608,16 @@ def assemble_exam_generation(root, workspace=None):
                 "generation_id": generation_id,
                 "state": "sealed-preview" if all_sealed else "draft",
                 "complete": complete,
+                "missing": [
+                    {
+                        "problem_id": record["problem_id"],
+                        "reason": placeholder_reasons.get(
+                            record["problem_id"], "problem has no checkpoint"
+                        ),
+                    }
+                    for record in revision_records
+                    if record["state"] == "placeholder"
+                ],
                 "all_sealed": all_sealed,
                 "workspace_hash": snapshot_workspace_hash,
                 "main_pdf_hash": hash_file(stage / "main.pdf"),

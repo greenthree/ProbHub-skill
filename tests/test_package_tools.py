@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 from zipfile import ZipFile
 
+from probhub.errors import ProbHubError
 from probhub.package_tools import (
     build_verified_package,
     generate_domjudge_config,
@@ -86,6 +87,80 @@ class PackageToolsTests(unittest.TestCase):
                     self.assertIn(f"validation: {validation}", problem_yaml)
                     self.assertIn("output_validators/validate/validate.cpp", names)
                     self.assertIn("output_validators/validate/testlib.h", names)
+
+    def create_checker_problem(self, root):
+        self.create_problem(root)
+        code = root / "code"
+        code.mkdir()
+        (code / "checker.cpp").write_text('#include "testlib.h"\nint main(){}\n', encoding="utf-8")
+        return {
+            "name": "checker",
+            "limits": {"time": 1, "memory": 256},
+            "judge": {"type": "checker", "checker": "code/checker.cpp"},
+        }
+
+    def test_output_validator_compile_uses_managed_limits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "A"
+            config = self.create_checker_problem(problem)
+            calls = []
+
+            def fake_run(command, **kwargs):
+                calls.append(kwargs)
+                kwargs["stdout_path"].write_bytes(b"")
+                kwargs["stderr_path"].write_bytes(b"")
+                return {"reason": "completed", "returncode": 0, "message": ""}
+
+            with mock.patch("probhub.package_tools.run_managed_to_files", side_effect=fake_run):
+                validate_dir = validate_output_validator_source(problem, config)
+
+            self.assertEqual(validate_dir, problem / "output_validators" / "validate")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["timeout"], 60.0)
+            self.assertEqual(calls[0]["memory_limit_mb"], 2048)
+            self.assertEqual(calls[0]["output_limit_bytes"], 8 * 1024 * 1024)
+
+    def test_output_validator_compile_timeout_raises_probhub_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "A"
+            config = self.create_checker_problem(problem)
+
+            def fake_run(command, **kwargs):
+                kwargs["stdout_path"].write_bytes(b"")
+                kwargs["stderr_path"].write_bytes(b"")
+                return {"reason": "time_limit", "returncode": None, "message": "time limit exceeded"}
+
+            with mock.patch("probhub.package_tools.run_managed_to_files", side_effect=fake_run):
+                with self.assertRaisesRegex(
+                    ProbHubError, "output validator failed to compile: time limit exceeded"
+                ):
+                    validate_output_validator_source(problem, config)
+
+    def test_output_validator_compile_error_reports_stderr(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "A"
+            config = self.create_checker_problem(problem)
+
+            def fake_run(command, **kwargs):
+                kwargs["stdout_path"].write_bytes(b"")
+                kwargs["stderr_path"].write_text("error: expected ';'", encoding="utf-8")
+                return {"reason": "completed", "returncode": 1, "message": ""}
+
+            with mock.patch("probhub.package_tools.run_managed_to_files", side_effect=fake_run):
+                with self.assertRaisesRegex(ProbHubError, "error: expected ';'"):
+                    validate_output_validator_source(problem, config)
+
+    def test_output_validator_gpp_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "A"
+            config = self.create_checker_problem(problem)
+
+            with mock.patch(
+                "probhub.package_tools.run_managed_to_files",
+                side_effect=OSError("no g++"),
+            ):
+                with self.assertRaisesRegex(ProbHubError, "failed to run g\\+\\+ for output validator"):
+                    validate_output_validator_source(problem, config)
 
     def test_invalid_staged_package_does_not_replace_existing_zip(self):
         with tempfile.TemporaryDirectory() as temp:

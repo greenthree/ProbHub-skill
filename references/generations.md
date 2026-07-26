@@ -52,7 +52,8 @@ probhub generation-status
 ## 3. 并行语义
 
 - 组装只读取各题最后发布的 checkpoint，不读取其他 Agent 正在编辑的 live 文件。
-- 没有 checkpoint 的题目会先尝试生成稳定 draft checkpoint；无法读取时使用明确的“开发中”占位页。
+- 没有 checkpoint 的题目会先尝试生成稳定 draft checkpoint；题目源缺失或损坏时使用明确的“开发中”占位页，并把该题连同原因列入结果与 manifest 的 `missing` 字段。
+- 若某题没有任何 checkpoint 且其 checkpoint 锁被并发 `seal`/`checkpoint` 持有，组装会在有限预算内重试；仍然锁忙时以 `checkpoint_busy` 显式失败，不会把存在的题目静默替换为占位页。等待并发操作结束后重新运行 `assemble` 即可。
 - generation 使用独立 `.probhub/generation.lock`，不会占用正式 `build.lock`，也不会修改正式发布产物。
 - 同时到达的组装请求会等待当前 generation 完成，然后根据最新 checkpoint 集合生成或复用对应版本。
 - 修改 live 题目不会改变旧 checkpoint 或旧 generation；必须再次运行 `checkpoint` 或 `seal` 才会进入新试卷版本。
@@ -60,8 +61,10 @@ probhub generation-status
 ## 4. 状态边界
 
 - `draft`：所有槽位都有 checkpoint，但至少一题尚未 sealed。
-- `placeholder`：该槽位没有可用 checkpoint，试卷仍可生成但 `complete=false`。
+- `placeholder`：该槽位没有可用 checkpoint，试卷仍可生成但 `complete=false`，且 `missing` 列出每个占位题目与原因。
 - `sealed-preview`：所有题目 checkpoint 均为 sealed，但仍属于预览 generation，不是正式发布物。
+
+消费 `assemble`/`seal` 结果时不得只看 `ok`：交付前必须确认 `complete=true` 或逐项核对 `missing`。
 
 只有正式 `build` 才会生成或替换 DOMjudge ZIP、正式单题 PDF、共享 metadata 和 Build Manifest。不要把 `.probhub/generations/` 中的预览直接作为正式包发布。
 

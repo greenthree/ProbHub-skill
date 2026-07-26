@@ -25,7 +25,7 @@ from .linting import (
     lint_workspace,
 )
 from .package_tools import build_verified_package, generate_domjudge_config, validate_output_validator_source
-from .typesetting import compile_collection, extract_problem_pdfs
+from .typesetting import compile_collection, extract_problem_pdfs, is_temporary_typst_source
 from .workspace import load_problem, load_workspace, problem_entries, select_entries
 
 
@@ -186,6 +186,9 @@ def _snapshot_ignore(plan):
         for name in names:
             candidate = directory / name
             if candidate in excluded or name in ignored_directories:
+                result.append(name)
+                continue
+            if is_temporary_typst_source(candidate):
                 result.append(name)
                 continue
             if directory.name == ".probhub" and name in ignored_probhub_entries:

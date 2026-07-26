@@ -1,6 +1,7 @@
 import io
 import json
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -8,8 +9,12 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from probhub.build_lock import workspace_file_lock
 from probhub.cli import main as cli_main
+from probhub.errors import ProbHubError
 from probhub.generations import (
+    CHECKPOINTS_DIR,
+    _problem_storage_key,
     assemble_exam_generation,
     create_problem_checkpoint,
     generation_status,
@@ -183,7 +188,62 @@ class GenerationTests(unittest.TestCase):
             self.assertEqual(by_id["A"]["state"], "draft")
             self.assertEqual(by_id["B"]["state"], "placeholder")
             self.assertFalse(result["complete"])
+            self.assertEqual(len(result["missing"]), 1)
+            self.assertEqual(result["missing"][0]["problem_id"], "B")
+            self.assertIn("problem config not found", result["missing"][0]["reason"])
+            self.assertEqual(result["missing"], result["manifest"]["missing"])
             self.assertIn("本题仍在开发中", Path(result["main_pdf"]).read_text(encoding="utf-8"))
+
+    def test_assemble_fails_explicitly_when_checkpoint_lock_stays_busy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            create_problem_checkpoint(root, workspace, problem_entries(workspace)[0])
+            lock_path = CHECKPOINTS_DIR / f"{_problem_storage_key('B')}.lock"
+
+            with (
+                workspace_file_lock(root, lock_path),
+                patch("probhub.generations.CHECKPOINT_BUSY_WAIT_SECONDS", 0.3),
+                patch("probhub.generations.CHECKPOINT_BUSY_POLL_SECONDS", 0.05),
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    assemble_exam_generation(root)
+
+            self.assertEqual(raised.exception.code, "checkpoint_busy")
+            self.assertIn("B", str(raised.exception))
+
+    def test_assemble_waits_for_concurrent_seal_to_release_checkpoint_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            create_problem_checkpoint(root, workspace, problem_entries(workspace)[0])
+            lock_path = CHECKPOINTS_DIR / f"{_problem_storage_key('B')}.lock"
+            acquired = threading.Event()
+
+            def hold_lock_briefly():
+                with workspace_file_lock(root, lock_path):
+                    acquired.set()
+                    time.sleep(0.4)
+
+            holder = threading.Thread(target=hold_lock_briefly)
+            holder.start()
+            try:
+                self.assertTrue(acquired.wait(timeout=5))
+                with (
+                    patch("probhub.generations.CHECKPOINT_BUSY_WAIT_SECONDS", 5.0),
+                    patch("probhub.generations.CHECKPOINT_BUSY_POLL_SECONDS", 0.05),
+                    patch("probhub.generations.compile_collection", side_effect=self.fake_compile),
+                    patch("probhub.generations.extract_problem_pdfs", side_effect=self.fake_extract),
+                ):
+                    result = assemble_exam_generation(root)
+            finally:
+                holder.join(timeout=5)
+
+            self.assertTrue(result["complete"])
+            self.assertEqual(result["missing"], [])
+            states = {
+                item["problem_id"]: item["state"]
+                for item in result["manifest"]["problems"]
+            }
+            self.assertEqual(states["B"], "draft")
 
     def test_seal_records_evidence_and_requests_generation(self):
         with tempfile.TemporaryDirectory() as temp:

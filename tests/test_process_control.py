@@ -1,5 +1,6 @@
 import ctypes
 import os
+import platform
 import sys
 import subprocess
 import tempfile
@@ -64,6 +65,135 @@ class ProcessControlTests(unittest.TestCase):
             ],
         )
 
+    def test_windows_resume_process_resumes_and_closes_handles(self):
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_uint32),
+                ("cntUsage", ctypes.c_uint32),
+                ("th32ThreadID", ctypes.c_uint32),
+                ("th32OwnerProcessID", ctypes.c_uint32),
+                ("tpBasePri", ctypes.c_int32),
+                ("tpDeltaPri", ctypes.c_int32),
+                ("dwFlags", ctypes.c_uint32),
+            ]
+
+        class Kernel32:
+            def __init__(self):
+                self.threads = iter(((11, 999), (22, 1234)))
+                self.calls = []
+
+            def CreateToolhelp32Snapshot(self, flags, pid):
+                self.calls.append(("snapshot", flags, pid))
+                return 777
+
+            def _next_entry(self, pointer):
+                try:
+                    tid, owner = next(self.threads)
+                except StopIteration:
+                    return False
+                entry = ctypes.cast(pointer, ctypes.POINTER(ThreadEntry)).contents
+                entry.th32ThreadID = tid
+                entry.th32OwnerProcessID = owner
+                return True
+
+            def Thread32First(self, snapshot, pointer):
+                return self._next_entry(pointer)
+
+            def Thread32Next(self, snapshot, pointer):
+                return self._next_entry(pointer)
+
+            def OpenThread(self, access, inherit, tid):
+                self.calls.append(("open", access, inherit, tid))
+                return 555
+
+            def ResumeThread(self, handle):
+                self.calls.append(("resume", handle))
+                return 1
+
+            def CloseHandle(self, handle):
+                self.calls.append(("close", handle))
+                return True
+
+        kernel32 = Kernel32()
+        fake_api = {
+            "ctypes": ctypes,
+            "kernel32": kernel32,
+            "thread_entry_type": ThreadEntry,
+        }
+        with mock.patch.object(process_control, "_WINDOWS_API", fake_api):
+            self.assertTrue(process_control.windows_resume_process(1234))
+
+        self.assertEqual(
+            kernel32.calls,
+            [
+                ("snapshot", 0x00000004, 0),
+                ("open", 0x0002, False, 22),
+                ("resume", 555),
+                ("close", 555),
+                ("close", 777),
+            ],
+        )
+
+    def test_windows_resume_process_snapshot_failure_returns_false(self):
+        class Kernel32:
+            def __init__(self):
+                self.calls = []
+
+            def CreateToolhelp32Snapshot(self, flags, pid):
+                self.calls.append(("snapshot", flags, pid))
+                return ctypes.c_void_p(-1).value
+
+            def CloseHandle(self, handle):
+                self.calls.append(("close", handle))
+                return True
+
+        kernel32 = Kernel32()
+        fake_api = {
+            "ctypes": ctypes,
+            "kernel32": kernel32,
+            "thread_entry_type": None,
+        }
+        with mock.patch.object(process_control, "_WINDOWS_API", fake_api):
+            self.assertFalse(process_control.windows_resume_process(1234))
+
+        self.assertEqual(kernel32.calls, [("snapshot", 0x00000004, 0)])
+
+    @unittest.skipUnless(platform.system() == "Windows", "Windows job containment only")
+    def test_windows_spawn_resume_failure_kills_process(self):
+        pids = []
+
+        def fail_resume(pid):
+            pids.append(pid)
+            return False
+
+        with mock.patch.object(process_control, "windows_resume_process", side_effect=fail_resume):
+            with self.assertRaises(OSError):
+                process_control.spawn_managed(
+                    [sys.executable, "-c", "print('x')"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        self.assertEqual(len(pids), 1)
+        self.wait_until_dead(pids[0])
+
+    @unittest.skipUnless(platform.system() == "Windows", "Windows job containment only")
+    def test_windows_containment_failure_kills_suspended_process(self):
+        pids = []
+
+        def fail_assign(proc, memory_limit_mb=None, process_limit=None):
+            pids.append(proc.pid)
+            return None
+
+        with mock.patch.object(process_control, "windows_assign_job", side_effect=fail_assign):
+            with self.assertRaises(OSError):
+                process_control.spawn_managed(
+                    [sys.executable, "-c", "print('x')"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        self.assertEqual(len(pids), 1)
+        self.wait_until_dead(pids[0])
+
     def run_command(self, root, code, **limits):
         root = Path(root)
         return run_managed_to_files(
@@ -94,6 +224,14 @@ class ProcessControlTests(unittest.TestCase):
             self.assertEqual(result["reason"], "output_limit", result)
             self.assertLessEqual((root / "stdout.txt").stat().st_size, 1024)
 
+    def test_managed_quick_process_completes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = self.run_command(root, "print('ok')")
+            self.assertEqual(result["reason"], "completed", result)
+            self.assertEqual(result["returncode"], 0, result)
+            self.assertEqual((root / "stdout.txt").read_text(encoding="utf-8").strip(), "ok")
+
     def test_timeout_kills_spawned_descendant(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -106,6 +244,25 @@ class ProcessControlTests(unittest.TestCase):
             parent = (
                 "import subprocess,sys,time;"
                 "time.sleep(0.2);"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]);"
+                "time.sleep(30)"
+            )
+            result = self.run_command(root, parent, timeout=0.8)
+            self.assertEqual(result["reason"], "time_limit", result)
+            self.assertTrue(pid_file.is_file(), "child did not start")
+            self.wait_until_dead(int(pid_file.read_text(encoding="utf-8")))
+
+    def test_timeout_kills_immediately_spawned_descendant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pid_file = root / "child.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            parent = (
+                "import subprocess,sys,time;"
                 f"subprocess.Popen([sys.executable, '-c', {child!r}]);"
                 "time.sleep(30)"
             )
