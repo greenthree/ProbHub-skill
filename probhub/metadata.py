@@ -1,12 +1,23 @@
 import re
 from pathlib import Path
 
+from .errors import ProbHubError
 from .io import write_json
 from .statement import parse_statement
 
 
 def natural_key(path):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", str(path))]
+
+
+def _read_sample_text(path):
+    try:
+        return path.read_text(encoding="utf-8").rstrip("\r\n")
+    except UnicodeDecodeError as exc:
+        raise ProbHubError(
+            f"sample file is not valid UTF-8: {path}",
+            code="sample_not_utf8",
+        ) from exc
 
 
 def read_samples(problem_dir, config):
@@ -18,8 +29,8 @@ def read_samples(problem_dir, config):
         answer_path = input_path.with_suffix(".ans")
         if answer_path.is_file():
             samples.append({
-                "input": input_path.read_text(encoding="utf-8").rstrip("\r\n"),
-                "output": answer_path.read_text(encoding="utf-8").rstrip("\r\n"),
+                "input": _read_sample_text(input_path),
+                "output": _read_sample_text(answer_path),
             })
     return samples
 

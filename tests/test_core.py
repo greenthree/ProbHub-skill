@@ -284,6 +284,100 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertIn("typst.cover.logo must stay inside the Typst directory", result["errors"])
             self.assertIn("typst.cover.logo_width must be a Typst length", result["errors"])
 
+    def test_lint_reports_positional_stress_args_template_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            (problem / "code/brute.cpp").write_text("int main(){}\n", encoding="utf-8")
+            (problem / "code/gen.cpp").write_text("int main(){}\n", encoding="utf-8")
+            config = read_yaml(problem / "probhub.yaml")
+            config["solutions"]["brute"] = ["code/brute.cpp"]
+            config["stress"] = {"generator": "code/gen.cpp", "args": ["{}"]}
+            write_yaml(problem / "probhub.yaml", config)
+            _, workspace = load_workspace(root)
+            result = lint_workspace(root, workspace)
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "invalid stress.args template: {}",
+                result["problems"][0]["errors"],
+            )
+
+    def test_stress_arg_expansion_rejects_positional_template(self):
+        from probhub.stressing import expand_generator_args
+
+        with self.assertRaises(ProbHubError) as raised:
+            expand_generator_args(["{}"], 1, 1)
+        self.assertIn("invalid stress.args template", str(raised.exception))
+
+    def test_lint_rejects_boolean_time_limit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            config = read_yaml(problem / "probhub.yaml")
+            config["limits"]["time"] = True
+            write_yaml(problem / "probhub.yaml", config)
+            _, workspace = load_workspace(root)
+            result = lint_workspace(root, workspace)
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "limits.time must be a positive integer",
+                result["problems"][0]["errors"],
+            )
+
+    def test_non_utf8_sample_raises_structured_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            (problem / "data/sample/1.in").write_bytes(b"\xff\xfe\x00garbage")
+            _, config = load_problem(root, {"id": "A", "directory": "A"})
+            with self.assertRaises(ProbHubError) as raised:
+                build_meta(problem, config)
+            self.assertEqual(raised.exception.code, "sample_not_utf8")
+
+    def test_doctor_reports_hung_tool_instead_of_crashing(self):
+        import subprocess
+
+        from probhub.doctor import run_doctor
+
+        with (
+            patch("probhub.doctor.shutil.which", return_value="/fake/tool"),
+            patch(
+                "probhub.doctor.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd=["tool"], timeout=10),
+            ),
+        ):
+            report = run_doctor()
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["tools"]["g++"]["version"], "timed out after 10s")
+
+    def test_publish_output_validators_stages_before_removing_old(self):
+        from probhub.building import _publish_output_validators
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            (source / "validate").mkdir(parents=True)
+            (source / "validate/validate.cpp").write_text("new\n", encoding="utf-8")
+            destination = root / "problem/output_validators"
+            (destination / "validate").mkdir(parents=True)
+            (destination / "validate/validate.cpp").write_text("old\n", encoding="utf-8")
+
+            _publish_output_validators(source, destination)
+
+            self.assertEqual(
+                (destination / "validate/validate.cpp").read_text(encoding="utf-8"),
+                "new\n",
+            )
+            leftovers = [
+                path.name
+                for path in destination.parent.iterdir()
+                if path.name != destination.name
+            ]
+            self.assertEqual(leftovers, [])
+
+            _publish_output_validators(root / "missing-source", destination)
+            self.assertFalse(destination.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
