@@ -88,6 +88,10 @@ def _stress_config(problem_dir, config, against=None):
         brute_rel = stress.get("brute") or _first_solution(config, "brute")
     validator_rel = ((config.get("judge") or {}).get("validator"))
     checker_rel = ((config.get("judge") or {}).get("checker")) if judge_type == "custom" else None
+    if judge_type == "custom" and not checker_rel:
+        raise ProbHubError(
+            "judge.type custom requires judge.checker before running stress"
+        )
     args = stress.get("args", ["{seed}"])
     if isinstance(args, str):
         args = [args]
@@ -126,7 +130,9 @@ def _stress_config(problem_dir, config, against=None):
         "checker_rel": str(checker_rel) if checker_rel else None,
         "generator": _resolve_problem_file(problem_dir, generator_rel, "generator"),
         "accepted": _resolve_problem_file(problem_dir, accepted_rel, "accepted"),
-        "brute": _resolve_problem_file(problem_dir, brute_rel, "brute"),
+        "brute": _resolve_problem_file(
+            problem_dir, brute_rel, "against" if against is not None else "brute"
+        ),
         "validator": _resolve_problem_file(problem_dir, validator_rel, "validator"),
         "checker": _resolve_problem_file(problem_dir, checker_rel, "checker") if checker_rel else None,
         "args": [str(item) for item in args],
@@ -175,7 +181,10 @@ def _compile_cpp(source, output, role):
         stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
     if result["reason"] != "completed" or result["returncode"] != 0:
         detail = stderr.strip() or result["message"] or result["reason"]
-        raise ProbHubError(f"stress {role} failed to compile: {source}\n{detail}")
+        raise ProbHubError(
+            f"{role} failed to compile: {source}\n{detail}",
+            code="compile_failed",
+        )
     return command
 
 
@@ -555,7 +564,13 @@ def _save_counterexample(root, problem_dir, problem_id, configured, master_seed,
             },
         }
         write_json(temporary / "metadata.json", metadata)
-        temporary.replace(final)
+        try:
+            temporary.replace(final)
+        except OSError:
+            # Same-second collision with another process on the same seed/round:
+            # fall back to a unique suffix instead of losing the counterexample.
+            final = stress_root / f"{stamp}-r{round_number}-s{seed}-{uuid.uuid4().hex[:8]}"
+            temporary.replace(final)
         relative = final.resolve().relative_to(Path(root).resolve()).as_posix()
         latest_temporary = stress_root / f".latest-{uuid.uuid4().hex}.tmp"
         write_json(latest_temporary, {
@@ -645,40 +660,142 @@ def _public_run(result):
 
 
 def _is_killer_outcome(outcome):
+    if outcome.get("kind") != "counterexample":
+        return False
+    if (outcome.get("brute") or {}).get("reason") == "start_error":
+        # The target never executed (CreateProcess/exec failure); that is an
+        # infrastructure problem, not a separation.
+        return False
     return (
-        outcome.get("kind") == "counterexample"
-        and (
-            outcome.get("reason") == "output_mismatch"
-            or str(outcome.get("reason", "")).startswith("brute_")
-        )
+        outcome.get("reason") == "output_mismatch"
+        or str(outcome.get("reason", "")).startswith("brute_")
     )
+
+
+def _contained_data_dir(problem_dir, relative, label):
+    # Keep in sync with datagen.resolve_data_dir (importing datagen would cycle).
+    if not isinstance(relative, str) or not relative.strip():
+        raise ProbHubError(f"{label} must be a non-empty path string", code="fixate_invalid")
+    problem_dir = Path(problem_dir).resolve()
+    candidate = (problem_dir / relative).resolve()
+    try:
+        candidate.relative_to(problem_dir)
+    except ValueError as exc:
+        raise ProbHubError(
+            f"{label} must stay inside the problem directory: {relative}",
+            code="fixate_invalid",
+        ) from exc
+    return candidate
+
+
+def _declared_solution_files(config):
+    files = set()
+    solutions = config.get("solutions") or {}
+    for kind in ("accepted", "brute", "wrong"):
+        entries = solutions.get(kind) or []
+        entries = entries if isinstance(entries, list) else [entries]
+        for entry in entries:
+            value = _entry_file(entry)
+            if value:
+                files.add(str(value).replace("\\", "/"))
+    return files
+
+
+def _fixate_precheck(problem_dir, config, case_name, against_rel):
+    """Fail fast before the hunt; `_fixate_killer` re-checks under the lock."""
+    if not _CASE_NAME_PATTERN.match(case_name or ""):
+        raise ProbHubError(f"invalid fixate case name: {case_name!r}", code="fixate_invalid")
+    normalized_target = str(against_rel).replace("\\", "/")
+    if normalized_target not in _declared_solution_files(config):
+        # A group target that is not a declared solution fails lint afterwards,
+        # breaking the one-step fixation loop.
+        raise ProbHubError(
+            f"--fixate requires the --against target to be declared in solutions.*: "
+            f"{normalized_target} (declare it, e.g. under solutions.wrong with an "
+            "expected entry, then fixate)",
+            code="fixate_undeclared",
+        )
+    data_config = config.get("data") or {}
+    secret_dir = _contained_data_dir(
+        problem_dir, data_config.get("secret_dir") or "data/secret", "data.secret_dir"
+    )
+    if (secret_dir / f"{case_name}.in").exists() or (secret_dir / f"{case_name}.ans").exists():
+        raise ProbHubError(f"fixate target already exists: {case_name}", code="fixate_exists")
+    recipes = data_config.get("recipes") or []
+    if isinstance(recipes, list) and any(
+        isinstance(item, dict) and item.get("case") == case_name for item in recipes
+    ):
+        raise ProbHubError(f"a recipe already exists for case: {case_name}", code="fixate_exists")
+    return normalized_target
+
+
+def _fixate_answer_bytes(problem_dir, config, configured, outcome, input_bytes):
+    """Answers must reproduce under `gen`, which always runs the first declared
+    accepted solution; recompute when stress used a different trusted solution."""
+    first_rel = _first_solution(config, "accepted")
+    stress_rel = configured.get("accepted_rel")
+    same = (
+        first_rel is None
+        or stress_rel is None
+        or str(first_rel).replace("\\", "/") == str(stress_rel).replace("\\", "/")
+    )
+    if same:
+        accepted = outcome.get("accepted") or {}
+        return normalize_newlines(accepted.get("stdout") or b"")
+    source = _resolve_problem_file(problem_dir, first_rel, "accepted")
+    limits = config.get("limits") or {}
+    raw_time = limits.get("time")
+    time_limit = raw_time if _is_int(raw_time) and raw_time > 0 else 1
+    with tempfile.TemporaryDirectory(prefix="probhub-fixate-ans-") as temp:
+        command, _ = _prepare_program(source, temp, "accepted")
+        rerun = _run(
+            command,
+            input_bytes,
+            max(30.0, 10.0 * float(time_limit)),
+            problem_dir,
+            memory_limit=max(2048, 2 * configured["memory_limit"]),
+            output_limit=configured["output_limit"],
+        )
+    if rerun["status"] != "AC":
+        raise ProbHubError(
+            "first accepted solution failed on the killer input while producing "
+            f"the fixated answer: {rerun['status']}",
+            code="fixate_answer_failed",
+        )
+    return normalize_newlines(rerun["stdout"])
 
 
 def _fixate_killer(root, problem_dir, config, configured, outcome, case_name, group_name, against_rel):
     """Persist a found killer: secret data + gen recipe + targeted data group."""
-    if not _CASE_NAME_PATTERN.match(case_name or ""):
-        raise ProbHubError(f"invalid fixate case name: {case_name!r}", code="fixate_invalid")
-    data_config = config.get("data") or {}
-    secret_dir = problem_dir / data_config.get("secret_dir", "data/secret")
-    input_path = secret_dir / f"{case_name}.in"
-    answer_path = secret_dir / f"{case_name}.ans"
-    if input_path.exists() or answer_path.exists():
-        raise ProbHubError(
-            f"fixate target already exists: {case_name}",
-            code="fixate_exists",
-        )
+    normalized_target = _fixate_precheck(problem_dir, config, case_name, against_rel)
     input_bytes = normalize_newlines(outcome.get("input") or b"")
-    accepted = outcome.get("accepted") or {}
-    answer_bytes = normalize_newlines(accepted.get("stdout") or b"")
+    # May compile and run the first accepted; keep it outside the lock.
+    answer_bytes = _fixate_answer_bytes(problem_dir, config, configured, outcome, input_bytes)
     generator_args = [str(item) for item in outcome.get("generator_args") or []]
     group = group_name or case_name
-    target = str(against_rel).replace("\\", "/")
+    target = normalized_target
     pattern = f"secret/{case_name}"
     config_path = problem_dir / "probhub.yaml"
     with workspace_build_lock(root):
         live = read_yaml(config_path)
         data = live.setdefault("data", {})
+        if not isinstance(data, dict):
+            raise ProbHubError("data must be a mapping to fixate", code="fixate_invalid")
+        # Paths come from the live config so a concurrent secret_dir change
+        # cannot split the data files and the recipe across directories.
+        secret_dir = _contained_data_dir(
+            problem_dir, data.get("secret_dir") or "data/secret", "data.secret_dir"
+        )
+        input_path = secret_dir / f"{case_name}.in"
+        answer_path = secret_dir / f"{case_name}.ans"
+        if input_path.exists() or answer_path.exists():
+            raise ProbHubError(
+                f"fixate target already exists: {case_name}",
+                code="fixate_exists",
+            )
         recipes = data.setdefault("recipes", [])
+        if not isinstance(recipes, list):
+            raise ProbHubError("data.recipes must be a list to fixate", code="fixate_invalid")
         if any(isinstance(item, dict) and item.get("case") == case_name for item in recipes):
             raise ProbHubError(
                 f"a recipe already exists for case: {case_name}",
@@ -690,6 +807,8 @@ def _fixate_killer(root, problem_dir, config, configured, outcome, case_name, gr
             "args": generator_args,
         })
         groups = data.setdefault("groups", [])
+        if not isinstance(groups, list):
+            raise ProbHubError("data.groups must be a list to fixate", code="fixate_invalid")
         existing = next(
             (item for item in groups if isinstance(item, dict) and item.get("name") == group),
             None,
@@ -702,6 +821,7 @@ def _fixate_killer(root, problem_dir, config, configured, outcome, case_name, gr
                 "targets": [target],
             })
         else:
+            existing.setdefault("role", "wrong-solution-killer")
             patterns = existing.get("patterns") or existing.get("cases") or []
             patterns = [patterns] if isinstance(patterns, str) else list(patterns)
             if pattern not in patterns:
@@ -747,6 +867,10 @@ def stress_problem(
     if fixate is not None and replay is not None:
         raise ProbHubError("--fixate cannot be combined with --replay")
     configured = _stress_config(problem_dir, config, against=against)
+    if fixate is not None:
+        # Fail fast on an invalid case name, an existing case, or an undeclared
+        # target before spending rounds on the hunt.
+        _fixate_precheck(problem_dir, config, fixate, against)
     requested_rounds = configured["rounds"] if rounds is None else rounds
     if not _is_int(requested_rounds) or requested_rounds <= 0:
         raise ProbHubError("--rounds must be a positive integer")
@@ -790,7 +914,9 @@ def stress_problem(
                     seed,
                     round_number,
                     round_temp,
-                    input_data=input_path.read_bytes(),
+                    # Same normalisation as the generation path: validators are
+                    # compiled with Linux line-ending semantics.
+                    input_data=normalize_newlines(input_path.read_bytes()),
                 )
             ok = bool(outcome["ok"])
             status = "passed" if ok else outcome["kind"]

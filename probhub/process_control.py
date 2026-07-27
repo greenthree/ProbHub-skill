@@ -330,13 +330,22 @@ def process_alive(pid):
 
             ERROR_ACCESS_DENIED = 5
             STILL_ACTIVE = 259
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            SYNCHRONIZE = 0x00100000
+            WAIT_OBJECT_0 = 0
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
             kernel32.OpenProcess.restype = wintypes.HANDLE
             kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
             kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
             kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-            handle = kernel32.OpenProcess(0x1000, False, int(pid))
+            kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.WaitForSingleObject.restype = wintypes.DWORD
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, int(pid)
+            )
+            if not handle:
+                handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
             if not handle:
                 # A live process owned by another user opens with ACCESS_DENIED;
                 # report it alive instead of pretending it exited.
@@ -344,10 +353,18 @@ def process_alive(pid):
             try:
                 exit_code = wintypes.DWORD()
                 if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                    return True
+                    # Cannot query: fall back to the signal probe alone.
+                    return kernel32.WaitForSingleObject(handle, 0) != WAIT_OBJECT_0
                 # An exited process stays openable while any handle is held
-                # (including our own Popen object); only STILL_ACTIVE means alive.
-                return exit_code.value == STILL_ACTIVE
+                # (including our own Popen object); a real exit code means dead.
+                # This must come first: a just-terminated (e.g. suspended) process
+                # reports its exit code before the process object is signalled,
+                # and Popen.poll() follows the same exit-code semantics.
+                if exit_code.value != STILL_ACTIVE:
+                    return False
+                # STILL_ACTIVE (259) is ambiguous — a process that exited with
+                # code 259 reports it forever; the signalled handle disambiguates.
+                return kernel32.WaitForSingleObject(handle, 0) != WAIT_OBJECT_0
             finally:
                 kernel32.CloseHandle(handle)
         except Exception:

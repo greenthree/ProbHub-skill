@@ -4,7 +4,7 @@ import math
 import re
 from pathlib import Path
 
-from .datagen import recipe_coverage
+from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
 from .metadata import build_meta
@@ -366,7 +366,11 @@ def lint_problem(root, workspace, entry):
         errors.append("unknown expected groups: " + ", ".join(unknown_groups))
 
     for kind, default in (("sample", "data/sample"), ("secret", "data/secret")):
-        directory = problem_dir / data.get(f"{kind}_dir", default)
+        try:
+            directory = resolve_data_dir(problem_dir, config, f"{kind}_dir", default)
+        except ProbHubError as exc:
+            errors.append(str(exc))
+            continue
         inputs = {path.stem for path in directory.glob("*.in")} if directory.is_dir() else set()
         answers = {path.stem for path in directory.glob("*.ans")} if directory.is_dir() else set()
         if not inputs:
@@ -375,6 +379,17 @@ def lint_problem(root, workspace, entry):
             errors.append(f"{kind} inputs without answers: {', '.join(sorted(inputs - answers))}")
         if answers - inputs:
             errors.append(f"{kind} answers without inputs: {', '.join(sorted(answers - inputs))}")
+        folded = {}
+        for stem in inputs | answers:
+            folded.setdefault(stem.casefold(), []).append(stem)
+        collisions = sorted(
+            "/".join(sorted(group)) for group in folded.values() if len(group) > 1
+        )
+        if collisions:
+            errors.append(
+                f"{kind} case names collide case-insensitively "
+                f"(they collapse on Windows checkouts): {', '.join(collisions)}"
+            )
 
     try:
         recipes, uncovered = recipe_coverage(problem_dir, config)
@@ -395,6 +410,19 @@ def lint_problem(root, workspace, entry):
                     )
                 elif not generator_path.is_file():
                     errors.append(f"recipe generator not found: {generator}")
+            secret_directory = resolve_data_dir(problem_dir, config, "secret_dir", "data/secret")
+            missing_manual = sorted(
+                recipe["case"] for recipe in recipes
+                if recipe.get("manual")
+                and not (
+                    (secret_directory / f"{recipe['case']}.in").is_file()
+                    and (secret_directory / f"{recipe['case']}.ans").is_file()
+                )
+            )
+            if missing_manual:
+                warnings.append(
+                    "manual recipe(s) have no data files yet: " + ", ".join(missing_manual)
+                )
         if uncovered:
             if recipes:
                 warnings.append(

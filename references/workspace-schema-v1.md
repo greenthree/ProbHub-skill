@@ -96,7 +96,7 @@ domjudge:
 
 ### Test recipes (`data.recipes`)
 
-每个 secret 测试点可声明来源配方：`manual: true`（手工数据，字节即事实来源），或生成器调用（可选 `generator` 路径 + 精确 `args` 列表）。`probhub gen <ID>` 依配方生成输入 → Validator 过检 → 用首个 accepted 产 `.ans`，plan 模式报告 new/changed/unchanged，`--apply` 才写入（全部成功后逐文件原子替换）。输出统一 LF 归一，保证 Windows/Linux 字节一致；生成证据写入本地 `.probhub/gen-manifest.json`（不提交）。没有配方的 secret 测试点在 lint 中以 warning 呈现（存量数据兼容，不硬失败）。stress 反例固化后也应登记为配方（generator=stress 生成器、args=[seed, round]）。
+每个 secret 测试点可声明来源配方：`manual: true`（手工数据，字节即事实来源），或生成器调用（可选 `generator` 路径 + 精确 `args` 列表）。case 名大小写不敏感去重（Windows 文件系统会塌缩 `gen01`/`GEN01`）；生成器与 Validator 单次运行默认 60 秒超时，可用 `data.gen_tool_timeout`（秒，≤3600）覆盖；沙箱遵循 `limits.processes`。`probhub gen <ID>` 依配方生成输入 → Validator 过检 → 用首个 accepted 产 `.ans`，plan 模式报告 new/changed/unchanged（字节级一致才算 unchanged），`--apply` 才写入（全部成功后逐文件原子替换，全程持工作区写锁）。输出统一 LF 归一，保证 Windows/Linux 字节一致；生成证据写入本地 `.probhub/gen-manifest.json`（不提交，`--case` 局部运行按 case 合并）。交互题不支持 `gen`（答案由 Interactor 协议定义）。没有配方的 secret 测试点在 lint 中以 warning 呈现（存量数据兼容，不硬失败）。`stress --against --fixate` 命中后自动登记配方（generator=stress 生成器、args=命中轮的精确 argv）。
 
 ### Resource limits
 

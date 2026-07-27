@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from .generations import (
     create_problem_checkpoint,
     generation_status,
 )
-from .io import write_yaml
+from .io import atomic_write_text, write_yaml
 from .judging import judge_problem
 from .linting import (
     compute_collection_hash,
@@ -79,7 +80,9 @@ def _ensure_local_gitignore(root):
     if content:
         content += "\n\n"
     content += "# Local ProbHub artifacts\n" + "\n".join(missing) + "\n"
-    path.write_text(content, encoding="utf-8")
+    # Atomic: .gitignore is a user source file; a crash mid-write must not
+    # truncate hand-maintained entries.
+    atomic_write_text(path, content)
 
 
 def command_init(args):
@@ -99,19 +102,41 @@ def command_init(args):
     return {"ok": True, "workspace": str(path)}
 
 
+_SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
 def command_new(args):
     root, _ = workspace_context(args, allow_empty=True)
     problem_id = args.problem_id.strip()
+    if not _SAFE_PATH_COMPONENT.match(problem_id):
+        raise ProbHubError(
+            f"invalid problem id: {problem_id!r} (use letters, digits, '_', '.', '-')"
+        )
     judge_type = getattr(args, "judge", None) or "standard"
     name = args.name or problem_id
     directory = args.directory or problem_id
+    root_resolved = Path(root).resolve()
+    problem_dir = (root_resolved / directory).resolve()
+    if problem_dir == root_resolved:
+        raise ProbHubError("problem directory must not be the workspace root")
+    try:
+        relative_dir = problem_dir.relative_to(root_resolved)
+    except ValueError as exc:
+        raise ProbHubError(
+            f"problem directory must stay inside the workspace: {directory}"
+        ) from exc
+    for part in relative_dir.parts:
+        if not _SAFE_PATH_COMPONENT.match(part):
+            raise ProbHubError(
+                f"invalid problem directory component: {part!r} "
+                "(use letters, digits, '_', '.', '-')"
+            )
     files = scaffold_files(name, judge_type)
     config = scaffold_config(problem_id, name, judge_type)
     with workspace_build_lock(root):
         _, workspace = load_workspace(root, allow_empty=True)
         if any(entry["id"] == problem_id for entry in problem_entries(workspace)):
             raise ProbHubError(f"problem id already exists: {problem_id}")
-        problem_dir = root / directory
         if problem_dir.exists() and any(problem_dir.iterdir()):
             raise ProbHubError(f"problem directory is not empty: {problem_dir}")
         for relative, content in files.items():
@@ -120,7 +145,9 @@ def command_new(args):
             with path.open("w", encoding="utf-8", newline="\n") as stream:
                 stream.write(content)
         write_yaml(problem_dir / "probhub.yaml", config)
-        workspace.setdefault("problems", []).append({"id": problem_id, "directory": directory})
+        workspace.setdefault("problems", []).append(
+            {"id": problem_id, "directory": relative_dir.as_posix()}
+        )
         write_yaml(root / WORKSPACE_FILE, workspace)
     return {
         "ok": True,
@@ -133,14 +160,13 @@ def command_new(args):
 
 def command_gen(args):
     root, workspace, entry = _single_problem_context(args)
-    _ensure_local_gitignore(root)
     problem_dir, config = load_problem(root, entry)
-    return generate_problem_data(
-        problem_dir,
-        config,
-        apply_changes=args.apply,
-        only=args.case,
-    )
+    if not args.apply:
+        # Plan mode is strictly read-only: no gitignore, no lock, no writes.
+        return generate_problem_data(problem_dir, config, apply_changes=False, only=args.case)
+    with workspace_build_lock(root):
+        _ensure_local_gitignore(root)
+        return generate_problem_data(problem_dir, config, apply_changes=True, only=args.case)
 
 
 def command_doctor(args):

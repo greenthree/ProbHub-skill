@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -20,10 +21,17 @@ def _atomic_write_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
     try:
-        temporary.write_text(text, encoding="utf-8")
+        # LF also on Windows: our own YAML/JSON must hash identically across
+        # platforms, or source_hash forks between Windows and Linux.
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def atomic_write_text(path, text):
+    _atomic_write_text(path, text)
 
 
 def atomic_write_bytes(path, payload):
@@ -37,9 +45,17 @@ def atomic_write_bytes(path, payload):
         temporary.unlink(missing_ok=True)
 
 
+_CR_RUN_BEFORE_LF = re.compile(rb"\r+\n")
+
+
 def normalize_newlines(payload):
-    """Normalise CRLF to LF so generated data is byte-identical across platforms."""
-    return payload.replace(b"\r\n", b"\n")
+    """Normalise CRLF to LF so generated data is byte-identical across platforms.
+
+    A run of CRs before an LF collapses with it (Windows text-mode CRT turns an
+    explicit "\\r\\n" into "\\r\\r\\n"); a bare CR with no following LF is data
+    and is preserved.
+    """
+    return _CR_RUN_BEFORE_LF.sub(b"\n", payload)
 
 
 def write_yaml(path, data):

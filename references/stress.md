@@ -285,6 +285,14 @@ probhub stress L05 --against code/wrong_greedy.cpp --fixate greedy-kill01 --grou
 
 固化后按期望矩阵闭环：在 `solutions.wrong` 中为目标解法声明 `expected: {status: WA, groups: [<组名>], forbid: [FAIL]}`，再运行 `probhub judge` 确认击杀——期望矩阵仍是击杀判定的唯一事实来源。同名 case 或已有配方时固化以 `fixate_exists` 拒绝，不覆盖既有数据。
 
+固化约束：
+
+- `--fixate` 要求 `--against` 目标已在 `solutions.*` 声明（否则以 `fixate_undeclared` 拒绝）——未声明的目标写进 `data.groups.targets` 会直接 lint 失败。`--against` 本身可指向题目目录内任意文件，用于探索。
+- 预检在开跑前完成：case 名不合法（`fixate_invalid`）、case 数据或配方已存在（`fixate_exists`）、目标未声明（`fixate_undeclared`）都立即失败，不浪费猎杀轮次；写入前在工作区写锁内以 live 配置复查一遍。
+- 固化的 `.ans` 始终来自 `solutions.accepted` 第一项（与 `probhub gen` 重放同源，保证字节一致复现）；`stress.accepted` 覆盖只影响猎杀对拍，不影响固化答案，必要时固化前会自动编译并运行首个 accepted（非 AC 报 `fixate_answer_failed`）。
+- 目标进程无法启动（`start_error`，如不可执行/损坏的文件）不算击杀：按基础设施错误处理，不产生 `killer_found`。
+- 固化会以规范形式重写 `probhub.yaml`（键序保留、注释不保留）；本项目规范源为机器可写 YAML，不在其中维护手写注释。
+
 ### 工作流纪律
 
 - 先用小轮次（约 100）测量吞吐，再按预计时间至少 1.5 倍加 60 秒设置外层等待预算。

@@ -294,6 +294,10 @@ def scaffold_config(problem_id, name, judge_type):
                     "targets": ["code/wrong2.cpp"],
                 },
             ],
+            "recipes": [
+                {"case": "random01", "manual": True},
+                {"case": "overflow01", "manual": True},
+            ],
         },
         "domjudge": {"include_pdf": True},
     }

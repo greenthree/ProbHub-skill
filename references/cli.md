@@ -88,7 +88,7 @@ probhub new L07 --name "交互题" --judge interactive
 
 ```text
 <directory>/
-├── probhub.yaml            # 双 accepted + 双 wrong 期望矩阵、overflow 定向数据组
+├── probhub.yaml            # 双 accepted + 双 wrong 期望矩阵、overflow 定向数据组、manual 配方
 ├── problem.md              # 按题面守则书写的示例题面
 ├── code/
 │   ├── validator.cpp       # testlib 严格校验样板
@@ -108,9 +108,11 @@ probhub new L07 --name "交互题" --judge interactive
 要点：
 
 - `--judge` 可选 `standard`（默认）、`custom`、`interactive`；custom 附 Checker 骨架，interactive 附 Interactor 骨架并使用带刷新的标程模板。
+- 两个 secret 测试点以 `manual: true` 配方登记（配方覆盖完整，lint 无 warning）；换成生成器数据时改写 `data.recipes` 后运行 `probhub gen`。
 - `solutions.brute` 初始为空：judge 对已登记的 brute 要求至少一个 TLE/MLE，脚手架数据尚无 brute-killer，实现真实暴力并准备击杀数据后再登记。
 - 错解枚举与数据强度纪律见 `references/mistake-taxonomy.md`；示例的 `overflow` 组演示了 `data.groups` + `targets` + `expected` 的定向击杀写法。
 - `new` 会持有工作区写锁并原子写入 `workspace.yaml`；并发写入返回 `build_busy`。
+- 题目 ID 与 `--directory` 的每级路径组件仅允许 `[A-Za-z0-9][A-Za-z0-9_.-]*`，且目录必须位于工作区内（拒绝 `../`、绝对路径与工作区根本身）；注册进 `workspace.yaml` 的 directory 统一为 POSIX 相对路径。
 
 ## 5. `gen`
 
@@ -127,9 +129,13 @@ probhub gen L05 --case max01    # 只处理指定配方（可重复）
 要点：
 
 - **失败即零写入**：任一配方出现生成器崩溃、Validator 拒绝或 accepted 非正常退出，整次 `gen` 以 `gen_failed` 失败（exit 1），不写任何数据文件。
-- 输出统一 LF 归一，同一配方在 Windows 与 Linux 复现相同字节；plan 的 `unchanged` 即字节一致性验证。
-- `manual: true` 的测试点不被触碰；文件缺失时给 warning。
-- 生成证据（generator/args/输入与答案哈希）写入本地 `.probhub/gen-manifest.json`，属本地产物不提交。
+- plan 严格只读；`--apply` 全程持有工作区写锁（与 `build`/`new` 相同的 `build.lock`），并发写入返回 `build_busy`。
+- 输出统一 LF 归一，同一配方在 Windows 与 Linux 复现相同字节；plan 的 `unchanged` 是**字节级**一致（磁盘上 CRLF 的旧数据即使归一化后相等也报 `changed`，`--apply` 会把它改写为 LF 规范字节）。
+- `manual: true` 的测试点不被触碰；文件缺失时 gen 与 lint 都给 warning。
+- 数据目录（`data.sample_dir`/`data.secret_dir`）必须位于题目目录内，lint 与 gen 都会拒绝越界路径；case 名大小写不敏感（防 Windows 文件塌缩）。
+- 生成器/Validator 单次运行默认 60s 超时（`data.gen_tool_timeout` 可覆盖，≤3600s）；进程数遵循 `limits.processes`。
+- 交互题（`judge.type: interactive`）不支持 `gen`：答案由 Interactor 协议定义，不能靠把输入喂给 accepted 产生（报 `gen_unsupported`）。
+- 生成证据（generator/args/输入与答案哈希）写入本地 `.probhub/gen-manifest.json`，属本地产物不提交。`--case` 局部运行按 case 合并进既有 manifest，不影响其他 case 的记录；配方被删除的 case 在下次 `--apply` 时从 manifest 移除。
 - 没有配方的 secret 测试点由 lint 以 warning 报告；数量低于数据强度纪律（`references/mistake-taxonomy.md`）时同样给 warning。
 - accepted 改动后重跑 `gen`：plan 会把所有答案变化列为 `changed` 并给出新旧哈希——先审阅差异再 `--apply`。
 
