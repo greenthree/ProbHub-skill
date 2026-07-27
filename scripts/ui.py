@@ -2,7 +2,9 @@
 import os
 import sys
 import json
+import hmac
 import re
+import secrets
 import signal
 import subprocess
 import shutil
@@ -12,9 +14,11 @@ import uuid
 import time
 from pathlib import Path
 from threading import BoundedSemaphore, Lock, Thread, Timer
+from urllib.parse import urlsplit
 
 import yaml
-from flask import Flask, jsonify, request, render_template_string, send_file
+from flask import Flask, g, jsonify, request, render_template_string, send_file
+from werkzeug.exceptions import RequestEntityTooLarge
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PACKAGE_ROOT = next(
@@ -55,6 +59,11 @@ from probhub.workspace import load_workspace, problem_entries
 
 app = Flask(__name__)
 MAX_SUBMISSION_REQUEST_BYTES = MAX_SOURCE_BYTES + 64 * 1024
+MAX_WEBUI_REQUEST_BYTES = 16 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = MAX_WEBUI_REQUEST_BYTES
+WEBUI_CSRF_TOKEN = secrets.token_urlsafe(32)
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 BASE_DIR = "typst-statement"
 SANDBOX_JOBS = {}
@@ -74,6 +83,89 @@ try:
     cleanup_stale_submission_workspaces(Path.cwd())
 except OSError:
     pass
+
+
+def _url_origin(value, *, default_scheme=None):
+    try:
+        parsed = urlsplit(f"{default_scheme}://{value}") if default_scheme and "://" not in value else urlsplit(value)
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            return None
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        return parsed.scheme.lower(), hostname, port
+    except (TypeError, ValueError):
+        return None
+
+
+def _request_host_is_loopback():
+    origin = _url_origin(request.host, default_scheme=request.scheme)
+    return origin is not None and origin[1] in _LOOPBACK_HOSTS
+
+
+def _matches_request_origin(value):
+    candidate = _url_origin(value)
+    expected = _url_origin(request.host, default_scheme=request.scheme)
+    return candidate is not None and expected is not None and candidate == expected
+
+
+def _security_error(code, message):
+    return jsonify({"success": False, "error": message, "code": code}), 403
+
+
+@app.before_request
+def protect_local_webui():
+    g.csp_nonce = secrets.token_urlsafe(18)
+    if request.path == "/api/submission/run" and request.method == "POST":
+        request.max_content_length = MAX_SUBMISSION_REQUEST_BYTES
+    if not _request_host_is_loopback():
+        return _security_error("invalid_host", "request Host must be localhost or a loopback address")
+
+    if request.path.startswith("/api/"):
+        fetch_site = (request.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if fetch_site and fetch_site != "same-origin":
+            return _security_error("cross_origin", "cross-origin browser requests are not allowed")
+        for header in ("Origin", "Referer"):
+            value = request.headers.get(header)
+            if value and not _matches_request_origin(value):
+                return _security_error("cross_origin", f"request {header} does not match this WebUI origin")
+
+    if request.method in _WRITE_METHODS:
+        token = request.headers.get("X-ProbHub-CSRF", "")
+        if not hmac.compare_digest(token, WEBUI_CSRF_TOKEN):
+            return _security_error("csrf_failed", "missing or invalid WebUI request token")
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def request_too_large(_error):
+    max_bytes = request.max_content_length or app.config["MAX_CONTENT_LENGTH"]
+    return jsonify({
+        "success": False,
+        "error": "request body is too large",
+        "code": "request_too_large",
+        "max_bytes": max_bytes,
+    }), 413
+
+
+@app.after_request
+def add_webui_security_headers(response):
+    nonce = getattr(g, "csp_nonce", "")
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        f"script-src 'self' 'nonce-{nonce}' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def secure_path(subtitle, filename):
@@ -226,11 +318,12 @@ HTML_TEMPLATE = r"""
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <meta name="probhub-csrf-token" content="{{ csrf_token }}">
     <title>ProbHub · 题目排版控制台</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <script>
+    <script nonce="{{ csp_nonce }}">
         (() => {
             const saved = localStorage.getItem('probhub-theme');
             const preferred = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -238,7 +331,7 @@ HTML_TEMPLATE = r"""
         })();
     </script>
     <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
-    <script>
+    <script nonce="{{ csp_nonce }}">
       tailwind = { 
         config: {
           theme: {
@@ -274,7 +367,7 @@ HTML_TEMPLATE = r"""
     </script>
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script>
+    <script nonce="{{ csp_nonce }}">
         window.MathJax = {
             tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
             startup: { typeset: false },
@@ -1114,7 +1207,71 @@ HTML_TEMPLATE = r"""
         </div>
     </div>
 
-    <script>
+    <script nonce="{{ csp_nonce }}">
+        const PROBHUB_CSRF_TOKEN = document.querySelector('meta[name="probhub-csrf-token"]').content;
+        const PROBHUB_MARKDOWN_TAGS = new Set([
+            'a', 'blockquote', 'br', 'code', 'del', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            'hr', 'img', 'kbd', 'li', 'ol', 'p', 'pre', 'span', 'strong', 'sub', 'sup', 'table',
+            'tbody', 'td', 'th', 'thead', 'tr', 'ul'
+        ]);
+        const PROBHUB_MARKDOWN_DROP_CONTENT = new Set([
+            'audio', 'base', 'canvas', 'embed', 'form', 'iframe', 'math', 'noscript', 'object',
+            'script', 'style', 'svg', 'template', 'video'
+        ]);
+        const PROBHUB_MARKDOWN_ATTRIBUTES = {
+            a: new Set(['href', 'title', 'target', 'rel']),
+            code: new Set(['class']),
+            img: new Set(['src', 'alt', 'title']),
+            ol: new Set(['start']),
+            td: new Set(['align']),
+            th: new Set(['align'])
+        };
+
+        function markdownUrlIsSafe(value, attribute) {
+            try {
+                const parsed = new URL(String(value || '').trim(), window.location.origin);
+                const allowed = attribute === 'href'
+                    ? new Set(['http:', 'https:', 'mailto:'])
+                    : new Set(['http:', 'https:']);
+                return allowed.has(parsed.protocol);
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function sanitizeRenderedMarkdown(html) {
+            const template = document.createElement('template');
+            template.innerHTML = String(html || '');
+            for (const node of Array.from(template.content.querySelectorAll('*'))) {
+                const tag = node.localName;
+                if (PROBHUB_MARKDOWN_DROP_CONTENT.has(tag)) {
+                    node.remove();
+                    continue;
+                }
+                if (!PROBHUB_MARKDOWN_TAGS.has(tag)) {
+                    node.replaceWith(...node.childNodes);
+                    continue;
+                }
+                const allowed = PROBHUB_MARKDOWN_ATTRIBUTES[tag] || new Set();
+                for (const attribute of Array.from(node.attributes)) {
+                    const name = attribute.name.toLowerCase();
+                    if (!allowed.has(name) || name.startsWith('on') || name === 'style' || name === 'srcdoc') {
+                        node.removeAttribute(attribute.name);
+                        continue;
+                    }
+                    if ((name === 'href' || name === 'src') && !markdownUrlIsSafe(attribute.value, name)) {
+                        node.removeAttribute(attribute.name);
+                    }
+                }
+                if (tag === 'a') {
+                    const target = node.getAttribute('target');
+                    if (target && target !== '_blank' && target !== '_self') node.removeAttribute('target');
+                    if (node.getAttribute('target') === '_blank') node.setAttribute('rel', 'noopener noreferrer');
+                }
+            }
+            return template.innerHTML;
+        }
+
         document.addEventListener('alpine:init', () => {
             Alpine.data('probhub', () => ({
                 theme: document.documentElement.dataset.theme || 'dark',
@@ -1449,7 +1606,7 @@ HTML_TEMPLATE = r"""
                     this.sandboxLogOpen = true;
                     fetch('/api/sandbox/run', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 'Content-Type': 'application/json', 'X-ProbHub-CSRF': PROBHUB_CSRF_TOKEN },
                         body: JSON.stringify({ subtitle: this.currentSubtitle, index: this.selectedIdx })
                     }).then(res => res.json()).then(data => {
                         if (!data.success) {
@@ -1610,7 +1767,11 @@ HTML_TEMPLATE = r"""
                     this.submissionLogs = '';
                     this.submissionVerdict = 'PENDING';
                     this.submissionLogOpen = true;
-                    fetch('/api/submission/run', { method: 'POST', body: form })
+                    fetch('/api/submission/run', {
+                        method: 'POST',
+                        headers: { 'X-ProbHub-CSRF': PROBHUB_CSRF_TOKEN },
+                        body: form
+                    })
                         .then(async res => ({ ok: res.ok, data: await res.json() }))
                         .then(({ ok, data }) => {
                             if (!ok || !data.success) throw new Error(data.error || 'submission failed to start');
@@ -1629,7 +1790,10 @@ HTML_TEMPLATE = r"""
                 cancelSubmission() {
                     if (!this.submissionJobId || !this.submissionRunning) return;
                     this.submissionVerdict = 'CANCELLING';
-                    fetch(`/api/submission/job/${this.submissionJobId}/cancel`, { method: 'POST' })
+                    fetch(`/api/submission/job/${this.submissionJobId}/cancel`, {
+                        method: 'POST',
+                        headers: { 'X-ProbHub-CSRF': PROBHUB_CSRF_TOKEN }
+                    })
                         .then(res => res.json())
                         .then(data => {
                             if (!data.success) throw new Error(data.error || 'cancel failed');
@@ -1749,7 +1913,7 @@ HTML_TEMPLATE = r"""
                         el.innerHTML = '<span class="text-cream-subtle italic text-[12px]">暂无内容...</span>';
                         return;
                     }
-                    el.innerHTML = marked.parse(text);
+                    el.innerHTML = sanitizeRenderedMarkdown(marked.parse(text));
                     const problemId = this.problems[this.selectedIdx]?._id;
                     if (problemId && this.currentSubtitle) {
                         const base = new URL(`/workspace/${encodeURIComponent(problemId)}/`, window.location.origin);
@@ -1813,7 +1977,7 @@ HTML_TEMPLATE = r"""
                     for (let attempt = 0; ; attempt++) {
                         const response = await fetch(url, {
                             method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
+                            headers: { 'Content-Type': 'application/json', 'X-ProbHub-CSRF': PROBHUB_CSRF_TOKEN },
                             body: JSON.stringify(payload)
                         });
                         let data;
@@ -1942,7 +2106,11 @@ HTML_TEMPLATE = r"""
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(
+        HTML_TEMPLATE,
+        csrf_token=WEBUI_CSRF_TOKEN,
+        csp_nonce=g.csp_nonce,
+    )
 
 @app.route('/api/subtitles', methods=['GET'])
 def get_subtitles():
@@ -2595,6 +2763,8 @@ def sandbox_run():
             SANDBOX_JOBS[job_id] = {"status": "running", "logs": "", "result": None}
         Thread(target=_run_sandbox_job, args=(job_id, subtitle, index), daemon=True).start()
         return jsonify({"success": True, "job_id": job_id})
+    except RequestEntityTooLarge:
+        raise
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -2812,8 +2982,6 @@ def _run_submission_job(job_id, subtitle, index, filename, source):
 @app.route('/api/submission/run', methods=['POST'])
 def submission_run():
     try:
-        if request.content_length and request.content_length > MAX_SUBMISSION_REQUEST_BYTES:
-            return jsonify({"success": False, "error": "upload is too large"}), 413
         subtitle = request.form.get("subtitle", "")
         index = int(request.form.get("index", "-1"))
         upload = request.files.get("source")
@@ -2853,6 +3021,8 @@ def submission_run():
             daemon=True,
         ).start()
         return jsonify({"success": True, "job_id": job_id, "status": "queued"})
+    except RequestEntityTooLarge:
+        raise
     except (TypeError, ValueError) as exc:
         return jsonify({"success": False, "error": str(exc)}), 400
     except Exception as exc:
@@ -3071,6 +3241,8 @@ def save_contest_config(subtitle):
             return jsonify({"success": True, "config": saved})
         _write_contest_config(subtitle, config)
         return jsonify({"success": True})
+    except RequestEntityTooLarge:
+        raise
     except ProbHubError as e:
         status = 409 if e.code in {"source_conflict", "build_busy"} else 400
         return jsonify({"success": False, "error": str(e), "code": e.code}), status

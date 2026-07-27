@@ -24,6 +24,8 @@ class UiWriteBoundaryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.ui = load_ui()
+        cls.client = cls.ui.app.test_client()
+        cls.client.environ_base["HTTP_X_PROBHUB_CSRF"] = cls.ui.WEBUI_CSRF_TOKEN
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -82,7 +84,6 @@ class UiWriteBoundaryTests(unittest.TestCase):
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
-        self.client = self.ui.app.test_client()
 
     def tearDown(self):
         os.chdir(self.original_cwd)
@@ -175,6 +176,24 @@ class UiWriteBoundaryTests(unittest.TestCase):
         for relative, content in generated.items():
             with self.subTest(relative=relative):
                 self.assertEqual((self.root / relative).read_bytes(), content)
+
+    def test_large_schema_save_is_not_limited_by_submission_upload_budget(self):
+        payload = self.load_payload()
+        description = "Large but valid statement content.\n" * 40000
+        self.assertGreater(
+            len(description.encode("utf-8")),
+            self.ui.MAX_SUBMISSION_REQUEST_BYTES,
+        )
+        payload[0]["statement"]["description"] = description
+
+        response = self.client.post(
+            "/api/data",
+            json={"subtitle": "Contest", "problems": payload},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertTrue(response.get_json()["success"])
+        self.assertIn(description, (self.root / "A/problem.md").read_text(encoding="utf-8"))
 
     def test_unchanged_schema_save_is_byte_for_byte_read_only(self):
         payload = self.load_payload()

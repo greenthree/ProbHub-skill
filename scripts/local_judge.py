@@ -25,17 +25,12 @@ from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
     ProcessCancelled,
     cancellation_requested,
-    close_windows_handle as _close_windows_handle,
     process_alive as _process_alive,
-    process_tree_metrics,
     run_managed_to_files,
     spawn_managed,
     terminate_process as _terminate_process,
-    unix_preexec_memory_limit as _unix_preexec_memory_limit,
     wait_managed,
     windows_assign_job as _windows_assign_job,
-    windows_assign_job as _windows_assign_job_memory_limit,
-    windows_query_job_peak_memory as _windows_query_job_peak_memory,
 )
 
 REFERENCES_DIR = os.path.join(PACKAGE_ROOT, "references")
@@ -624,46 +619,6 @@ def _failed_status(returncode, stderr, memory_enforced, peak_memory_mb, memory_l
     return "RE"
 
 
-def _terminate_process(proc, job_handle=None):
-    """Terminate a process and its process tree, then reap the direct child."""
-    if proc is None:
-        _close_windows_handle(job_handle)
-        return
-
-    if platform.system() == "Windows":
-        if job_handle:
-            # Closing a KILL_ON_JOB_CLOSE job kills descendants even if the direct
-            # child has already exited.
-            _close_windows_handle(job_handle)
-            job_handle = None
-        elif proc.poll() is None:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-    else:
-        # Interactive/contestant processes are launched as session leaders. Kill
-        # the group even when the direct child already exited, so grandchildren
-        # cannot survive the sandbox.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-
-    try:
-        proc.wait(timeout=2)
-    except (subprocess.TimeoutExpired, OSError):
-        if proc.poll() is None:
-            try:
-                proc.kill()
-                proc.wait(timeout=1)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-
 def _process_alive(pid):
     if not pid:
         return False
@@ -687,6 +642,19 @@ def _process_alive(pid):
         return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def _remove_file_with_retries(path):
+    for _ in range(20):
+        try:
+            os.remove(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            time.sleep(0.05)
+        except OSError:
+            return
 
 
 def run_program_to_file(
@@ -733,10 +701,7 @@ def run_program_to_file(
     except OSError as exc:
         return "RE", 0.0, None, False, str(exc)
     finally:
-        try:
-            os.remove(stderr_path)
-        except FileNotFoundError:
-            pass
+        _remove_file_with_retries(stderr_path)
 
 
 def _temporary_output_path(bin_path):
@@ -854,19 +819,9 @@ def run_custom_testcase(
             return "FAIL", elapsed, memory, memory_enforced, f"checker failed to start: {exc}"
         finally:
             for file_name in (checker_stdout, checker_stderr):
-                try:
-                    os.remove(file_name)
-                except FileNotFoundError:
-                    pass
+                _remove_file_with_retries(file_name)
     finally:
-        for _ in range(20):
-            try:
-                os.remove(output_file)
-                break
-            except FileNotFoundError:
-                break
-            except OSError:
-                time.sleep(0.05)
+        _remove_file_with_retries(output_file)
         shutil.rmtree(feedback_dir, ignore_errors=True)
 
 def _pump_interactive_stream(source, destination, direction, transcript, activity, traffic):
@@ -918,6 +873,43 @@ def _interactive_result(status, elapsed, memory, memory_enforced, message, trans
     return status, elapsed, memory, memory_enforced, message, details
 
 
+def _interactive_output_status(traffic, solution_stderr, interactor_stderr):
+    """Classify combined protocol/stderr output after every lifecycle edge."""
+    try:
+        solution_stderr_size = os.path.getsize(solution_stderr)
+    except OSError:
+        solution_stderr_size = 0
+    try:
+        interactor_stderr_size = os.path.getsize(interactor_stderr)
+    except OSError:
+        interactor_stderr_size = 0
+
+    limit = int(traffic["limit"])
+    interactor_bytes = traffic.get("interactor_to_solution", 0) + interactor_stderr_size
+    solution_bytes = traffic.get("solution_to_interactor", 0) + solution_stderr_size
+    if interactor_bytes > limit:
+        return "FAIL", "interactor output limit exceeded"
+    if solution_bytes > limit:
+        return "OLE", "interactive output limit exceeded"
+    return None, ""
+
+
+def _remove_interactive_temp(path):
+    """Best-effort cleanup for Windows handles that may close asynchronously."""
+    if not path:
+        return
+    for _ in range(20):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            time.sleep(0.05)
+        except OSError:
+            return
+
+
 def run_interactive_testcase(
     bin_path,
     interactor_bin,
@@ -938,53 +930,39 @@ def run_interactive_testcase(
     activity = {"last": monotonic_start}
     traffic = {"limit": int(output_limit * 1024 * 1024), "exceeded": None}
     last_resource_sample = monotonic_start
-    solution = None
-    interactor = None
-    solution_job = None
-    interactor_job = None
+    solution_managed = None
+    interactor_managed = None
     memory_enforced = False
     peak_memory_mb = None
     threads = []
-    solution_stderr = os.path.join(os.path.dirname(bin_path), ".probhub-solution.stderr")
-    interactor_stderr = os.path.join(os.path.dirname(bin_path), ".probhub-interactor.stderr")
-    feedback_dir = tempfile.mkdtemp(prefix=".probhub-feedback-", dir=os.path.dirname(bin_path))
+    runtime_dir = tempfile.mkdtemp(prefix=".probhub-interactive-", dir=os.path.dirname(bin_path))
+    solution_stderr = os.path.join(runtime_dir, "solution.stderr")
+    interactor_stderr = os.path.join(runtime_dir, "interactor.stderr")
+    feedback_dir = os.path.join(runtime_dir, "feedback")
+    os.mkdir(feedback_dir)
     try:
         with open(solution_stderr, "wb") as solution_err, open(interactor_stderr, "wb") as interactor_err:
-            solution_kwargs = {
-                "stdin": subprocess.PIPE,
-                "stdout": subprocess.PIPE,
-                "stderr": solution_err,
-                "preexec_fn": _unix_preexec_memory_limit(memory_limit),
-                "bufsize": 0,
-            }
-            interactor_kwargs = {
-                "stdin": subprocess.PIPE,
-                "stdout": subprocess.PIPE,
-                "stderr": interactor_err,
-                "bufsize": 0,
-            }
-            if platform.system() == "Windows":
-                solution_kwargs.pop("preexec_fn", None)
-            else:
-                solution_kwargs["start_new_session"] = True
-                interactor_kwargs["start_new_session"] = True
-
-            solution = subprocess.Popen([bin_path], **solution_kwargs)
-            if platform.system() == "Windows":
-                solution_job = _windows_assign_job_memory_limit(solution, memory_limit, process_limit)
-                if solution_job is None:
-                    raise OSError("Windows Job Object containment is unavailable for solution")
-                memory_enforced = True
-            else:
-                memory_enforced = solution_kwargs.get("preexec_fn") is not None
-            interactor = subprocess.Popen(
-                [interactor_bin, in_file, ans_file, feedback_dir],
-                **interactor_kwargs,
+            solution_managed = spawn_managed(
+                [bin_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=solution_err,
+                bufsize=0,
+                memory_limit_mb=memory_limit,
+                process_limit=process_limit,
             )
-            if platform.system() == "Windows":
-                interactor_job = _windows_assign_job(interactor, None, process_limit)
-                if interactor_job is None:
-                    raise OSError("Windows Job Object containment is unavailable for interactor")
+            memory_enforced = solution_managed.memory_enforced
+            solution = solution_managed.proc
+            interactor_managed = spawn_managed(
+                [interactor_bin, in_file, ans_file, feedback_dir],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=interactor_err,
+                bufsize=0,
+                memory_limit_mb=memory_limit,
+                process_limit=process_limit,
+            )
+            interactor = interactor_managed.proc
 
             threads = [
                 threading.Thread(
@@ -1000,6 +978,10 @@ def run_interactive_testcase(
             ]
             for thread in threads:
                 thread.start()
+            # Process creation and Windows Job setup are infrastructure time, not
+            # protocol idleness. Start the idle clock once both pumps can observe
+            # traffic so a tight idle limit does not erase the first transcript.
+            activity["last"] = time.monotonic()
 
             deadline = monotonic_start + float(time_limit)
             while solution.poll() is None or interactor.poll() is None:
@@ -1008,35 +990,34 @@ def run_interactive_testcase(
                 now = time.monotonic()
                 resource_status = None
                 resource_message = ""
-                exceeded = traffic.get("exceeded")
-                if exceeded == "solution_to_interactor":
-                    resource_status, resource_message = "OLE", "interactive output limit exceeded"
-                elif exceeded == "interactor_to_solution":
-                    resource_status, resource_message = "FAIL", "interactor output limit exceeded"
-                try:
-                    if os.path.getsize(solution_stderr) > traffic["limit"]:
-                        resource_status, resource_message = "OLE", "interactive stderr limit exceeded"
-                    if os.path.getsize(interactor_stderr) > traffic["limit"]:
-                        resource_status, resource_message = "FAIL", "interactor stderr limit exceeded"
-                except OSError:
-                    pass
-                if platform.system() != "Windows" and now - last_resource_sample >= 0.05:
+                resource_status, resource_message = _interactive_output_status(
+                    traffic, solution_stderr, interactor_stderr
+                )
+                if now - last_resource_sample >= 0.05:
                     last_resource_sample = now
-                    solution_count, solution_memory = process_tree_metrics(solution.pid)
-                    if solution_memory is not None:
-                        peak_memory_mb = max(peak_memory_mb or 0.0, solution_memory)
+                    solution_count, solution_memory = solution_managed.sample()
+                    peak_memory_mb = solution_managed.peak_memory_mb
                     if solution_memory is not None and solution_memory >= memory_limit:
                         resource_status, resource_message = "MLE", "memory limit exceeded"
                     elif solution_count is not None and solution_count > process_limit:
                         resource_status, resource_message = "RE", "process limit exceeded"
-                    interactor_count, _ = process_tree_metrics(interactor.pid)
-                    if interactor_count is not None and interactor_count > process_limit:
+                    interactor_count, interactor_memory = interactor_managed.sample()
+                    if interactor_memory is not None and interactor_memory >= memory_limit:
+                        resource_status, resource_message = "FAIL", "interactor memory limit exceeded"
+                    elif interactor_count is not None and interactor_count > process_limit:
                         resource_status, resource_message = "FAIL", "interactor process limit exceeded"
+                    elif interactor.poll() is not None:
+                        interactor_status, interactor_message = _checker_result(
+                            interactor.returncode, ""
+                        )
+                        if interactor_status == "FAIL":
+                            resource_status = "FAIL"
+                            resource_message = interactor_message
                 if resource_status:
-                    _terminate_process(solution, solution_job)
-                    solution_job = None
-                    _terminate_process(interactor, interactor_job)
-                    interactor_job = None
+                    solution_managed.terminate()
+                    solution_managed = None
+                    interactor_managed.terminate()
+                    interactor_managed = None
                     for thread in threads:
                         thread.join(timeout=1)
                     return _interactive_result(
@@ -1053,11 +1034,12 @@ def run_interactive_testcase(
                 elif now - activity["last"] >= idle_limit:
                     timeout_kind = "idle"
                 if timeout_kind:
-                    peak_memory_mb = _windows_query_job_peak_memory(solution_job)
-                    _terminate_process(solution, solution_job)
-                    solution_job = None
-                    _terminate_process(interactor, interactor_job)
-                    interactor_job = None
+                    solution_managed.sample()
+                    peak_memory_mb = solution_managed.peak_memory_mb
+                    solution_managed.terminate()
+                    solution_managed = None
+                    interactor_managed.terminate()
+                    interactor_managed = None
                     for thread in threads:
                         thread.join(timeout=1)
                     message = (
@@ -1080,8 +1062,26 @@ def run_interactive_testcase(
             for thread in threads:
                 thread.join(timeout=1)
 
+            # Both direct processes may exit before the monitor observes a final
+            # output burst. Sample and classify once more while Job telemetry and
+            # stderr files are still available.
+            solution_managed.sample()
+            peak_memory_mb = solution_managed.peak_memory_mb
+            interactor_managed.sample()
+            resource_status, resource_message = _interactive_output_status(
+                traffic, solution_stderr, interactor_stderr
+            )
+            interactor_peak_memory = interactor_managed.peak_memory_mb
+            if (
+                interactor.returncode != 0
+                and interactor_managed.memory_enforced
+                and interactor_peak_memory is not None
+                and interactor_peak_memory >= memory_limit * 0.98
+            ):
+                resource_status = "FAIL"
+                resource_message = "interactor memory limit exceeded"
+
         elapsed = time.time() - start
-        peak_memory_mb = _windows_query_job_peak_memory(solution_job)
         solution_message = ""
         interactor_message = ""
         try:
@@ -1093,6 +1093,16 @@ def run_interactive_testcase(
         except OSError:
             pass
         interactor_message = _feedback_message(feedback_dir, interactor_message)
+
+        if resource_status:
+            return _interactive_result(
+                resource_status,
+                elapsed,
+                peak_memory_mb,
+                memory_enforced,
+                resource_message,
+                transcript,
+            )
 
         if solution.returncode != 0:
             status = _failed_status(
@@ -1110,10 +1120,6 @@ def run_interactive_testcase(
             interactor_status, elapsed, peak_memory_mb, memory_enforced, message, transcript
         )
     except OSError as exc:
-        _terminate_process(solution, solution_job)
-        solution_job = None
-        _terminate_process(interactor, interactor_job)
-        interactor_job = None
         return _interactive_result(
             "FAIL",
             time.time() - start,
@@ -1123,17 +1129,13 @@ def run_interactive_testcase(
             transcript,
         )
     finally:
-        _terminate_process(solution, solution_job)
-        solution_job = None
-        _terminate_process(interactor, interactor_job)
-        interactor_job = None
-        _close_windows_handle(solution_job)
-        for file_name in (solution_stderr, interactor_stderr):
-            try:
-                os.remove(file_name)
-            except FileNotFoundError:
-                pass
-        shutil.rmtree(feedback_dir, ignore_errors=True)
+        if solution_managed is not None:
+            solution_managed.terminate()
+        if interactor_managed is not None:
+            interactor_managed.terminate()
+        for thread in threads:
+            thread.join(timeout=1)
+        _remove_interactive_temp(runtime_dir)
 
 def run_testcase(
     bin_path,
