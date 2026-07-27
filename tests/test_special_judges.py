@@ -392,7 +392,7 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
                 },
             )
             result, events = self.run_judge(problem)
-            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             case = next(
                 event for event in events
                 if event.get("type") == "case" and event.get("kind") == "std"
