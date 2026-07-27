@@ -101,6 +101,27 @@ class ScaffoldTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("not empty", result["error"])
 
+    def test_new_rejects_unsafe_ids_and_directories(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.init_workspace(root)
+            code, result = run_cli(["--workspace", str(root), "--json", "new", "../pwn"])
+            self.assertEqual(code, 1)
+            self.assertIn("invalid problem id", result["error"])
+            code, result = run_cli([
+                "--workspace", str(root), "--json", "new", "A", "--directory", "../outside",
+            ])
+            self.assertEqual(code, 1)
+            self.assertIn("stay inside the workspace", result["error"])
+            self.assertFalse((root.parent / "outside").exists())
+            code, result = run_cli([
+                "--workspace", str(root), "--json", "new", "A", "--directory", "problems/L05",
+            ])
+            self.assertEqual(code, 0)
+            self.assertTrue((root / "problems/L05/probhub.yaml").is_file())
+            _, workspace = load_workspace(root)
+            self.assertEqual(workspace["problems"][0]["directory"], "problems/L05")
+
     def test_new_fails_fast_when_workspace_writer_lock_is_busy(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

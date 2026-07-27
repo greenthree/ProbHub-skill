@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from . import __version__
 from .build_lock import workspace_build_lock
 from .errors import ProbHubError
+from .generations import checkpoint_revision, latest_checkpoint
 from .hashing import hash_file
 from .io import write_json
 from .judging import judge_problem
@@ -26,6 +27,15 @@ from .linting import (
 )
 from .package_tools import build_verified_package, generate_domjudge_config, validate_output_validator_source
 from .typesetting import compile_collection, extract_problem_pdfs, is_temporary_typst_source
+from .transactions import (
+    TRANSACTION_PHASE_COMMITTED,
+    TRANSACTION_PHASE_PREPARED,
+    read_transaction_journal,
+    recover_workspace_transactions,
+    resolve_journal_target,
+    transaction_child,
+    validate_transaction_directory,
+)
 from .workspace import load_problem, load_workspace, problem_entries, select_entries
 
 
@@ -137,6 +147,81 @@ def create_build_plan(root, workspace, entries):
     )
 
 
+def require_collection_sealed(plan):
+    """Bind every problem in the formal collection to a sealed checkpoint."""
+    checkpoints = {}
+    rejected = []
+    for item in plan.problems:
+        problem_id = item.config["id"]
+        try:
+            checkpoint = latest_checkpoint(plan.root, problem_id)
+        except ProbHubError as exc:
+            rejected.append(f"{problem_id}: {exc.code or str(exc)}")
+            continue
+        if checkpoint is None:
+            rejected.append(f"{problem_id}: no checkpoint")
+            continue
+        if checkpoint.get("state") != "sealed":
+            rejected.append(f"{problem_id}: latest checkpoint is {checkpoint.get('state') or 'invalid'}")
+            continue
+        mismatches = []
+        if checkpoint.get("source_hash") != item.source_hash:
+            mismatches.append("source_hash")
+        if checkpoint.get("data_hash") != item.data_hash:
+            mismatches.append("data_hash")
+        if mismatches:
+            rejected.append(
+                f"{problem_id}: sealed revision does not match live {', '.join(mismatches)}"
+            )
+            continue
+        checkpoints[problem_id] = checkpoint
+
+    if rejected:
+        raise ProbHubError(
+            "formal build requires current sealed revisions for every collection problem: "
+            + "; ".join(rejected),
+            code="sealed_revision_required",
+        )
+    return checkpoints
+
+
+def assert_collection_seals_unchanged(plan, checkpoints):
+    """Revalidate the exact sealed revisions immediately before publication."""
+    rejected = []
+    for item in plan.problems:
+        problem_id = item.config["id"]
+        expected = checkpoints[problem_id]
+        try:
+            latest = latest_checkpoint(plan.root, problem_id)
+            if (
+                latest is None
+                or latest.get("revision_id") != expected.get("revision_id")
+            ):
+                rejected.append(f"{problem_id}: latest sealed revision changed during build")
+                continue
+            checkpoint = checkpoint_revision(
+                plan.root,
+                problem_id,
+                expected["revision_id"],
+            )
+        except (KeyError, ProbHubError) as exc:
+            rejected.append(
+                f"{problem_id}: {getattr(exc, 'code', None) or str(exc)}"
+            )
+            continue
+        if (
+            checkpoint.get("state") != "sealed"
+            or checkpoint.get("source_hash") != item.source_hash
+            or checkpoint.get("data_hash") != item.data_hash
+        ):
+            rejected.append(f"{problem_id}: sealed revision changed during build")
+    if rejected:
+        raise ProbHubError(
+            "sealed build evidence changed during the run: " + "; ".join(rejected),
+            code="sealed_revision_changed",
+        )
+
+
 def _snapshot_ignore(plan):
     excluded = {
         plan.root / ".probhub/build.lock",
@@ -193,6 +278,9 @@ def _snapshot_ignore(plan):
                 continue
             if directory.name == ".probhub" and name in ignored_probhub_entries:
                 result.append(name)
+                continue
+            if directory.name == ".probhub" and name.startswith("build-publish-"):
+                result.append(name)
         return result
 
     return ignore
@@ -211,8 +299,8 @@ def _snapshot_mismatches(plan, snapshot):
     if collection_hash != plan.collection_hash:
         changed.append("collection_hash")
 
-    planned = {item.config["id"]: item for item in plan.selected}
-    for item in snapshot.selected:
+    planned = {item.config["id"]: item for item in plan.problems}
+    for item in snapshot.problems:
         expected = planned[item.config["id"]]
         if item.source_hash != expected.source_hash:
             changed.append(f"{item.config['id']}.source_hash")
@@ -284,10 +372,7 @@ def assert_build_inputs_unchanged(plan):
         _, workspace = load_workspace(plan.root)
         workspace_hash = compute_workspace_hash(plan.root, workspace)
         collection_hash = compute_collection_hash(plan.root, workspace)
-        entries = select_entries(
-            workspace,
-            [item.config["id"] for item in plan.selected],
-        )
+        entries = problem_entries(workspace)
         current = {}
         for entry in entries:
             problem_dir, config = load_problem(plan.root, entry)
@@ -306,7 +391,7 @@ def assert_build_inputs_unchanged(plan):
         changed.append("workspace_hash")
     if collection_hash != plan.collection_hash:
         changed.append("collection_hash")
-    for item in plan.selected:
+    for item in plan.problems:
         problem_id = item.config["id"]
         values = current.get(problem_id, {})
         if values.get("source_hash") != item.source_hash:
@@ -503,44 +588,251 @@ def _assert_publish_targets_available(plan, platform_name=None):
         )
 
 
-def publish_build(plan, snapshot, manifests, pdfs, packages, publish_cache):
-    _assert_publish_targets_available(plan)
+def _replace_publish_path(source, target):
+    os.replace(source, target)
+
+
+def _publish_entry_specs(plan, snapshot):
     live_by_id = {item.config["id"]: item for item in plan.problems}
     staged_by_id = {item.config["id"]: item for item in snapshot.problems}
-
+    specs = []
     for problem_id, live in live_by_id.items():
         staged = staged_by_id[problem_id]
-        _replace_staged_file(
-            staged.problem_dir / "meta.json",
-            live.problem_dir / "meta.json",
-        )
+        specs.append((staged.problem_dir / "meta.json", live.problem_dir / "meta.json"))
 
     live_typst = plan.root / plan.typst_relative
     staged_typst = snapshot.root / plan.typst_relative
-    _replace_staged_file(
-        staged_typst / "problems.json",
-        live_typst / "problems.json",
-    )
-    _replace_staged_file(staged_typst / "main.pdf", live_typst / "main.pdf")
+    specs.extend((
+        (staged_typst / "problems.json", live_typst / "problems.json"),
+        (staged_typst / "main.pdf", live_typst / "main.pdf"),
+    ))
 
+    for staged in snapshot.selected:
+        problem_id = staged.config["id"]
+        live = live_by_id[problem_id]
+        for name in (
+            "problem.pdf",
+            "problem.yaml",
+            "domjudge-problem.ini",
+            "output_validators",
+        ):
+            specs.append((staged.problem_dir / name, live.problem_dir / name))
+        specs.append((snapshot.root / f"{problem_id}.zip", plan.root / f"{problem_id}.zip"))
+
+    # Manifest is the commit marker and must be replaced last.
+    for staged in snapshot.selected:
+        problem_id = staged.config["id"]
+        live = live_by_id[problem_id]
+        specs.append((
+            staged.problem_dir / ".probhub/build-manifest.json",
+            live.problem_dir / ".probhub/build-manifest.json",
+        ))
+    return specs
+
+
+def _journal_target(root, relative):
+    return resolve_journal_target(root, relative)
+
+
+def _rollback_publish_transaction(root, transaction, entries):
+    errors = []
+    for reverse_index, entry in enumerate(reversed(entries)):
+        index = len(entries) - reverse_index - 1
+        label = entry.get("target") if isinstance(entry, dict) else repr(entry)
+        try:
+            if not isinstance(entry, dict):
+                raise ValueError("journal entry must be an object")
+            target = _journal_target(root, entry["target"])
+            backup_name = entry.get("backup")
+            backup = (
+                transaction_child(
+                    transaction,
+                    backup_name,
+                    expected_prefix="backup",
+                    index=index,
+                )
+                if backup_name
+                else None
+            )
+            if backup is not None and backup.exists():
+                _remove_generated_path(target)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _replace_publish_path(backup, target)
+            elif entry.get("existed"):
+                if not (target.exists() or target.is_symlink()):
+                    raise FileNotFoundError(
+                        f"missing recovery backup and target: {backup} -> {target}"
+                    )
+            elif not entry.get("existed"):
+                _remove_generated_path(target)
+        except BaseException as exc:
+            errors.append(f"{label}: {exc}")
+    return errors
+
+
+def _recover_build_publish_transactions(root):
+    root = Path(root).resolve()
+    transaction_root = root / ".probhub"
+    if not transaction_root.is_dir():
+        return
+    for transaction in sorted(transaction_root.glob("build-publish-*")):
+        try:
+            transaction = validate_transaction_directory(
+                transaction,
+                transaction_root,
+                "build-publish-",
+            )
+            journal_path = transaction / "journal.json"
+            if not journal_path.is_file():
+                shutil.rmtree(transaction)
+                continue
+            _, phase, entries = read_transaction_journal(transaction)
+            if phase == TRANSACTION_PHASE_COMMITTED:
+                shutil.rmtree(transaction)
+                continue
+            errors = _rollback_publish_transaction(root, transaction, entries)
+            if errors:
+                raise OSError("; ".join(errors))
+            shutil.rmtree(transaction)
+        except BaseException as exc:
+            raise ProbHubError(
+                f"failed to recover interrupted build publish transaction {transaction}: {exc}",
+                code="publish_recovery_failed",
+            ) from exc
+
+
+def _publish_build_transaction(plan, snapshot):
+    transaction = plan.root / ".probhub" / f"build-publish-{plan.batch_id}"
+    transaction.mkdir(parents=True, exist_ok=False)
+    cleanup_transaction = True
+    cleanup_context = "staging"
+    entries = []
+    try:
+        for index, (source, target) in enumerate(_publish_entry_specs(plan, snapshot)):
+            source = Path(source)
+            target = Path(target)
+            relative = target.absolute().relative_to(plan.root.absolute()).as_posix()
+            staged = transaction / f"payload-{index}"
+            source_kind = "missing"
+            if source.is_dir():
+                shutil.copytree(source, staged)
+                source_kind = "directory"
+            elif source.is_file():
+                shutil.copyfile(source, staged)
+                source_kind = "file"
+            elif source.name != "output_validators":
+                raise FileNotFoundError(f"staged build artifact is missing: {source}")
+            existed = target.exists() or target.is_symlink()
+            entries.append({
+                "target": relative,
+                "payload": staged.name if source_kind != "missing" else None,
+                "kind": source_kind,
+                "existed": existed,
+                "backup": f"backup-{index}" if existed else None,
+            })
+
+        write_json(transaction / "journal.json", {
+            "schema_version": 1,
+            "phase": TRANSACTION_PHASE_PREPARED,
+            "entries": entries,
+        })
+        for entry in entries:
+            target = _journal_target(plan.root, entry["target"])
+            exists = target.exists() or target.is_symlink()
+            if exists != entry["existed"]:
+                raise ProbHubError(
+                    f"publish target changed before commit: {entry['target']}",
+                    code="publish_failed",
+                )
+        cleanup_transaction = False
+        try:
+            for index, entry in enumerate(entries):
+                target = _journal_target(plan.root, entry["target"])
+                backup_name = entry.get("backup")
+                backup = (
+                    transaction_child(
+                        transaction,
+                        backup_name,
+                        expected_prefix="backup",
+                        index=index,
+                    )
+                    if backup_name
+                    else None
+                )
+                if target.exists() or target.is_symlink():
+                    if backup is None:
+                        raise OSError(
+                            f"new publish target appeared during commit: {target}"
+                        )
+                    _replace_publish_path(target, backup)
+                payload_name = entry.get("payload")
+                if payload_name:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    payload = transaction_child(
+                        transaction,
+                        payload_name,
+                        expected_prefix="payload",
+                        index=index,
+                    )
+                    _replace_publish_path(payload, target)
+        except BaseException as exc:
+            errors = _rollback_publish_transaction(plan.root, transaction, entries)
+            if errors:
+                raise ProbHubError(
+                    "build publish failed and rollback was incomplete; recovery files remain "
+                    f"in {transaction}: {'; '.join(errors)}",
+                    code="publish_rollback_failed",
+                ) from exc
+            cleanup_transaction = True
+            cleanup_context = "rollback"
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise ProbHubError(
+                f"failed to publish build transaction: {exc}",
+                code="publish_failed",
+            ) from exc
+        write_json(transaction / "journal.json", {
+            "schema_version": 1,
+            "phase": TRANSACTION_PHASE_COMMITTED,
+            "entries": entries,
+        })
+        cleanup_transaction = True
+        cleanup_context = "committed"
+    except ProbHubError:
+        raise
+    except Exception as exc:
+        raise ProbHubError(
+            f"failed to stage build publish transaction: {exc}",
+            code="publish_failed",
+        ) from exc
+    finally:
+        if cleanup_transaction:
+            try:
+                shutil.rmtree(transaction)
+            except OSError as exc:
+                detail = {
+                    "committed": "build artifacts were committed",
+                    "rollback": "build publication was rolled back",
+                    "staging": "build transaction staging failed",
+                }[cleanup_context]
+                raise ProbHubError(
+                    f"{detail} but transaction cleanup failed; "
+                    f"the next writer will retry cleanup: {transaction}: {exc}",
+                    code="publish_cleanup_failed",
+                ) from exc
+
+
+def publish_build(plan, snapshot, manifests, pdfs, packages, publish_cache):
+    _assert_publish_targets_available(plan)
+    live_by_id = {item.config["id"]: item for item in plan.problems}
+    _publish_build_transaction(plan, snapshot)
+
+    live_typst = plan.root / plan.typst_relative
     live_pdfs = {}
     live_packages = {}
     for staged in snapshot.selected:
         problem_id = staged.config["id"]
         live = live_by_id[problem_id]
-        for name in ("problem.pdf", "problem.yaml", "domjudge-problem.ini"):
-            _replace_staged_file(
-                staged.problem_dir / name,
-                live.problem_dir / name,
-            )
-        _publish_output_validators(
-            staged.problem_dir / "output_validators",
-            live.problem_dir / "output_validators",
-        )
-        _replace_staged_file(
-            snapshot.root / f"{problem_id}.zip",
-            plan.root / f"{problem_id}.zip",
-        )
         live_pdfs[problem_id] = {
             **pdfs[problem_id],
             "path": str(live.problem_dir / "problem.pdf"),
@@ -553,10 +845,6 @@ def publish_build(plan, snapshot, manifests, pdfs, packages, publish_cache):
     for staged in snapshot.selected:
         problem_id = staged.config["id"]
         live = live_by_id[problem_id]
-        _replace_staged_file(
-            staged.problem_dir / ".probhub/build-manifest.json",
-            live.problem_dir / ".probhub/build-manifest.json",
-        )
         if publish_cache:
             _publish_cache(staged.problem_dir, live.problem_dir)
 
@@ -578,6 +866,7 @@ def write_manifest(
     workspace_hash,
     collection_hash,
     batch_id,
+    sealed_revision_id,
 ):
     manifest = {
         "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
@@ -587,6 +876,7 @@ def write_manifest(
         "workspace_hash": workspace_hash,
         "collection_hash": collection_hash,
         "batch_id": batch_id,
+        "sealed_revision_id": sealed_revision_id,
         "pdf_hash": hash_file(problem_dir / "problem.pdf"),
         "package_hash": hash_file(package_path),
         "built_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
@@ -614,9 +904,11 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
     root = Path(root).resolve()
     with workspace_build_lock(root):
         _, live_workspace = load_workspace(root)
+        recover_workspace_transactions(root, live_workspace)
         selected_ids = [entry["id"] for entry in entries]
         live_entries = select_entries(live_workspace, selected_ids)
         plan = create_build_plan(root, live_workspace, live_entries)
+        sealed_checkpoints = require_collection_sealed(plan)
         with create_build_snapshot(plan) as snapshot:
             judge_results = {}
             if run_judge:
@@ -678,9 +970,11 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
                     plan.workspace_hash,
                     plan.collection_hash,
                     plan.batch_id,
+                    sealed_checkpoints[problem_id]["revision_id"],
                 )
 
             assert_build_inputs_unchanged(plan)
+            assert_collection_seals_unchanged(plan, sealed_checkpoints)
             published = publish_build(
                 plan,
                 snapshot,

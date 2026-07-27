@@ -88,7 +88,7 @@ probhub new L07 --name "交互题" --judge interactive
 
 ```text
 <directory>/
-├── probhub.yaml            # 双 accepted + 双 wrong 期望矩阵、overflow 定向数据组
+├── probhub.yaml            # 双 accepted + 双 wrong 期望矩阵、overflow 定向数据组、manual 配方
 ├── problem.md              # 按题面守则书写的示例题面
 ├── code/
 │   ├── validator.cpp       # testlib 严格校验样板
@@ -108,9 +108,11 @@ probhub new L07 --name "交互题" --judge interactive
 要点：
 
 - `--judge` 可选 `standard`（默认）、`custom`、`interactive`；custom 附 Checker 骨架，interactive 附 Interactor 骨架并使用带刷新的标程模板。
+- 两个 secret 测试点以 `manual: true` 配方登记（配方覆盖完整，lint 无 warning）；换成生成器数据时改写 `data.recipes` 后运行 `probhub gen`。
 - `solutions.brute` 初始为空：judge 对已登记的 brute 要求至少一个 TLE/MLE，脚手架数据尚无 brute-killer，实现真实暴力并准备击杀数据后再登记。
 - 错解枚举与数据强度纪律见 `references/mistake-taxonomy.md`；示例的 `overflow` 组演示了 `data.groups` + `targets` + `expected` 的定向击杀写法。
 - `new` 会持有工作区写锁并原子写入 `workspace.yaml`；并发写入返回 `build_busy`。
+- 题目 ID 与 `--directory` 的每级路径组件仅允许 `[A-Za-z0-9][A-Za-z0-9_.-]*`，且目录必须位于工作区内（拒绝 `../`、绝对路径与工作区根本身）；注册进 `workspace.yaml` 的 directory 统一为 POSIX 相对路径。
 
 ## 5. `gen`
 
@@ -122,14 +124,19 @@ probhub gen L05 --apply         # 全部成功后写入 new/changed 测试点
 probhub gen L05 --case max01    # 只处理指定配方（可重复）
 ```
 
-执行流程：编译生成器与首个 accepted → 按配方运行生成器 → Validator 全量过检 → accepted 产 `.ans` → 与磁盘现状比较。plan 输出逐测试点 `new` / `changed` / `unchanged` / `manual` 状态与新旧 SHA-256；`changed` 意味着配方结果与磁盘不一致（数据被手改、生成器或 accepted 变化），`--apply` 前先核对差异，不会静默覆盖。
+执行流程：编译生成器与首个 accepted → 按配方运行生成器 → Validator 全量过检 → accepted 产 `.ans` → Custom Judge 运行 Checker 复核 → 与磁盘现状比较。plan 输出逐测试点 `new` / `changed` / `unchanged` / `manual` 状态与新旧 SHA-256；`changed` 意味着配方结果与磁盘不一致（数据被手改、生成器或 accepted 变化），`--apply` 前先核对差异，不会静默覆盖。
 
 要点：
 
-- **失败即零写入**：任一配方出现生成器崩溃、Validator 拒绝或 accepted 非正常退出，整次 `gen` 以 `gen_failed` 失败（exit 1），不写任何数据文件。
-- 输出统一 LF 归一，同一配方在 Windows 与 Linux 复现相同字节；plan 的 `unchanged` 即字节一致性验证。
-- `manual: true` 的测试点不被触碰；文件缺失时给 warning。
-- 生成证据（generator/args/输入与答案哈希）写入本地 `.probhub/gen-manifest.json`，属本地产物不提交。
+- **失败即零写入**：任一配方出现生成器崩溃、Validator 拒绝、accepted 非正常退出或 Checker 不接受正式答案，整次 `gen` 以 `gen_failed` 失败（exit 1），不写任何数据文件。
+- plan 严格只读；`--apply` 全程持有工作区写锁（与 `build`/`new` 相同的 `build.lock`），并发写入返回 `build_busy`。
+- `--apply` 在取得锁后重新加载 live workspace 与 `probhub.yaml`，发布前再次核对配置身份；`.in`、`.ans` 与 gen manifest 全部先 staging，任一 replace 失败会恢复原文件并以 `gen_write_failed` 退出。
+- 输出统一 LF 归一，同一配方在 Windows 与 Linux 复现相同字节；plan 的 `unchanged` 是**字节级**一致（磁盘上 CRLF 的旧数据即使归一化后相等也报 `changed`，`--apply` 会把它改写为 LF 规范字节）。
+- `manual: true` 的测试点不被触碰；文件缺失时 gen 与 lint 都给 warning。
+- 数据目录（`data.sample_dir`/`data.secret_dir`）必须位于题目目录内，lint 与 gen 都会拒绝越界路径；case 名大小写不敏感（防 Windows 文件塌缩）。
+- 生成器/Validator 单次运行默认 60s 超时（`data.gen_tool_timeout` 可覆盖，≤3600s）；进程数遵循 `limits.processes`。
+- 交互题（`judge.type: interactive`）不支持 `gen`：答案由 Interactor 协议定义，不能靠把输入喂给 accepted 产生（报 `gen_unsupported`）。
+- 生成证据（generator/args/输入与答案哈希）写入本地 `.probhub/gen-manifest.json`，属本地产物不提交。`--case` 局部运行按 case 合并进既有 manifest，不影响其他 case 的记录；配方被删除的 case 在下次 `--apply` 时从 manifest 移除。
 - 没有配方的 secret 测试点由 lint 以 warning 报告；数量低于数据强度纪律（`references/mistake-taxonomy.md`）时同样给 warning。
 - accepted 改动后重跑 `gen`：plan 会把所有答案变化列为 `changed` 并给出新旧哈希——先审阅差异再 `--apply`。
 
@@ -183,7 +190,7 @@ probhub status [ID...]
 
 Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以及所有题目实际生成 Typst metadata 的输入计算。其他题的题面、题面图片、样例、展示配置或题序变化可能改变当前题的页码、总页数或单题 PDF，因此会使当前题变为 `stale`；其他题仅修改不参与排版的 secret 数据不会使当前题过期。
 
-包含 `collection_hash` 的 Build Manifest 使用 schema v2。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`；缺失时显示 `stale_fields: ["batch_id", ...]`。旧 v1 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
+正式 Build Manifest 使用 schema v3。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`，并分别记录其 `sealed_revision_id`；缺失时显示对应的 `stale_fields`。旧 v1/v2 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
 
 ## 9. `judge`
 
@@ -428,19 +435,20 @@ probhub build [ID...] [--skip-judge] [--no-cache]
 
 1. 取得 `.probhub/build.lock` 的跨平台 OS 排他锁；锁文件可以长期存在，只有 OS 锁状态表示占用。
 2. lint 全部 collection 依赖，建立包含正式题序、全部排版输入和所选 source/data hash 的 BuildPlan。
-3. 复制受控输入快照；后续 judge、排版和打包只读取该快照。
-4. judge 所选题目。
-5. 在快照中编译一次完整 Typst 集合并提取所选单题 PDF。
-6. 在快照中生成 DOMjudge 配置、构建并验证全部所选 ZIP。
-7. 为所有所选题目生成带同一 `batch_id` 的 Manifest。
-8. 发布前重新计算 live 输入哈希；变化时以 `inputs_changed` 失败。
-9. 全部准备成功后发布共享产物与所选产物，Manifest 最后替换。
+3. 要求 collection 中每道题的最新 checkpoint 均为与 live source/data 匹配的 sealed revision；否则以 `sealed_revision_required` 失败且不创建构建快照。
+4. 复制受控输入快照；后续 judge、排版和打包只读取该快照。
+5. judge 所选题目。
+6. 在快照中编译一次完整 Typst 集合并提取所选单题 PDF。
+7. 在快照中生成 DOMjudge 配置、构建并验证全部所选 ZIP。
+8. 为所有所选题目生成带同一 `batch_id` 与各自 `sealed_revision_id` 的 Manifest。
+9. 发布前重新计算 live 输入哈希，并复核所有 sealed revision；变化时以 `inputs_changed` 或 `sealed_revision_changed` 失败。
+10. 全部准备成功后发布共享产物与所选产物，Manifest 最后替换。
 
-即使执行 `build L01`，也会为了题序与页码编译全卷，但只评测、提取、打包和更新 L01。
+即使执行 `build L01`，也会为了题序与页码编译全卷，并要求整场所有题目都已 seal，但只评测、提取、打包和更新 L01。正式发布推荐在全部题目 seal 后一次传入全部 ID。
 
 执行 `build L01 L02 ...` 时，所选题目逐题评测，但完整 Typst 集合只编译一次。任一题在 judge、PDF 提取、配置、ZIP 构建或验证阶段失败时，正式 metadata、PDF、ZIP 与 Manifest 均保持不变。所有所选 Manifest 使用同一份 `workspace_hash`、`collection_hash` 和 `batch_id`。
 
-并发执行 `build`、`typeset` 或 `package` 时，第二个 writer 失败并在 JSON 中返回 `code: "build_busy"`。快照创建或发布前发现 live 输入变化时返回 `code: "inputs_changed"`。快照 I/O 与发布 I/O 分别使用 `snapshot_failed`、`publish_failed`。当前版本尚未实现发布阶段的 journal/rollback；如果进程在多个正式文件替换之间被硬终止，仍需人工检查并重新 build。
+并发执行 `build`、`typeset` 或 `package` 时，第二个 writer 失败并在 JSON 中返回 `code: "build_busy"`。快照创建或发布前发现 live 输入变化时返回 `code: "inputs_changed"`。快照 I/O 与发布 I/O 分别使用 `snapshot_failed`、`publish_failed`。正式发布先把全部文件和目录复制到工作区同卷事务目录，写入 journal，再备份并替换目标；中途失败会回滚。build、gen 和 fixate 的 writer 在读取题目配置前统一恢复三类硬中断 journal；只读 lint/status/judge 在恢复前返回 `recovery_required`。journal 的 committed 标记保证“已经发布但清理失败”的事务只会重试清理，不会被错误回滚。回滚或恢复本身失败时保留事务目录并返回对应的 rollback/recovery 错误，不得手工删除恢复材料。
 
 选项：
 
@@ -531,6 +539,14 @@ npm install -g .
 ### `stale`
 
 读取 `stale_fields`，通常执行对应题目的 `build`；不要手工编辑 Manifest。
+
+### `invalid_yaml`
+
+工作区或题目 YAML 无法解析，或文档根不是 mapping。修复结构后重试；`--json` 模式会返回结构化错误，不输出 traceback。
+
+### `sealed_revision_required`
+
+正式 build 要求整场每道题都已 `seal`，并且 seal 后未再修改 live source/data。对提示中的题目重新运行 `seal <ID>`，待全部题目 sealed 后执行一次多 ID build。
 
 ### `problem.pdf` 缺失
 

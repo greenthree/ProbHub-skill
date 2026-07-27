@@ -45,8 +45,27 @@ def problem_entries(workspace):
     return result
 
 
+def resolve_problem_dir(root, entry):
+    root = Path(root).resolve()
+    directory = entry.get("directory", entry["id"])
+    if not isinstance(directory, str) or not directory.strip():
+        raise ProbHubError(
+            f"workspace problem directory must be a non-empty path: {directory!r}"
+        )
+    problem_dir = (root / directory).resolve()
+    try:
+        problem_dir.relative_to(root)
+    except ValueError as exc:
+        raise ProbHubError(
+            f"workspace problem directory must stay inside the workspace: {directory}"
+        ) from exc
+    if problem_dir == root:
+        raise ProbHubError("workspace problem directory must not be the workspace root")
+    return problem_dir
+
+
 def load_problem(root, entry):
-    problem_dir = root / entry.get("directory", entry["id"])
+    problem_dir = resolve_problem_dir(root, entry)
     config_path = problem_dir / PROBLEM_FILE
     if not config_path.is_file():
         raise ProbHubError(f"problem config not found: {config_path}")
