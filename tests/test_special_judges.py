@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import time
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -18,6 +20,72 @@ LOCAL_JUDGE = ROOT / "scripts" / "local_judge.py"
 SPEC = importlib.util.spec_from_file_location("special_local_judge", LOCAL_JUDGE)
 JUDGE_MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(JUDGE_MODULE)
+
+
+class InteractiveJudgeUnitTests(unittest.TestCase):
+    def test_interactor_spawn_uses_memory_limit_and_containment_failure_is_fail(self):
+        class FakeManaged:
+            memory_enforced = True
+            proc = object()
+
+            def __init__(self):
+                self.terminated = False
+
+            def terminate(self):
+                self.terminated = True
+
+        managed = FakeManaged()
+        calls = []
+
+        def spawn(command, **kwargs):
+            calls.append((command, kwargs))
+            if len(calls) == 1:
+                return managed
+            raise OSError("interactor containment failed")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            JUDGE_MODULE, "spawn_managed", side_effect=spawn
+        ):
+            root = Path(temp)
+            result = JUDGE_MODULE.run_interactive_testcase(
+                str(root / "solution"),
+                str(root / "interactor"),
+                str(root / "case.in"),
+                str(root / "case.ans"),
+                memory_limit=73,
+            )
+
+        self.assertEqual(result[0], "FAIL", result)
+        self.assertIn("containment failed", result[4])
+        self.assertEqual([call[1]["memory_limit_mb"] for call in calls], [73, 73])
+        self.assertTrue(managed.terminated)
+
+    def test_interactive_output_status_combines_protocol_and_stderr(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            solution_stderr = root / "solution.stderr"
+            interactor_stderr = root / "interactor.stderr"
+            solution_stderr.write_bytes(b"s" * 400)
+            interactor_stderr.write_bytes(b"")
+            traffic = {
+                "limit": 1000,
+                "solution_to_interactor": 700,
+                "interactor_to_solution": 0,
+            }
+            status, message = JUDGE_MODULE._interactive_output_status(
+                traffic, solution_stderr, interactor_stderr
+            )
+            self.assertEqual(status, "OLE")
+            self.assertIn("output limit", message)
+
+    def test_interactive_temp_cleanup_retries_permission_error(self):
+        with mock.patch.object(
+            JUDGE_MODULE.shutil,
+            "rmtree",
+            side_effect=[PermissionError("busy"), None],
+        ) as rmtree, mock.patch.object(JUDGE_MODULE.time, "sleep"):
+            JUDGE_MODULE._remove_interactive_temp("temporary")
+        self.assertEqual(rmtree.call_count, 2)
 
 
 @unittest.skipUnless(shutil.which("g++"), "g++ is required for special-judge integration tests")
@@ -188,6 +256,150 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
                 directions,
                 {"interactor_to_solution", "solution_to_interactor"},
             )
+
+    def test_interactive_fast_exit_is_submission_re_not_infrastructure_fail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {"type": "interactive", "interactor": "code/interactor.cpp"},
+                "int main(){ return 7; }",
+                "int main(){ return 7; }",
+                {
+                    "interactor.cpp": """
+                    #include "testlib.h"
+                    int main(int argc, char** argv) {
+                        registerInteraction(argc, argv);
+                        ouf.readLong();
+                        quitf(_ok, "received response");
+                    }
+                    """,
+                },
+            )
+            result, events = self.run_judge(problem)
+            self.assertNotEqual(result.returncode, 0)
+            case = next(
+                event for event in events
+                if event.get("type") == "case" and event.get("kind") == "std"
+            )
+            self.assertEqual(case["status"], "RE", case)
+
+    def test_interactive_fast_output_flood_is_ole_after_process_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {"type": "interactive", "interactor": "code/interactor.cpp"},
+                """
+                #include <iostream>
+                int main(){ std::cout << std::string(2000000, 'x') << std::flush; }
+                """,
+                "int main(){ return 0; }",
+                {
+                    "interactor.cpp": """
+                    #include "testlib.h"
+                    #include <iostream>
+                    int main(int argc, char** argv) {
+                        registerInteraction(argc, argv);
+                        std::string value;
+                        while (std::cin >> value) {}
+                        quitf(_wa, "unexpected output");
+                    }
+                    """,
+                },
+            )
+            result, events = self.run_judge(problem)
+            self.assertNotEqual(result.returncode, 0)
+            case = next(
+                event for event in events
+                if event.get("type") == "case" and event.get("kind") == "std"
+            )
+            self.assertEqual(case["status"], "OLE", case)
+
+    def test_interactor_memory_limit_is_infrastructure_fail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {
+                    "type": "interactive",
+                    "interactor": "code/interactor.cpp",
+                    "interactive": {"idle_limit": 10},
+                },
+                "int main(){ return 0; }",
+                "int main(){ return 0; }",
+                {
+                    "interactor.cpp": """
+                    #include "testlib.h"
+                    #include <chrono>
+                    #include <thread>
+                    #include <vector>
+                    int main(int argc, char** argv) {
+                        registerInteraction(argc, argv);
+                        std::vector<char> memory(128 * 1024 * 1024, 1);
+                        std::this_thread::sleep_for(std::chrono::seconds(30));
+                        quitf(_ok, "unexpectedly survived memory limit");
+                    }
+                    """,
+                },
+            )
+            config_path = problem / "probhub.yaml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["limits"]["time"] = 4
+            config["limits"]["memory"] = 32
+            config_path.write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            result, events = self.run_judge(problem)
+            self.assertNotEqual(result.returncode, 0)
+            case = next(
+                event for event in events
+                if event.get("type") == "case" and event.get("kind") == "std"
+            )
+            self.assertEqual(case["status"], "FAIL", case)
+
+    @unittest.skipUnless(platform.system() == "Linux", "Linux /proc peak-memory regression")
+    def test_interactive_linux_peak_memory_survives_process_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {"type": "interactive", "interactor": "code/interactor.cpp"},
+                """
+                #include <chrono>
+                #include <iostream>
+                #include <thread>
+                #include <vector>
+                int main(){
+                    long long x;
+                    if (!(std::cin >> x)) return 1;
+                    std::vector<char> memory(32 * 1024 * 1024, 1);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    std::cout << 2 * x << std::endl;
+                }
+                """,
+                "int main(){ return 1; }",
+                {
+                    "interactor.cpp": """
+                    #include "testlib.h"
+                    #include <iostream>
+                    int main(int argc, char** argv) {
+                        registerInteraction(argc, argv);
+                        long long secret = inf.readLong();
+                        std::cout << secret << std::endl;
+                        if (ouf.readLong() == 2 * secret) quitf(_ok, "accepted");
+                        quitf(_wa, "wrong answer");
+                    }
+                    """,
+                },
+            )
+            result, events = self.run_judge(problem)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            case = next(
+                event for event in events
+                if event.get("type") == "case" and event.get("kind") == "std"
+            )
+            self.assertEqual(case["status"], "AC", case)
+            self.assertIsNotNone(case["memory"], case)
+            self.assertGreater(case["memory"], 16, case)
 
     def test_interactor_idle_timeout_is_structured_and_preserves_transcript(self):
         with tempfile.TemporaryDirectory() as temp:

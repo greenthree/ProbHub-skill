@@ -1,6 +1,6 @@
 {
   "name": "probhub",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "基于大语言模型 (LLM Agent) 和现代排版框架构建的 ACM/ICPC 自动化出题工作流。",
   "main": "bin/init.js",
   "bin": {

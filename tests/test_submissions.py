@@ -186,6 +186,7 @@ class SubmissionUiApiTests(unittest.TestCase):
         cls.ui = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.ui)
         cls.client = cls.ui.app.test_client()
+        cls.client.environ_base["HTTP_X_PROBHUB_CSRF"] = cls.ui.WEBUI_CSRF_TOKEN
 
     def setUp(self):
         with self.ui.SUBMISSION_LOCK:

@@ -73,7 +73,7 @@ ProbHub 会尽量自动安装 Python 依赖，但底层编译和排版仍依赖�
 ### 基础工具
 
 - Node.js / npm
-- Python 3.8+
+- Python 3.10+
 - GCC/G++，用于编译 C++ 标程、验证器、checker 和 interactor
 - Typst 编译器
 
