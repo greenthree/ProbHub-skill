@@ -228,6 +228,51 @@ class ProcessControlTests(unittest.TestCase):
         finally:
             proc.kill()
 
+    @unittest.skipUnless(platform.system() == "Windows", "Windows job containment only")
+    def test_windows_process_cannot_spawn_child_before_job_assignment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            child_pid_file = root / "child.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(child_pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            parent = (
+                "import subprocess,sys,time;"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]);"
+                "time.sleep(30)"
+            )
+            original_assign = process_control.windows_assign_job
+            child_existed_at_assignment = []
+
+            def inspect_then_assign(proc, memory_limit_mb=None, process_limit=None):
+                child_existed_at_assignment.append(child_pid_file.exists())
+                return original_assign(proc, memory_limit_mb, process_limit)
+
+            with mock.patch.object(
+                process_control,
+                "windows_assign_job",
+                side_effect=inspect_then_assign,
+            ):
+                managed = process_control.spawn_managed(
+                    [sys.executable, "-c", parent],
+                    cwd=root,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            try:
+                deadline = time.time() + 5
+                while time.time() < deadline and not child_pid_file.is_file():
+                    time.sleep(0.05)
+                self.assertTrue(child_pid_file.is_file(), "child process did not start after resume")
+                child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+            finally:
+                managed.terminate()
+
+            self.assertEqual(child_existed_at_assignment, [False])
+            self.wait_until_dead(child_pid)
+
     def run_command(self, root, code, **limits):
         root = Path(root)
         return run_managed_to_files(
