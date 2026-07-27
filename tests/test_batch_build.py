@@ -8,14 +8,16 @@ from unittest.mock import patch
 from probhub.build_lock import workspace_build_lock
 from probhub.building import (
     _assert_publish_targets_available,
+    _recover_build_publish_transactions,
     build_workspace,
     publish_build,
 )
 from probhub.cli import command_status
 from probhub.errors import ProbHubError
+from probhub.generations import checkpoint_revision, create_problem_checkpoint
 from probhub.hashing import hash_file
 from probhub.io import write_yaml
-from probhub.linting import problem_status
+from probhub.linting import compute_data_hash, compute_source_hash, problem_status
 from probhub.workspace import load_problem, load_workspace, problem_entries
 
 
@@ -76,7 +78,19 @@ class BatchBuildTests(unittest.TestCase):
         })
         return problem
 
-    def create_workspace(self, root):
+    def seal_problem(self, root, workspace, entry):
+        problem_dir, config = load_problem(root, entry)
+        return create_problem_checkpoint(
+            root,
+            workspace,
+            entry,
+            state="sealed",
+            evidence={"fixture": True},
+            expected_source_hash=compute_source_hash(problem_dir, config),
+            expected_data_hash=compute_data_hash(problem_dir, config),
+        )
+
+    def create_workspace(self, root, *, sealed=True):
         (root / ".probhub").mkdir(parents=True)
         (root / "typst/contest").mkdir(parents=True)
         (root / "typst/contest/main.typ").write_text("// fixture\n", encoding="utf-8")
@@ -90,7 +104,12 @@ class BatchBuildTests(unittest.TestCase):
         })
         self.create_problem(root, "A", "Alpha")
         self.create_problem(root, "B", "Beta")
-        return load_workspace(root)
+        loaded = load_workspace(root)
+        if sealed:
+            loaded_root, workspace = loaded
+            for entry in problem_entries(workspace):
+                self.seal_problem(loaded_root, workspace, entry)
+        return loaded
 
     def test_multi_problem_build_compiles_collection_once(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -154,7 +173,10 @@ class BatchBuildTests(unittest.TestCase):
             self.assertEqual(batch_ids, {result["batch_id"]})
             self.assertEqual(
                 {manifest["schema_version"] for manifest in result["manifests"].values()},
-                {2},
+                {3},
+            )
+            self.assertTrue(
+                all(manifest["sealed_revision_id"] for manifest in result["manifests"].values())
             )
 
             loaded = dict(
@@ -167,6 +189,121 @@ class BatchBuildTests(unittest.TestCase):
                         problem_status(problem_dir, config, root, workspace)["state"],
                         "current",
                     )
+
+    def test_multi_problem_build_rejects_unsealed_batch_before_staging(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp), sealed=False)
+            entries = problem_entries(workspace)
+            self.seal_problem(root, workspace, entries[0])
+            create_problem_checkpoint(root, workspace, entries[1], state="draft")
+            artifacts = {}
+            for path, content in (
+                (root / "typst/contest/main.pdf", b"old main"),
+                (root / "A/meta.json", b"old A meta"),
+                (root / "B/meta.json", b"old B meta"),
+                (root / "A/.probhub/build-manifest.json", b"old A manifest"),
+                (root / "B/.probhub/build-manifest.json", b"old B manifest"),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                artifacts[path] = content
+
+            with patch("probhub.building.create_build_snapshot") as snapshot:
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, entries, run_judge=False)
+
+            self.assertEqual(raised.exception.code, "sealed_revision_required")
+            self.assertIn("B: latest checkpoint is draft", str(raised.exception))
+            snapshot.assert_not_called()
+            for path, content in artifacts.items():
+                self.assertEqual(path.read_bytes(), content)
+
+    def test_single_problem_build_rejects_unsealed_collection_peer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp), sealed=False)
+            entries = problem_entries(workspace)
+            self.seal_problem(root, workspace, entries[0])
+            create_problem_checkpoint(root, workspace, entries[1], state="draft")
+
+            with patch("probhub.building.create_build_snapshot") as snapshot:
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, entries[:1], run_judge=False)
+
+            self.assertEqual(raised.exception.code, "sealed_revision_required")
+            self.assertIn("B: latest checkpoint is draft", str(raised.exception))
+            snapshot.assert_not_called()
+
+    def test_build_rejects_stale_sealed_revision_before_staging(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp), sealed=False)
+            entries = problem_entries(workspace)
+            header = root / "B/code/helper.h"
+            header.write_text("constexpr int value = 1;\n", encoding="utf-8")
+            for entry in entries:
+                self.seal_problem(root, workspace, entry)
+            header.write_text("constexpr int value = 2;\n", encoding="utf-8")
+
+            with patch("probhub.building.create_build_snapshot") as snapshot:
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, entries, run_judge=False)
+
+            self.assertEqual(raised.exception.code, "sealed_revision_required")
+            self.assertIn("B: sealed revision does not match live source_hash", str(raised.exception))
+            snapshot.assert_not_called()
+
+    def test_sealed_revision_failure_before_publish_leaves_live_artifacts_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            artifacts = {}
+            for path, content in (
+                (root / "typst/contest/main.pdf", b"old main"),
+                (root / "typst/contest/problems.json", b"old problems"),
+                (root / "A/meta.json", b"old A meta"),
+                (root / "B/meta.json", b"old B meta"),
+                (root / "A/.probhub/build-manifest.json", b"old A manifest"),
+                (root / "B/.probhub/build-manifest.json", b"old B manifest"),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                artifacts[path] = content
+
+            def fake_extract(main_pdf, loaded, only_ids=None):
+                outputs = {}
+                for problem_dir, config in loaded:
+                    if only_ids and config["id"] not in only_ids:
+                        continue
+                    output = problem_dir / "problem.pdf"
+                    output.write_bytes(b"%PDF-1.4\n" + config["id"].encode("ascii"))
+                    outputs[config["id"]] = {"path": str(output), "pages": 1}
+                return outputs
+
+            def fail_second_revision(root, problem_id, revision_id):
+                if problem_id == "B":
+                    raise ProbHubError("injected checkpoint corruption", code="checkpoint_invalid")
+                return checkpoint_revision(root, problem_id, revision_id)
+
+            with (
+                patch(
+                    "probhub.building.compile_collection",
+                    side_effect=lambda root, workspace, loaded: self.write_compiled_fixture(root, loaded),
+                ),
+                patch("probhub.building.extract_problem_pdfs", side_effect=fake_extract),
+                patch("probhub.building.package_problem", side_effect=self.write_package_fixture),
+                patch(
+                    "probhub.building.checkpoint_revision",
+                    side_effect=fail_second_revision,
+                ),
+                patch("probhub.building.publish_build") as publish,
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, entries, run_judge=False)
+
+            self.assertEqual(raised.exception.code, "sealed_revision_changed")
+            self.assertIn("B: checkpoint_invalid", str(raised.exception))
+            publish.assert_not_called()
+            for path, content in artifacts.items():
+                self.assertEqual(path.read_bytes(), content)
 
     def test_build_publishes_compiled_binaries_with_matching_cache_entries(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -264,6 +401,7 @@ class BatchBuildTests(unittest.TestCase):
             image.write_bytes(original_image)
             with (problem_b / "problem.md").open("a", encoding="utf-8") as stream:
                 stream.write("\n![diagram](assets/diagram.png)\n")
+            self.seal_problem(root, workspace, entries[1])
 
             def fake_compile(root, workspace, loaded):
                 return self.write_compiled_fixture(root, loaded)
@@ -368,6 +506,50 @@ class BatchBuildTests(unittest.TestCase):
             problem_a, _ = load_problem(root, entries[0])
             self.assertFalse((problem_a / ".probhub/build-manifest.json").exists())
 
+    def test_single_problem_build_rejects_unselected_source_or_data_change(self):
+        for changed_input in ("source", "data"):
+            with self.subTest(changed_input=changed_input), tempfile.TemporaryDirectory() as temp:
+                root, workspace = self.create_workspace(Path(temp))
+                entries = problem_entries(workspace)
+                problem_a, _ = load_problem(root, entries[0])
+                problem_b, _ = load_problem(root, entries[1])
+
+                def fake_compile(root, workspace, loaded):
+                    if changed_input == "source":
+                        (problem_b / "code/std.cpp").write_text(
+                            "int main(){return 1;}\n",
+                            encoding="utf-8",
+                        )
+                    else:
+                        (problem_b / "data/secret/1.in").write_text(
+                            "changed\n",
+                            encoding="utf-8",
+                        )
+                    return self.write_compiled_fixture(root, loaded)
+
+                def fake_extract(main_pdf, loaded, only_ids=None):
+                    problem_dir, config = loaded[0]
+                    output = problem_dir / "problem.pdf"
+                    output.write_bytes(b"%PDF-1.4\nA")
+                    return {config["id"]: {"path": str(output), "pages": 1}}
+
+                with (
+                    patch("probhub.building.compile_collection", side_effect=fake_compile),
+                    patch("probhub.building.extract_problem_pdfs", side_effect=fake_extract),
+                    patch(
+                        "probhub.building.package_problem",
+                        side_effect=self.write_package_fixture,
+                    ),
+                    patch("probhub.building.publish_build") as publish,
+                ):
+                    with self.assertRaises(ProbHubError) as raised:
+                        build_workspace(root, workspace, [entries[0]], run_judge=False)
+
+                self.assertEqual(raised.exception.code, "inputs_changed")
+                self.assertIn(f"B.{changed_input}_hash", str(raised.exception))
+                publish.assert_not_called()
+                self.assertFalse((problem_a / ".probhub/build-manifest.json").exists())
+
     def test_build_rejects_selected_data_changed_after_snapshot(self):
         with tempfile.TemporaryDirectory() as temp:
             root, workspace = self.create_workspace(Path(temp))
@@ -465,6 +647,109 @@ class BatchBuildTests(unittest.TestCase):
             for path, content in artifacts:
                 with self.subTest(path=path):
                     self.assertEqual(path.read_bytes(), content)
+
+    def test_publish_replace_failure_rolls_back_all_live_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            artifacts = []
+            for entry in entries:
+                problem_dir, _ = load_problem(root, entry)
+                for relative, content in (
+                    ("meta.json", b"old meta"),
+                    ("problem.pdf", b"old problem pdf"),
+                    ("problem.yaml", b"old yaml"),
+                    ("domjudge-problem.ini", b"old ini"),
+                    (".probhub/build-manifest.json", b"old manifest"),
+                ):
+                    path = problem_dir / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content + entry["id"].encode("ascii"))
+                    artifacts.append((path, path.read_bytes()))
+                validator = problem_dir / "output_validators/validate/old.txt"
+                validator.parent.mkdir(parents=True)
+                validator.write_bytes(b"old validator " + entry["id"].encode("ascii"))
+                artifacts.append((validator, validator.read_bytes()))
+                package = root / f"{entry['id']}.zip"
+                package.write_bytes(b"old zip" + entry["id"].encode("ascii"))
+                artifacts.append((package, package.read_bytes()))
+            for relative, content in (
+                ("typst/contest/main.pdf", b"old main pdf"),
+                ("typst/contest/problems.json", b"old problems"),
+            ):
+                path = root / relative
+                path.write_bytes(content)
+                artifacts.append((path, path.read_bytes()))
+
+            def fake_extract(main_pdf, loaded, only_ids=None):
+                outputs = {}
+                for problem_dir, config in loaded:
+                    if only_ids and config["id"] not in only_ids:
+                        continue
+                    output = problem_dir / "problem.pdf"
+                    output.write_bytes(b"%PDF-1.4\n" + config["id"].encode("ascii"))
+                    outputs[config["id"]] = {"path": str(output), "pages": 1}
+                return outputs
+
+            real_replace = __import__("os").replace
+            calls = 0
+
+            def fail_late_replace(source, target):
+                nonlocal calls
+                calls += 1
+                if calls == 12:
+                    raise OSError("injected publish replace failure")
+                return real_replace(source, target)
+
+            with (
+                patch(
+                    "probhub.building.compile_collection",
+                    side_effect=lambda root, workspace, loaded: self.write_compiled_fixture(root, loaded),
+                ),
+                patch("probhub.building.extract_problem_pdfs", side_effect=fake_extract),
+                patch("probhub.building.package_problem", side_effect=self.write_package_fixture),
+                patch(
+                    "probhub.building._replace_publish_path",
+                    side_effect=fail_late_replace,
+                ),
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, entries, run_judge=False)
+
+            self.assertEqual(raised.exception.code, "publish_failed")
+            for path, content in artifacts:
+                with self.subTest(path=path):
+                    self.assertEqual(path.read_bytes(), content)
+            self.assertEqual(list((root / ".probhub").glob("build-publish-*")), [])
+
+    def test_next_build_recovers_interrupted_publish_journal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            transaction = root / ".probhub/build-publish-interrupted"
+            transaction.mkdir(parents=True)
+            target = root / "A/problem.pdf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"new partial")
+            backup = transaction / "backup-0"
+            backup.write_bytes(b"old complete")
+            (transaction / "journal.json").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "entries": [{
+                        "target": "A/problem.pdf",
+                        "payload": "payload-0",
+                        "kind": "file",
+                        "existed": True,
+                        "backup": "backup-0",
+                    }],
+                }),
+                encoding="utf-8",
+            )
+
+            _recover_build_publish_transactions(root)
+
+            self.assertEqual(target.read_bytes(), b"old complete")
+            self.assertFalse(transaction.exists())
 
     def test_build_lints_unselected_collection_inputs_before_typesetting(self):
         with tempfile.TemporaryDirectory() as temp:

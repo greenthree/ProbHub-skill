@@ -213,6 +213,21 @@ class ProcessControlTests(unittest.TestCase):
         finally:
             proc.kill()
 
+    @unittest.skipUnless(platform.system() == "Windows", "Windows-specific liveness semantics")
+    def test_process_alive_reports_exit_code_259_child_dead(self):
+        # 259 == STILL_ACTIVE: GetExitCodeProcess alone cannot tell this exit
+        # apart from a running process; the signalled handle must disambiguate.
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "raise SystemExit(259)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            proc.wait(timeout=10)
+            self.assertFalse(process_alive(proc.pid))
+        finally:
+            proc.kill()
+
     @unittest.skipUnless(platform.system() == "Windows", "Windows job containment only")
     def test_windows_process_cannot_spawn_child_before_job_assignment(self):
         with tempfile.TemporaryDirectory() as temp:

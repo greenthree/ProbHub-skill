@@ -4,18 +4,41 @@ import math
 import re
 from pathlib import Path
 
-from .datagen import recipe_coverage
+from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
 from .metadata import build_meta
 from .statement import parse_statement
 from .typesetting import is_temporary_typst_source
+from .transactions import pending_workspace_transactions
 from .workspace import load_problem, problem_entries
 
 DEFAULT_FORBIDDEN = ("TODO", "FIXME", "114514", "待补充")
-BUILD_MANIFEST_SCHEMA_VERSION = 2
+BUILD_MANIFEST_SCHEMA_VERSION = 3
 TYPST_LENGTH_PATTERN = re.compile(r"^-?(?:\d+(?:\.\d+)?|\.\d+)(?:pt|mm|cm|in|em|fr|%)$")
 STATEMENT_ASSET_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
+CODE_HASH_IGNORED_SUFFIXES = {
+    ".a",
+    ".class",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".exp",
+    ".ilk",
+    ".lib",
+    ".o",
+    ".obj",
+    ".pdb",
+    ".pyc",
+    ".so",
+}
+CODE_HASH_IGNORED_DIRS = {
+    ".cache",
+    ".probhub",
+    "__pycache__",
+    "build",
+    "dist",
+}
 STATEMENT_ASSET_IGNORED_DIRS = {
     ".preview",
     ".probhub",
@@ -85,6 +108,19 @@ def problem_source_paths(problem_dir, config):
             candidate = _problem_relative_path(problem_dir, stress.get(key))
             if candidate:
                 paths.append(candidate)
+    code_dir = problem_dir / "code"
+    if code_dir.is_dir():
+        paths.extend(
+            path
+            for path in code_dir.rglob("*")
+            if path.is_file()
+            and not path.is_symlink()
+            and not any(
+                part.casefold() in CODE_HASH_IGNORED_DIRS
+                for part in path.relative_to(code_dir).parts[:-1]
+            )
+            and path.suffix.lower() not in CODE_HASH_IGNORED_SUFFIXES
+        )
     paths.extend(problem_statement_asset_paths(problem_dir))
     return paths
 
@@ -366,15 +402,42 @@ def lint_problem(root, workspace, entry):
         errors.append("unknown expected groups: " + ", ".join(unknown_groups))
 
     for kind, default in (("sample", "data/sample"), ("secret", "data/secret")):
-        directory = problem_dir / data.get(f"{kind}_dir", default)
-        inputs = {path.stem for path in directory.glob("*.in")} if directory.is_dir() else set()
-        answers = {path.stem for path in directory.glob("*.ans")} if directory.is_dir() else set()
+        try:
+            directory = resolve_data_dir(problem_dir, config, f"{kind}_dir", default)
+        except ProbHubError as exc:
+            errors.append(str(exc))
+            continue
+        inputs = set()
+        answers = set()
+        if directory.is_dir():
+            for path in directory.iterdir():
+                if not path.is_file():
+                    continue
+                suffix = path.suffix.casefold()
+                if suffix not in {".in", ".ans"}:
+                    continue
+                if path.suffix != suffix:
+                    errors.append(
+                        f"{kind} data extension must be lowercase {suffix}: {path.name}"
+                    )
+                (inputs if suffix == ".in" else answers).add(path.stem)
         if not inputs:
             errors.append(f"no {kind} inputs")
         if inputs - answers:
             errors.append(f"{kind} inputs without answers: {', '.join(sorted(inputs - answers))}")
         if answers - inputs:
             errors.append(f"{kind} answers without inputs: {', '.join(sorted(answers - inputs))}")
+        folded = {}
+        for stem in inputs | answers:
+            folded.setdefault(stem.casefold(), []).append(stem)
+        collisions = sorted(
+            "/".join(sorted(group)) for group in folded.values() if len(group) > 1
+        )
+        if collisions:
+            errors.append(
+                f"{kind} case names collide case-insensitively "
+                f"(they collapse on Windows checkouts): {', '.join(collisions)}"
+            )
 
     try:
         recipes, uncovered = recipe_coverage(problem_dir, config)
@@ -395,6 +458,19 @@ def lint_problem(root, workspace, entry):
                     )
                 elif not generator_path.is_file():
                     errors.append(f"recipe generator not found: {generator}")
+            secret_directory = resolve_data_dir(problem_dir, config, "secret_dir", "data/secret")
+            missing_manual = sorted(
+                recipe["case"] for recipe in recipes
+                if recipe.get("manual")
+                and not (
+                    (secret_directory / f"{recipe['case']}.in").is_file()
+                    and (secret_directory / f"{recipe['case']}.ans").is_file()
+                )
+            )
+            if missing_manual:
+                warnings.append(
+                    "manual recipe(s) have no data files yet: " + ", ".join(missing_manual)
+                )
         if uncovered:
             if recipes:
                 warnings.append(
@@ -411,6 +487,25 @@ def lint_problem(root, workspace, entry):
 
 def lint_workspace(root, workspace, selected=None):
     entries = selected or problem_entries(workspace)
+    pending = pending_workspace_transactions(root, workspace)
+    if pending:
+        message = (
+            "workspace recovery required before lint: " + ", ".join(pending)
+        )
+        return {
+            "ok": False,
+            "code": "recovery_required",
+            "errors": [message],
+            "problems": [
+                {
+                    "id": entry["id"],
+                    "ok": False,
+                    "errors": [message],
+                    "warnings": [],
+                }
+                for entry in entries
+            ],
+        }
     results = [lint_problem(root, workspace, entry) for entry in entries]
     ids = [entry["id"] for entry in problem_entries(workspace)]
     duplicate_ids = sorted({item for item in ids if ids.count(item) > 1})
@@ -456,6 +551,14 @@ def problem_status(
     workspace_hash=None,
     collection_hash=None,
 ):
+    if root is not None and workspace is not None:
+        pending = pending_workspace_transactions(root, workspace)
+        if pending:
+            return {
+                "state": "recovery-required",
+                "code": "recovery_required",
+                "pending_transactions": pending,
+            }
     manifest, manifest_error = _read_manifest(problem_dir)
     current = {
         "source_hash": compute_source_hash(problem_dir, config),
@@ -485,5 +588,10 @@ def problem_status(
         stale.append("manifest_schema")
     elif not isinstance(manifest.get("batch_id"), str) or not manifest["batch_id"]:
         stale.append("batch_id")
+    elif (
+        not isinstance(manifest.get("sealed_revision_id"), str)
+        or not manifest["sealed_revision_id"]
+    ):
+        stale.append("sealed_revision_id")
     stale.extend(key for key, value in current.items() if manifest.get(key) != value)
     return {"state": "stale" if stale else "current", "stale_fields": stale, **current, "manifest": manifest}

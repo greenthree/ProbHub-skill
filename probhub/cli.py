@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from .generations import (
     create_problem_checkpoint,
     generation_status,
 )
-from .io import write_yaml
+from .io import atomic_write_text, write_yaml
 from .judging import judge_problem
 from .linting import (
     compute_collection_hash,
@@ -23,12 +24,21 @@ from .linting import (
     lint_workspace,
     problem_status,
 )
-from .datagen import generate_problem_data
+from .datagen import generate_problem_data, problem_config_identity
 from .package_tools import verify_package
 from .scaffold import JUDGE_TYPES, scaffold_config, scaffold_files
 from .stressing import stress_problem
 from .typesetting import compile_collection, extract_problem_pdfs
-from .workspace import WORKSPACE_FILE, find_workspace, load_problem, load_workspace, problem_entries, select_entries
+from .transactions import ensure_no_pending_transactions, recover_workspace_transactions
+from .workspace import (
+    WORKSPACE_FILE,
+    find_workspace,
+    load_problem,
+    load_workspace,
+    problem_entries,
+    resolve_problem_dir,
+    select_entries,
+)
 
 
 def configure_stdout():
@@ -60,6 +70,7 @@ def _ensure_local_gitignore(root):
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     required = [
         "**/.probhub/build.lock",
+        "**/.probhub/build-publish-*/",
         "**/.probhub/checkpoints/",
         "**/.probhub/checkpoint-tmp/",
         "**/.probhub/generation.lock",
@@ -69,6 +80,8 @@ def _ensure_local_gitignore(root):
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",
         "**/.probhub/gen-manifest.json",
+        "**/.probhub-fixate-*/",
+        "**/.probhub-gen-publish-*/",
         "**/.probhub-*.typ",
     ]
     present = {line.strip() for line in existing.splitlines()}
@@ -79,7 +92,9 @@ def _ensure_local_gitignore(root):
     if content:
         content += "\n\n"
     content += "# Local ProbHub artifacts\n" + "\n".join(missing) + "\n"
-    path.write_text(content, encoding="utf-8")
+    # Atomic: .gitignore is a user source file; a crash mid-write must not
+    # truncate hand-maintained entries.
+    atomic_write_text(path, content)
 
 
 def command_init(args):
@@ -99,19 +114,42 @@ def command_init(args):
     return {"ok": True, "workspace": str(path)}
 
 
+_SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
 def command_new(args):
     root, _ = workspace_context(args, allow_empty=True)
     problem_id = args.problem_id.strip()
+    if not _SAFE_PATH_COMPONENT.match(problem_id):
+        raise ProbHubError(
+            f"invalid problem id: {problem_id!r} (use letters, digits, '_', '.', '-')"
+        )
     judge_type = getattr(args, "judge", None) or "standard"
     name = args.name or problem_id
     directory = args.directory or problem_id
+    root_resolved = Path(root).resolve()
+    problem_dir = (root_resolved / directory).resolve()
+    if problem_dir == root_resolved:
+        raise ProbHubError("problem directory must not be the workspace root")
+    try:
+        relative_dir = problem_dir.relative_to(root_resolved)
+    except ValueError as exc:
+        raise ProbHubError(
+            f"problem directory must stay inside the workspace: {directory}"
+        ) from exc
+    for part in relative_dir.parts:
+        if not _SAFE_PATH_COMPONENT.match(part):
+            raise ProbHubError(
+                f"invalid problem directory component: {part!r} "
+                "(use letters, digits, '_', '.', '-')"
+            )
     files = scaffold_files(name, judge_type)
     config = scaffold_config(problem_id, name, judge_type)
     with workspace_build_lock(root):
         _, workspace = load_workspace(root, allow_empty=True)
+        recover_workspace_transactions(root, workspace)
         if any(entry["id"] == problem_id for entry in problem_entries(workspace)):
             raise ProbHubError(f"problem id already exists: {problem_id}")
-        problem_dir = root / directory
         if problem_dir.exists() and any(problem_dir.iterdir()):
             raise ProbHubError(f"problem directory is not empty: {problem_dir}")
         for relative, content in files.items():
@@ -120,7 +158,9 @@ def command_new(args):
             with path.open("w", encoding="utf-8", newline="\n") as stream:
                 stream.write(content)
         write_yaml(problem_dir / "probhub.yaml", config)
-        workspace.setdefault("problems", []).append({"id": problem_id, "directory": directory})
+        workspace.setdefault("problems", []).append(
+            {"id": problem_id, "directory": relative_dir.as_posix()}
+        )
         write_yaml(root / WORKSPACE_FILE, workspace)
     return {
         "ok": True,
@@ -133,14 +173,27 @@ def command_new(args):
 
 def command_gen(args):
     root, workspace, entry = _single_problem_context(args)
-    _ensure_local_gitignore(root)
-    problem_dir, config = load_problem(root, entry)
-    return generate_problem_data(
-        problem_dir,
-        config,
-        apply_changes=args.apply,
-        only=args.case,
-    )
+    if not args.apply:
+        # Plan mode is strictly read-only: no gitignore, no lock, no writes.
+        ensure_no_pending_transactions(root, workspace)
+        problem_dir, config = load_problem(root, entry)
+        return generate_problem_data(problem_dir, config, apply_changes=False, only=args.case)
+    with workspace_build_lock(root):
+        _, live_workspace = load_workspace(root)
+        recover_workspace_transactions(root, live_workspace)
+        live_entry = select_entries(live_workspace, [entry["id"]])[0]
+        problem_dir, config = load_problem(root, live_entry)
+        config_identity = problem_config_identity(problem_dir)
+        source_hash = compute_source_hash(problem_dir, config)
+        _ensure_local_gitignore(root)
+        return generate_problem_data(
+            problem_dir,
+            config,
+            apply_changes=True,
+            only=args.case,
+            expected_config_identity=config_identity,
+            expected_source_hash=source_hash,
+        )
 
 
 def command_doctor(args):
@@ -155,6 +208,7 @@ def command_lint(args):
 
 def command_status(args):
     root, workspace = workspace_context(args)
+    ensure_no_pending_transactions(root, workspace)
     workspace_hash = compute_workspace_hash(root, workspace)
     collection_hash = compute_collection_hash(root, workspace)
     result = {}
@@ -173,6 +227,7 @@ def command_status(args):
 
 def command_judge(args):
     root, workspace = workspace_context(args)
+    ensure_no_pending_transactions(root, workspace)
     results = {}
     for entry in select_entries(workspace, args.problem):
         problem_dir, _ = load_problem(root, entry)
@@ -182,6 +237,12 @@ def command_judge(args):
 
 def command_stress(args):
     root, workspace = workspace_context(args)
+    if args.fixate is None:
+        ensure_no_pending_transactions(root, workspace)
+    else:
+        with workspace_build_lock(root):
+            _, workspace = load_workspace(root)
+            recover_workspace_transactions(root, workspace)
     entries = select_entries(workspace, args.problem)
     if args.replay is not None and len(entries) != 1:
         raise ProbHubError("stress --replay requires exactly one problem id")
@@ -189,7 +250,11 @@ def command_stress(args):
         raise ProbHubError("stress --against requires exactly one problem id")
     results = {}
     for entry in entries:
-        problem_dir, config = load_problem(root, entry)
+        if args.fixate is None:
+            problem_dir, config = load_problem(root, entry)
+        else:
+            problem_dir = resolve_problem_dir(root, entry)
+            config = {"id": entry["id"]}
         results[entry["id"]] = stress_problem(
             root,
             problem_dir,
@@ -212,6 +277,7 @@ def _single_problem_context(args):
 
 def command_checkpoint(args):
     root, workspace, entry = _single_problem_context(args)
+    ensure_no_pending_transactions(root, workspace)
     _ensure_local_gitignore(root)
     checkpoint = create_problem_checkpoint(
         root,
@@ -224,6 +290,7 @@ def command_checkpoint(args):
 
 def command_seal(args):
     root, workspace, entry = _single_problem_context(args)
+    ensure_no_pending_transactions(root, workspace)
     _ensure_local_gitignore(root)
     lint = lint_workspace(root, workspace, [entry])
     if not lint["ok"]:
@@ -289,6 +356,8 @@ def command_seal(args):
         entry,
         state="sealed",
         evidence=evidence,
+        expected_source_hash=source_hash,
+        expected_data_hash=data_hash,
     )
     generation = assemble_exam_generation(root)
     return {
@@ -299,13 +368,15 @@ def command_seal(args):
 
 
 def command_assemble(args):
-    root, _ = workspace_context(args)
+    root, workspace = workspace_context(args)
+    ensure_no_pending_transactions(root, workspace)
     _ensure_local_gitignore(root)
     return assemble_exam_generation(root)
 
 
 def command_generation_status(args):
-    root, _ = workspace_context(args)
+    root, workspace = workspace_context(args)
+    ensure_no_pending_transactions(root, workspace)
     return generation_status(root)
 
 
@@ -313,6 +384,7 @@ def command_typeset(args):
     root, workspace = workspace_context(args)
     with workspace_build_lock(root):
         _, workspace = load_workspace(root)
+        recover_workspace_transactions(root, workspace)
         all_loaded = [load_problem(root, entry) for entry in problem_entries(workspace)]
         _, main_pdf, _ = compile_collection(root, workspace, all_loaded)
         ids = {entry["id"] for entry in select_entries(workspace, args.problem)} if args.problem else None
@@ -324,6 +396,7 @@ def command_package(args):
     root, workspace = workspace_context(args)
     with workspace_build_lock(root):
         _, workspace = load_workspace(root)
+        recover_workspace_transactions(root, workspace)
         results = {}
         for entry in select_entries(workspace, args.problem):
             problem_dir, config = load_problem(root, entry)
@@ -442,6 +515,12 @@ def main(argv=None):
         return 1
     except KeyboardInterrupt:
         return 130
+    except Exception as exc:
+        emit(
+            {"ok": False, "code": "internal_error", "error": str(exc)},
+            args.json_output,
+        )
+        return 1
 
 
 if __name__ == "__main__":

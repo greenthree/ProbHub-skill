@@ -619,31 +619,6 @@ def _failed_status(returncode, stderr, memory_enforced, peak_memory_mb, memory_l
     return "RE"
 
 
-def _process_alive(pid):
-    if not pid:
-        return False
-    if platform.system() == "Windows":
-        try:
-            import ctypes
-            from ctypes import wintypes
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-            kernel32.OpenProcess.restype = wintypes.HANDLE
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
-            if not handle:
-                return False
-            kernel32.CloseHandle(handle)
-            return True
-        except Exception:
-            return False
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
-
-
 def _remove_file_with_retries(path):
     for _ in range(20):
         try:
@@ -655,7 +630,6 @@ def _remove_file_with_retries(path):
             time.sleep(0.05)
         except OSError:
             return
-
 
 def run_program_to_file(
     bin_path,

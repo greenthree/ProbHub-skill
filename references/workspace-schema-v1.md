@@ -96,7 +96,7 @@ domjudge:
 
 ### Test recipes (`data.recipes`)
 
-每个 secret 测试点可声明来源配方：`manual: true`（手工数据，字节即事实来源），或生成器调用（可选 `generator` 路径 + 精确 `args` 列表）。`probhub gen <ID>` 依配方生成输入 → Validator 过检 → 用首个 accepted 产 `.ans`，plan 模式报告 new/changed/unchanged，`--apply` 才写入（全部成功后逐文件原子替换）。输出统一 LF 归一，保证 Windows/Linux 字节一致；生成证据写入本地 `.probhub/gen-manifest.json`（不提交）。没有配方的 secret 测试点在 lint 中以 warning 呈现（存量数据兼容，不硬失败）。stress 反例固化后也应登记为配方（generator=stress 生成器、args=[seed, round]）。
+每个 secret 测试点可声明来源配方：`manual: true`（手工数据，字节即事实来源），或生成器调用（可选 `generator` 路径 + 精确 `args` 列表）。case 名大小写不敏感去重（Windows 文件系统会塌缩 `gen01`/`GEN01`）；生成器、Validator 和 Checker 单次运行默认 60 秒超时，可用 `data.gen_tool_timeout`（秒，≤3600）覆盖；沙箱遵循 `limits.processes`。`probhub gen <ID>` 依配方生成输入 → Validator 过检 → 用首个 accepted 产 `.ans` → Custom Checker 复核，plan 模式报告 new/changed/unchanged（字节级一致才算 unchanged），`--apply` 才在工作区写锁内发布。配置会在取锁后重载，并在发布前再次核对；`.in`、`.ans` 与 gen manifest 全部先 staging，任一替换失败会回滚已有正式文件。输出统一 LF，保证 Windows/Linux 字节一致；生成证据写入本地 `.probhub/gen-manifest.json`（不提交，`--case` 局部运行按 case 合并）。交互题不支持 `gen`（答案由 Interactor 协议定义）。没有配方的 secret 测试点在 lint 中以 warning 呈现（存量数据兼容，不硬失败）。`stress --against --fixate` 命中后会先按原 argv 重放确认字节一致，再登记配方、数据组和目标错解。
 
 ### Resource limits
 
@@ -199,6 +199,8 @@ All problem-local C++ sources and locally compiled executables live under `code/
 ```
 
 `checker.cpp`, `interactor.cpp`, auxiliary solutions, and diagnostic C++ programs also belong in `code/`. Generated DOMjudge validator files remain under `output_validators/` because that directory is part of the package format rather than the source-code workspace.
+
+source hash 会递归覆盖 `code/` 下全部普通源码与辅助文本，包括 Python、头文件和 `.inc/.ipp/.tcc` 等 include 片段；仅排除可执行文件、目标文件、动态库和明确缓存/构建目录。符号链接不作为题目源码跟踪，题目目录也不得通过 `..`、绝对路径或父目录符号链接逃出工作区。
 
 题面图片等媒体资源优先放在 `assets/`。Core 也会跟踪题目目录内、且不位于 `code/`、`data/`、`.probhub/` 或生成目录中的常见图片文件；修改这些文件会使本题 source hash 和整场 collection hash 过期。
 

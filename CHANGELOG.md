@@ -2,6 +2,18 @@
 
 本文件整理自 README 历史快照、GitHub PR 与 npm 发布记录（首次建立于 2026-07-26）。此前版本的条目为事后补记，粒度以 PR 为准。
 
+## [0.4.0] - 2026-07-27
+
+数据工坊与正式发布证据版本。
+
+- `probhub gen` 以结构化 recipe 复现 secret 数据，运行 Generator、Validator、首个 accepted 与 Custom Checker；plan 保持只读，apply 在锁内重载配置，并以带回滚的事务同时发布 `.in`、`.ans` 与 gen manifest。
+- `stress --against` 可面向已声明错解寻找 killer，生成可直接复制的完整 replay 命令；`--fixate` 在锁内复现命中输入、重产答案，并事务化写入数据、recipe、group 与 target。
+- `seal` 将验证阶段的 source/data hash 绑定到不可变 sealed checkpoint，关闭验证结束至复制 revision 之间的竞态。
+- 正式 `build` 要求整场所有题目存在与 live 输入匹配的 sealed revision，并在发布前再次复核；全部正式产物通过带 journal 的同卷事务发布，失败回滚且下次 build 可恢复硬中断；Build Manifest 升级到 v3，记录 `sealed_revision_id`，旧 v1/v2 明确显示 stale。
+- build/gen/fixate 事务统一校验 journal 路径与结构，并以 committed 标记区分“待回滚”和“已发布待清理”；任意 writer 会先恢复三类事务，只读 lint/status/judge 遇到 pending journal 返回 `recovery_required`，不再读取半发布状态。
+- source hash 覆盖 `code/` 下全部普通辅助源码（含 Python 与 `.inc/.ipp/.tcc`），并拒绝工作区外的题目目录、journal 路径穿越和符号链接逃逸。
+- `new` 提供 standard/custom/interactive 三种可编译 A+B 脚手架，包含双 accepted、典型错解、定向数据组与完整 manual recipes。
+
 ## [0.3.8] - 2026-07-27
 
 安全与交互评测围栏维护版本，从 `v0.3.7` 维护线发布，不包含尚未发布的 0.4 数据工坊功能。
