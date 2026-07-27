@@ -11,12 +11,12 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 ## 核心能力
 
 - **Agent 驱动出题**：内置 [SKILL.md](SKILL.md)，让 Claude Code、Codex 或兼容 Agent 按固定流程完成出题任务。
-- **严谨数据闭环**：自动组织 `std.cpp`、`validator.cpp`、`brute.cpp`、`wrong.cpp`，支持数据逻辑分组、结构化宿命和首个击杀用例，避免用偶然 RE/TLE 误判错解已被正确卡掉。
-- **可复现差分测试**：`probhub stress` 按 seed 反复生成小数据，对拍 accepted 与 brute，并保存首个可 replay 的反例。
+- **严谨数据闭环**：`probhub gen` 按 recipe 复现 secret 数据和答案；数据逻辑分组、结构化宿命与 Checker 复核共同保证生成结果可追踪、可验证。
+- **可复现差分测试**：`probhub stress` 按 seed 对拍 accepted 与 brute，也可用 `--against` 给指定错解找 killer，并把反例一键固化为分组数据与生成配方。
 - **跨平台资源控制**：共享 `probhub/process_control.py` 为普通程序、Checker、Validator、编译器、Interactor 和 stress 提供完整进程树清理、时间/内存/输出/进程数限制，并报告 TLE/MLE/OLE/RE/WA/AC。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 出题工作台**：提供响应式明暗双主题控制台，支持题目导航与排序、Markdown 和题面图片预览、题面/样例/封面编辑、revision 冲突保护、隔离 PDF 编译预览及临时代码沙箱评测，正式分发统一调用 Core。
-- **可重复构建 Core**：Workspace Schema v1、源文件/数据/整场排版依赖哈希、构建 Manifest、过期检测和统一 `probhub` CLI。
+- **可重复构建 Core**：Workspace Schema v1、不可变 checkpoint/generation、sealed revision 正式发布门禁、Manifest v3、过期检测和统一 `probhub` CLI。
 - **DOMjudge 兼容**：从规范源文件生成 `problem.yaml`、`domjudge-problem.ini` 和确定性 `.zip`。
 
 示例 PDF：
@@ -127,9 +127,12 @@ probhub doctor
 probhub new L05 --name "新题"
 probhub lint L01
 probhub status
+probhub gen L01              # 只读计划
+probhub gen L01 --apply      # 事务化生成数据与答案
 probhub judge L01
 probhub judge L01 --no-cache  # 强制完整重跑并刷新缓存
 probhub stress L01 --rounds 10000 --seed 12345
+probhub stress L01 --against code/wrong.cpp --fixate killer01
 probhub checkpoint L01        # 发布并行组卷使用的不可变草稿
 probhub seal L01 --no-cache   # 验证、冻结并生成一版完整试卷
 probhub generation-status
@@ -169,7 +172,9 @@ L01/data/secret/           # 隐藏数据唯一来源
 
 并行出题时，每个任务可在开发过程中运行 `checkpoint`，完成 lint、judge 和配置的 stress 后运行 `seal`。`seal` 只读取其他题目最后发布的 checkpoint，并立即返回一份隔离的完整试卷；其他任务可以继续修改 live 目录，不需要等待统一构建。预览 generation 不覆盖正式 PDF、ZIP、metadata 或 Manifest，完整协议见 [`references/generations.md`](references/generations.md)。
 
-`probhub build` 会先取得跨平台工作区写锁并建立输入快照，再在同卷临时工作区完成 lint、沙箱、元数据生成、Typst 编译、单题 PDF、DOMjudge 配置、ZIP 验证和 Manifest。多 ID build 只编译一次完整 Typst 集合；全部准备阶段成功且 live 输入哈希未变化后才发布正式产物。所有所选 Manifest 记录同一 `batch_id`。`probhub status` 会比较源文件、数据、工作区、整场排版输入、PDF 和 ZIP 哈希，报告 `current`、`stale` 或 `never-built`。
+全部题目 seal 后，`probhub build` 才进入正式发布：它先取得跨平台工作区写锁，确认整场所有 sealed revision 与 live 输入一致，再建立快照并完成 lint、沙箱、元数据、Typst、单题 PDF、DOMjudge ZIP 和 Manifest。多 ID build 只编译一次完整 Typst 集合；发布前会再次复核 live 输入与 sealed revisions。Manifest v3 为所选题目记录同一 `batch_id` 和各自 `sealed_revision_id`；`probhub status` 会报告 `current`、`stale` 或 `never-built`。
+
+build、gen 和 fixate 的正式写入共用同一工作区锁与恢复屏障。硬中断留下的 journal 会由下一次 writer 在读取题目配置前统一恢复；在恢复完成前，lint、status、judge 等只读命令返回 `recovery_required`，不会把半发布状态误报为有效结果。成功提交使用 committed 标记，因此即使事务目录暂时无法清理，后续恢复也不会撤销已发布内容。
 
 完整命令语法、单题/多题操作、缓存语义与故障处理见 [`references/cli.md`](references/cli.md)。无 `.probhub/workspace.yaml` 的旧工作区流程已独立整理到 [`references/legacy-workflow.md`](references/legacy-workflow.md)，Schema v1 工作区不要混用。
 
@@ -502,11 +507,11 @@ Pop-Location
 
 ```powershell
 npm publish
-npm view probhub@0.3.6 version
+npm view probhub@0.4.0 version
 Push-Location compat/probhub-skill
 npm publish
 Pop-Location
-npm view probhub-skill@0.3.6 version
+npm view probhub-skill@0.4.0 version
 ```
 
 两个包的版本必须一致，入口包的 `dependencies.probhub` 必须锁定精确版本，不能使用 `^` 或 `~`。不要在入口包中复制 Python Core、WebUI、Skill 或 references。

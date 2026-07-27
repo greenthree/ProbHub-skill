@@ -1,5 +1,6 @@
 import io
 import json
+import shutil
 import tempfile
 import threading
 import time
@@ -18,8 +19,11 @@ from probhub.generations import (
     assemble_exam_generation,
     create_problem_checkpoint,
     generation_status,
+    latest_checkpoint,
 )
 from probhub.io import write_yaml
+from probhub.linting import compute_data_hash, compute_source_hash
+from probhub.workspace import load_problem
 from probhub.workspace import load_workspace, problem_entries
 
 
@@ -122,6 +126,116 @@ class GenerationTests(unittest.TestCase):
                 "revision two",
                 (Path(second["problem_dir"]) / "problem.md").read_text(encoding="utf-8"),
             )
+
+    def test_checkpoint_rejects_manifest_state_forgery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entry = problem_entries(workspace)[0]
+            checkpoint = create_problem_checkpoint(root, workspace, entry)
+            manifest_path = Path(checkpoint["path"]) / "revision.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["state"] = "sealed"
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ProbHubError) as raised:
+                latest_checkpoint(root, entry["id"])
+
+            self.assertEqual(raised.exception.code, "checkpoint_invalid")
+            self.assertIn("identity mismatch", str(raised.exception))
+
+    def test_sealed_checkpoint_requires_hashes_from_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entry = problem_entries(workspace)[0]
+
+            with self.assertRaises(ProbHubError) as raised:
+                create_problem_checkpoint(
+                    root,
+                    workspace,
+                    entry,
+                    state="sealed",
+                    evidence={"judge": {"ok": True}},
+                )
+
+            self.assertEqual(raised.exception.code, "seal_revision_required")
+            self.assertIsNone(latest_checkpoint(root, entry["id"]))
+
+    def test_sealed_checkpoint_rejects_change_after_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entry = problem_entries(workspace)[0]
+            problem_dir, config = load_problem(root, entry)
+            source_hash = compute_source_hash(problem_dir, config)
+            data_hash = compute_data_hash(problem_dir, config)
+            statement = problem_dir / "problem.md"
+            statement.write_text(
+                statement.read_text(encoding="utf-8") + "\nEdit after verification.\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ProbHubError) as raised:
+                create_problem_checkpoint(
+                    root,
+                    workspace,
+                    entry,
+                    state="sealed",
+                    evidence={"judge": {"ok": True}},
+                    expected_source_hash=source_hash,
+                    expected_data_hash=data_hash,
+                )
+
+            self.assertEqual(raised.exception.code, "inputs_changed")
+            self.assertIsNone(latest_checkpoint(root, entry["id"]))
+
+    def test_sealed_checkpoint_rejects_concurrent_change_during_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entry = problem_entries(workspace)[0]
+            problem_dir, config = load_problem(root, entry)
+            source_hash = compute_source_hash(problem_dir, config)
+            data_hash = compute_data_hash(problem_dir, config)
+            copy_started = threading.Event()
+            continue_copy = threading.Event()
+            real_copyfile = shutil.copyfile
+
+            def delayed_copyfile(source, destination, *args, **kwargs):
+                if not copy_started.is_set():
+                    copy_started.set()
+                    self.assertTrue(continue_copy.wait(timeout=5))
+                return real_copyfile(source, destination, *args, **kwargs)
+
+            with (
+                patch(
+                    "probhub.generations.shutil.copyfile",
+                    side_effect=delayed_copyfile,
+                ),
+                ThreadPoolExecutor(max_workers=1) as executor,
+            ):
+                future = executor.submit(
+                    create_problem_checkpoint,
+                    root,
+                    workspace,
+                    entry,
+                    "sealed",
+                    {"judge": {"ok": True}},
+                    expected_source_hash=source_hash,
+                    expected_data_hash=data_hash,
+                )
+                self.assertTrue(copy_started.wait(timeout=5))
+                statement = problem_dir / "problem.md"
+                statement.write_text(
+                    statement.read_text(encoding="utf-8") + "\nConcurrent edit.\n",
+                    encoding="utf-8",
+                )
+                continue_copy.set()
+                with self.assertRaises(ProbHubError) as raised:
+                    future.result(timeout=5)
+
+            self.assertEqual(raised.exception.code, "inputs_changed")
+            self.assertIsNone(latest_checkpoint(root, entry["id"]))
 
     def test_generation_uses_checkpoints_and_is_content_addressed(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -92,6 +92,39 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertEqual(json.loads(output.getvalue())["code"], "build_busy")
 
+    def test_cli_reports_invalid_yaml_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            config_path = problem / "probhub.yaml"
+            for payload in ("limits: [\n", "- not\n- a\n- mapping\n"):
+                with self.subTest(payload=payload):
+                    config_path.write_text(payload, encoding="utf-8")
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = cli_main([
+                            "--workspace", str(root), "--json", "lint",
+                        ])
+                    self.assertEqual(code, 1)
+                    result = json.loads(output.getvalue())
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["code"], "invalid_yaml")
+
+    def test_cli_structures_unexpected_internal_errors(self):
+        output = io.StringIO()
+        with (
+            patch(
+                "probhub.cli.command_doctor",
+                side_effect=RuntimeError("injected internal failure"),
+            ),
+            redirect_stdout(output),
+        ):
+            code = cli_main(["--json", "doctor"])
+        self.assertEqual(code, 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["code"], "internal_error")
+        self.assertIn("injected internal failure", result["error"])
+
     def test_new_command_scaffolds_schema_problem(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -138,6 +171,7 @@ class CoreWorkspaceTests(unittest.TestCase):
             manifest = {
                 "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
                 "batch_id": "fixture-batch",
+                "sealed_revision_id": "fixture-revision",
                 "source_hash": compute_source_hash(problem, config),
                 "data_hash": compute_data_hash(problem, config),
                 "pdf_hash": hash_file(problem / "problem.pdf"),
@@ -161,9 +195,47 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(status["stale_fields"], ["batch_id"])
 
             manifest["batch_id"] = "fixture-batch"
+            manifest.pop("sealed_revision_id")
+            write_json(problem / ".probhub/build-manifest.json", manifest)
+            status = problem_status(problem, config)
+            self.assertEqual(status["state"], "stale")
+            self.assertEqual(status["stale_fields"], ["sealed_revision_id"])
+
+            manifest["sealed_revision_id"] = "fixture-revision"
             write_json(problem / ".probhub/build-manifest.json", manifest)
             with (problem / "problem.md").open("a", encoding="utf-8") as stream:
                 stream.write("\nchanged\n")
+            status = problem_status(problem, config)
+            self.assertEqual(status["state"], "stale")
+            self.assertIn("source_hash", status["stale_fields"])
+
+    def test_source_hash_and_status_track_code_headers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            root, workspace = load_workspace(root)
+            entry = problem_entries(workspace)[0]
+            _, config = load_problem(root, entry)
+            header = problem / "code/include/helper.HPP"
+            header.parent.mkdir(parents=True)
+            header.write_text("constexpr int value = 1;\n", encoding="utf-8")
+            first_source_hash = compute_source_hash(problem, config)
+            (problem / "problem.pdf").write_bytes(b"%PDF-1.4\n")
+            (root / "A.zip").write_bytes(b"zip")
+            write_json(problem / ".probhub/build-manifest.json", {
+                "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
+                "batch_id": "fixture-batch",
+                "sealed_revision_id": "fixture-revision",
+                "source_hash": first_source_hash,
+                "data_hash": compute_data_hash(problem, config),
+                "pdf_hash": hash_file(problem / "problem.pdf"),
+                "package_hash": hash_file(root / "A.zip"),
+            })
+            self.assertEqual(problem_status(problem, config)["state"], "current")
+
+            header.write_text("constexpr int value = 2;\n", encoding="utf-8")
+
+            self.assertNotEqual(first_source_hash, compute_source_hash(problem, config))
             status = problem_status(problem, config)
             self.assertEqual(status["state"], "stale")
             self.assertIn("source_hash", status["stale_fields"])

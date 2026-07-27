@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -14,9 +15,19 @@ from pathlib import Path
 
 from .build_lock import workspace_build_lock
 from .errors import ProbHubError
-from .io import atomic_write_bytes, normalize_newlines, read_yaml, write_json, write_yaml
+from .io import normalize_newlines, read_yaml, write_json, write_yaml
 from .output_compare import compare_standard_output
 from .process_control import DEFAULT_PROCESS_LIMIT, run_managed_to_files
+from .transactions import (
+    TRANSACTION_PHASE_COMMITTED,
+    TRANSACTION_PHASE_PREPARED,
+    read_transaction_journal,
+    recover_workspace_transactions,
+    resolve_journal_target,
+    transaction_child,
+    validate_transaction_directory,
+)
+from .workspace import load_workspace
 
 
 DEFAULT_ROUNDS = 1000
@@ -689,7 +700,7 @@ def _contained_data_dir(problem_dir, relative, label):
 
 
 def _declared_solution_files(config):
-    files = set()
+    files = {}
     solutions = config.get("solutions") or {}
     for kind in ("accepted", "brute", "wrong"):
         entries = solutions.get(kind) or []
@@ -697,21 +708,50 @@ def _declared_solution_files(config):
         for entry in entries:
             value = _entry_file(entry)
             if value:
-                files.add(str(value).replace("\\", "/"))
+                normalized = str(value).replace("\\", "/")
+                folded = normalized.casefold()
+                previous = files.get(folded)
+                if previous is not None and previous != normalized:
+                    raise ProbHubError(
+                        f"solution paths differ only by case: {previous}, {normalized}",
+                        code="fixate_invalid",
+                    )
+                files[folded] = normalized
     return files
+
+
+def _casefold_entry(directory, name):
+    directory = Path(directory)
+    if not directory.is_dir():
+        return None
+    folded = str(name).casefold()
+    for entry in directory.iterdir():
+        if entry.name.casefold() == folded:
+            return entry
+    return None
+
+
+def _recipe_case_exists(recipes, case_name):
+    folded = str(case_name).casefold()
+    return any(
+        isinstance(item, dict)
+        and str(item.get("case", "")).casefold() == folded
+        for item in recipes
+    )
 
 
 def _fixate_precheck(problem_dir, config, case_name, against_rel):
     """Fail fast before the hunt; `_fixate_killer` re-checks under the lock."""
     if not _CASE_NAME_PATTERN.match(case_name or ""):
         raise ProbHubError(f"invalid fixate case name: {case_name!r}", code="fixate_invalid")
-    normalized_target = str(against_rel).replace("\\", "/")
-    if normalized_target not in _declared_solution_files(config):
+    requested_target = str(against_rel).replace("\\", "/")
+    normalized_target = _declared_solution_files(config).get(requested_target.casefold())
+    if normalized_target is None:
         # A group target that is not a declared solution fails lint afterwards,
         # breaking the one-step fixation loop.
         raise ProbHubError(
             f"--fixate requires the --against target to be declared in solutions.*: "
-            f"{normalized_target} (declare it, e.g. under solutions.wrong with an "
+            f"{requested_target} (declare it, e.g. under solutions.wrong with an "
             "expected entry, then fixate)",
             code="fixate_undeclared",
         )
@@ -719,29 +759,131 @@ def _fixate_precheck(problem_dir, config, case_name, against_rel):
     secret_dir = _contained_data_dir(
         problem_dir, data_config.get("secret_dir") or "data/secret", "data.secret_dir"
     )
-    if (secret_dir / f"{case_name}.in").exists() or (secret_dir / f"{case_name}.ans").exists():
+    if (
+        _casefold_entry(secret_dir, f"{case_name}.in") is not None
+        or _casefold_entry(secret_dir, f"{case_name}.ans") is not None
+    ):
         raise ProbHubError(f"fixate target already exists: {case_name}", code="fixate_exists")
     recipes = data_config.get("recipes") or []
-    if isinstance(recipes, list) and any(
-        isinstance(item, dict) and item.get("case") == case_name for item in recipes
-    ):
+    if isinstance(recipes, list) and _recipe_case_exists(recipes, case_name):
         raise ProbHubError(f"a recipe already exists for case: {case_name}", code="fixate_exists")
     return normalized_target
 
 
-def _fixate_answer_bytes(problem_dir, config, configured, outcome, input_bytes):
-    """Answers must reproduce under `gen`, which always runs the first declared
-    accepted solution; recompute when stress used a different trusted solution."""
+def _file_digest(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _fixate_input_snapshot(problem_dir, config, configured):
+    # Imported lazily because linting imports stress argument helpers.
+    from .linting import compute_source_hash
+
+    paths = {
+        str(path.resolve()): _file_digest(path)
+        for path in (
+            configured.get("generator"),
+            configured.get("accepted"),
+            configured.get("brute"),
+            configured.get("validator"),
+            configured.get("checker"),
+        )
+        if path is not None
+    }
     first_rel = _first_solution(config, "accepted")
-    stress_rel = configured.get("accepted_rel")
-    same = (
-        first_rel is None
-        or stress_rel is None
-        or str(first_rel).replace("\\", "/") == str(stress_rel).replace("\\", "/")
-    )
-    if same:
-        accepted = outcome.get("accepted") or {}
-        return normalize_newlines(accepted.get("stdout") or b"")
+    if first_rel is not None:
+        first_path = _resolve_problem_file(problem_dir, first_rel, "accepted")
+        paths[str(first_path.resolve())] = _file_digest(first_path)
+    return {
+        "config": json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        "source_hash": compute_source_hash(problem_dir, config),
+        "files": paths,
+    }
+
+
+def _verify_fixate_snapshot(problem_dir, live, live_configured, expected):
+    actual = _fixate_input_snapshot(problem_dir, live, live_configured)
+    if actual != expected:
+        raise ProbHubError(
+            "problem configuration or stress inputs changed while hunting the killer; rerun stress",
+            code="fixate_inputs_changed",
+        )
+
+
+def _fixate_reproduce_input(problem_dir, configured, generator_args, expected_input):
+    with tempfile.TemporaryDirectory(prefix="probhub-fixate-gen-") as temp:
+        command, _ = _prepare_program(configured["generator"], temp, "generator")
+        rerun = _run(
+            [*command, *generator_args],
+            None,
+            configured["tool_timeout"],
+            problem_dir,
+            configured["memory_limit"],
+            configured["output_limit"],
+            configured["process_limit"],
+        )
+    if rerun["status"] != "AC":
+        raise ProbHubError(
+            f"generator failed while verifying the fixated killer: {rerun['status']}",
+            code="fixate_reproduce_failed",
+        )
+    reproduced = normalize_newlines(rerun["stdout"])
+    if reproduced != expected_input:
+        raise ProbHubError(
+            "stress generator did not byte-reproduce the killer input from its recorded arguments",
+            code="fixate_nondeterministic",
+        )
+    return reproduced
+
+
+def _fixate_revalidate_killer(problem_dir, configured, input_bytes):
+    """Re-run live Validator, accepted, target and Checker before publication."""
+    with tempfile.TemporaryDirectory(prefix="probhub-fixate-recheck-") as temp:
+        commands = {}
+        for role in ("validator", "accepted", "brute"):
+            commands[role], _ = _prepare_program(configured[role], temp, role)
+        if configured.get("checker") is not None:
+            commands["checker"], _ = _prepare_program(
+                configured["checker"], temp, "checker"
+            )
+        round_dir = Path(temp) / "round"
+        round_dir.mkdir()
+        outcome = _round_once(
+            problem_dir,
+            configured,
+            commands,
+            0,
+            1,
+            round_dir,
+            input_data=input_bytes,
+        )
+    if outcome.get("kind") == "infrastructure":
+        raise ProbHubError(
+            "killer revalidation failed in problem infrastructure: "
+            f"{outcome.get('reason')}",
+            code="fixate_revalidate_failed",
+        )
+    if outcome.get("ok") or not _is_killer_outcome(outcome):
+        raise ProbHubError(
+            "the reproduced input no longer separates the target solution",
+            code="fixate_not_killer",
+        )
+
+
+def _fixate_answer_bytes(problem_dir, config, configured, input_bytes):
+    """Run the same first accepted solution used by `gen` on reproduced input."""
+    first_rel = _first_solution(config, "accepted")
+    if first_rel is None:
+        raise ProbHubError(
+            "solutions.accepted must declare a solution before fixating a killer",
+            code="fixate_answer_failed",
+        )
     source = _resolve_problem_file(problem_dir, first_rel, "accepted")
     limits = config.get("limits") or {}
     raw_time = limits.get("time")
@@ -751,68 +893,283 @@ def _fixate_answer_bytes(problem_dir, config, configured, outcome, input_bytes):
         rerun = _run(
             command,
             input_bytes,
-            max(30.0, 10.0 * float(time_limit)),
+            min(600.0, max(30.0, 10.0 * float(time_limit))),
             problem_dir,
             memory_limit=max(2048, 2 * configured["memory_limit"]),
             output_limit=configured["output_limit"],
+            process_limit=configured["process_limit"],
         )
-    if rerun["status"] != "AC":
+        if rerun["status"] != "AC":
+            raise ProbHubError(
+                "first accepted solution failed on the reproduced killer input while producing "
+                f"the fixated answer: {rerun['status']}",
+                code="fixate_answer_failed",
+            )
+        answer = normalize_newlines(rerun["stdout"])
+        if configured.get("checker") is not None:
+            checker, _ = _prepare_program(configured["checker"], temp, "checker")
+            checker_dir = Path(temp) / "answer-check"
+            checker_dir.mkdir()
+            input_path = checker_dir / "input.in"
+            answer_path = checker_dir / "answer.ans"
+            input_path.write_bytes(input_bytes)
+            answer_path.write_bytes(answer)
+            checked = _compare_custom(
+                checker,
+                input_path,
+                answer_path,
+                answer,
+                configured["tool_timeout"],
+                checker_dir,
+                configured["memory_limit"],
+                configured["output_limit"],
+                configured["process_limit"],
+            )
+            if checked["status"] != "AC":
+                detail = checked.get("execution_status") or checked["status"]
+                raise ProbHubError(
+                    "Checker rejected the first accepted solution while producing "
+                    f"the fixated answer: {detail}",
+                    code="fixate_answer_failed",
+                )
+        return answer
+
+
+def _replace_fixate_path(source, target):
+    os.replace(source, target)
+
+
+def _recover_fixate_transactions(problem_dir):
+    problem_dir = Path(problem_dir).resolve()
+    for staging in sorted(problem_dir.glob(".probhub-fixate-*")):
+        try:
+            staging = validate_transaction_directory(
+                staging,
+                problem_dir,
+                ".probhub-fixate-",
+            )
+            journal_path = staging / "journal.json"
+            if not journal_path.is_file():
+                shutil.rmtree(staging)
+                continue
+            _, phase, entries = read_transaction_journal(staging)
+            if phase == TRANSACTION_PHASE_COMMITTED:
+                shutil.rmtree(staging)
+                continue
+            for reverse_index, entry in enumerate(reversed(entries)):
+                index = len(entries) - reverse_index - 1
+                if not isinstance(entry, dict):
+                    raise ValueError("journal entry must be an object")
+                target = resolve_journal_target(problem_dir, entry["target"])
+                backup_name = entry.get("backup")
+                if backup_name:
+                    backup = transaction_child(
+                        staging,
+                        backup_name,
+                        expected_prefix="backup",
+                        index=index,
+                    )
+                    if backup.is_file():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(backup, target)
+                    elif not target.is_file():
+                        raise FileNotFoundError(
+                            f"missing recovery backup and target: {backup} -> {target}"
+                        )
+                elif not entry.get("existed"):
+                    target.unlink(missing_ok=True)
+            shutil.rmtree(staging)
+        except BaseException as exc:
+            raise ProbHubError(
+                f"failed to recover interrupted fixate transaction {staging}: {exc}",
+                code="fixate_recovery_failed",
+            ) from exc
+
+
+def _publish_fixation(problem_dir, input_path, answer_path, config_path, input_bytes, answer_bytes, live):
+    """Publish the two data files and YAML as one rollback-capable transaction."""
+    problem_dir = Path(problem_dir)
+    staging = Path(tempfile.mkdtemp(prefix=".probhub-fixate-", dir=problem_dir))
+    staged_input = staging / "case.in"
+    staged_answer = staging / "case.ans"
+    staged_config = staging / "probhub.yaml"
+    secret_dir_existed = input_path.parent.is_dir()
+    cleanup_staging = True
+    cleanup_context = "staging"
+    try:
+        staged_input.write_bytes(input_bytes)
+        staged_answer.write_bytes(answer_bytes)
+        write_yaml(staged_config, live)
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        targets = (
+            (staged_input, input_path),
+            (staged_answer, answer_path),
+            (staged_config, config_path),
+        )
+        backups = {}
+        journal_entries = []
+        for index, (_, target) in enumerate(targets):
+            relative = target.resolve().relative_to(problem_dir.resolve()).as_posix()
+            backup_name = None
+            if target.exists():
+                backup = staging / f"backup-{index}"
+                shutil.copyfile(target, backup)
+                backups[target] = backup
+                backup_name = backup.name
+            journal_entries.append({
+                "target": relative,
+                "existed": target.exists(),
+                "backup": backup_name,
+            })
+        write_json(staging / "journal.json", {
+            "schema_version": 1,
+            "phase": TRANSACTION_PHASE_PREPARED,
+            "entries": journal_entries,
+        })
+        cleanup_staging = False
+        try:
+            for source, target in targets:
+                _replace_fixate_path(source, target)
+        except BaseException as exc:
+            rollback_errors = []
+            for _, target in reversed(targets):
+                backup = backups.get(target)
+                try:
+                    if backup is not None:
+                        os.replace(backup, target)
+                    else:
+                        target.unlink(missing_ok=True)
+                except BaseException as rollback_exc:
+                    rollback_errors.append(f"{target}: {rollback_exc}")
+            if not secret_dir_existed:
+                try:
+                    input_path.parent.rmdir()
+                except OSError:
+                    pass
+            if rollback_errors:
+                raise ProbHubError(
+                    "failed to publish fixated killer and rollback was incomplete; "
+                    f"recovery files remain in {staging}: {', '.join(rollback_errors)}",
+                    code="fixate_rollback_failed",
+                ) from exc
+            cleanup_staging = True
+            cleanup_context = "rollback"
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise ProbHubError(
+                f"failed to publish fixated killer transaction: {exc}",
+                code="fixate_publish_failed",
+            ) from exc
+        write_json(staging / "journal.json", {
+            "schema_version": 1,
+            "phase": TRANSACTION_PHASE_COMMITTED,
+            "entries": journal_entries,
+        })
+        cleanup_staging = True
+        cleanup_context = "committed"
+    except Exception as exc:
+        if not secret_dir_existed:
+            try:
+                input_path.parent.rmdir()
+            except OSError:
+                pass
+        if isinstance(exc, ProbHubError):
+            raise
         raise ProbHubError(
-            "first accepted solution failed on the killer input while producing "
-            f"the fixated answer: {rerun['status']}",
-            code="fixate_answer_failed",
-        )
-    return normalize_newlines(rerun["stdout"])
+            f"failed to publish fixated killer transaction: {exc}",
+            code="fixate_publish_failed",
+        ) from exc
+    finally:
+        if cleanup_staging:
+            try:
+                shutil.rmtree(staging)
+            except OSError as exc:
+                detail = {
+                    "committed": "fixated data was committed",
+                    "rollback": "fixated data publication was rolled back",
+                    "staging": "fixated data staging failed",
+                }[cleanup_context]
+                raise ProbHubError(
+                    f"{detail} but transaction cleanup failed; "
+                    f"the next writer will retry cleanup: {staging}: {exc}",
+                    code="fixate_cleanup_failed",
+                ) from exc
 
 
-def _fixate_killer(root, problem_dir, config, configured, outcome, case_name, group_name, against_rel):
+def _replay_command(problem_id, relative, against=None):
+    command = f"probhub stress {problem_id}"
+    if against is not None:
+        command += f" --against {json.dumps(str(against), ensure_ascii=False)}"
+    return command + f" --replay {json.dumps(str(relative), ensure_ascii=False)}"
+
+
+def _fixate_killer(
+    root,
+    problem_dir,
+    config,
+    configured,
+    outcome,
+    case_name,
+    group_name,
+    against_rel,
+    input_snapshot,
+):
     """Persist a found killer: secret data + gen recipe + targeted data group."""
-    normalized_target = _fixate_precheck(problem_dir, config, case_name, against_rel)
     input_bytes = normalize_newlines(outcome.get("input") or b"")
-    # May compile and run the first accepted; keep it outside the lock.
-    answer_bytes = _fixate_answer_bytes(problem_dir, config, configured, outcome, input_bytes)
     generator_args = [str(item) for item in outcome.get("generator_args") or []]
-    group = group_name or case_name
-    target = normalized_target
-    pattern = f"secret/{case_name}"
+    requested_group = group_name or case_name
     config_path = problem_dir / "probhub.yaml"
     with workspace_build_lock(root):
+        _, live_workspace = load_workspace(root)
+        recover_workspace_transactions(root, live_workspace)
         live = read_yaml(config_path)
+        try:
+            live_configured = _stress_config(problem_dir, live, against=against_rel)
+        except ProbHubError as exc:
+            raise ProbHubError(
+                "problem configuration or stress inputs changed while hunting the killer; rerun stress",
+                code="fixate_inputs_changed",
+            ) from exc
+        _verify_fixate_snapshot(problem_dir, live, live_configured, input_snapshot)
+        target = _fixate_precheck(problem_dir, live, case_name, against_rel)
+        reproduced_input = _fixate_reproduce_input(
+            problem_dir, live_configured, generator_args, input_bytes
+        )
+        _fixate_revalidate_killer(problem_dir, live_configured, reproduced_input)
+        answer_bytes = _fixate_answer_bytes(
+            problem_dir, live, live_configured, reproduced_input
+        )
         data = live.setdefault("data", {})
         if not isinstance(data, dict):
             raise ProbHubError("data must be a mapping to fixate", code="fixate_invalid")
-        # Paths come from the live config so a concurrent secret_dir change
-        # cannot split the data files and the recipe across directories.
         secret_dir = _contained_data_dir(
             problem_dir, data.get("secret_dir") or "data/secret", "data.secret_dir"
         )
         input_path = secret_dir / f"{case_name}.in"
         answer_path = secret_dir / f"{case_name}.ans"
-        if input_path.exists() or answer_path.exists():
-            raise ProbHubError(
-                f"fixate target already exists: {case_name}",
-                code="fixate_exists",
-            )
         recipes = data.setdefault("recipes", [])
         if not isinstance(recipes, list):
             raise ProbHubError("data.recipes must be a list to fixate", code="fixate_invalid")
-        if any(isinstance(item, dict) and item.get("case") == case_name for item in recipes):
-            raise ProbHubError(
-                f"a recipe already exists for case: {case_name}",
-                code="fixate_exists",
-            )
         recipes.append({
             "case": case_name,
-            "generator": configured["generator_rel"],
+            "generator": live_configured["generator_rel"],
             "args": generator_args,
         })
         groups = data.setdefault("groups", [])
         if not isinstance(groups, list):
             raise ProbHubError("data.groups must be a list to fixate", code="fixate_invalid")
+        folded_group = str(requested_group).casefold()
         existing = next(
-            (item for item in groups if isinstance(item, dict) and item.get("name") == group),
+            (
+                item
+                for item in groups
+                if isinstance(item, dict)
+                and str(item.get("name", "")).casefold() == folded_group
+            ),
             None,
         )
+        group = str(existing.get("name")) if existing is not None else requested_group
+        pattern = f"secret/{case_name}"
         if existing is None:
             groups.append({
                 "name": group,
@@ -824,23 +1181,58 @@ def _fixate_killer(root, problem_dir, config, configured, outcome, case_name, gr
             existing.setdefault("role", "wrong-solution-killer")
             patterns = existing.get("patterns") or existing.get("cases") or []
             patterns = [patterns] if isinstance(patterns, str) else list(patterns)
-            if pattern not in patterns:
+            matching_pattern = next(
+                (index for index, item in enumerate(patterns) if str(item).casefold() == pattern.casefold()),
+                None,
+            )
+            if matching_pattern is None:
                 patterns.append(pattern)
+            else:
+                patterns[matching_pattern] = pattern
             existing["patterns"] = patterns
             existing.pop("cases", None)
             targets = existing.get("targets") or []
             targets = [targets] if isinstance(targets, str) else list(targets)
-            if target not in targets:
+            matching_target = next(
+                (
+                    index
+                    for index, item in enumerate(targets)
+                    if str(item).replace("\\", "/").casefold() == target.casefold()
+                ),
+                None,
+            )
+            if matching_target is None:
                 targets.append(target)
+            else:
+                targets[matching_target] = target
             existing["targets"] = targets
-        # Data files first so the config never references missing files.
-        atomic_write_bytes(input_path, input_bytes)
-        atomic_write_bytes(answer_path, answer_bytes)
-        write_yaml(config_path, live)
+        disk_config = read_yaml(config_path)
+        try:
+            disk_configured = _stress_config(problem_dir, disk_config, against=against_rel)
+        except ProbHubError as exc:
+            raise ProbHubError(
+                "problem configuration or stress inputs changed before publishing the killer",
+                code="fixate_inputs_changed",
+            ) from exc
+        _verify_fixate_snapshot(
+            problem_dir,
+            disk_config,
+            disk_configured,
+            input_snapshot,
+        )
+        _publish_fixation(
+            problem_dir,
+            input_path,
+            answer_path,
+            config_path,
+            reproduced_input,
+            answer_bytes,
+            live,
+        )
     return {
         "case": case_name,
         "group": group,
-        "generator": configured["generator_rel"],
+        "generator": live_configured["generator_rel"],
         "args": generator_args,
         "input": str(input_path.relative_to(problem_dir).as_posix()),
         "answer": str(answer_path.relative_to(problem_dir).as_posix()),
@@ -866,11 +1258,19 @@ def stress_problem(
         raise ProbHubError("--fixate requires --against")
     if fixate is not None and replay is not None:
         raise ProbHubError("--fixate cannot be combined with --replay")
-    configured = _stress_config(problem_dir, config, against=against)
+    fixate_snapshot = None
     if fixate is not None:
-        # Fail fast on an invalid case name, an existing case, or an undeclared
-        # target before spending rounds on the hunt.
-        _fixate_precheck(problem_dir, config, fixate, against)
+        # Recover any interrupted prior commit, then capture a current snapshot
+        # under the same writer lock used by fixate publication.
+        with workspace_build_lock(root):
+            _, live_workspace = load_workspace(root)
+            recover_workspace_transactions(root, live_workspace)
+            config = read_yaml(problem_dir / "probhub.yaml")
+            configured = _stress_config(problem_dir, config, against=against)
+            _fixate_precheck(problem_dir, config, fixate, against)
+            fixate_snapshot = _fixate_input_snapshot(problem_dir, config, configured)
+    else:
+        configured = _stress_config(problem_dir, config, against=against)
     requested_rounds = configured["rounds"] if rounds is None else rounds
     if not _is_int(requested_rounds) or requested_rounds <= 0:
         raise ProbHubError("--rounds must be a positive integer")
@@ -977,7 +1377,11 @@ def stress_problem(
                     "reason": outcome["reason"],
                     "message": outcome.get("message", ""),
                     "counterexample": relative,
-                    "replay_command": f'probhub stress {problem_id} --replay "{relative}"',
+                    "replay_command": _replay_command(
+                        problem_id,
+                        relative,
+                        configured["brute_rel"] if against is not None else None,
+                    ),
                     "accepted": _public_run(outcome.get("accepted")),
                     "brute": _public_run(outcome.get("brute")),
                     "comparison": _public_run(outcome.get("comparison")),
@@ -1000,6 +1404,7 @@ def stress_problem(
                                 fixate,
                                 fixate_group,
                                 configured["brute_rel"],
+                                fixate_snapshot,
                             )
                 return result
 

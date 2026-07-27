@@ -68,6 +68,8 @@ probhub generation-status
 
 只有正式 `build` 才会生成或替换 DOMjudge ZIP、正式单题 PDF、共享 metadata 和 Build Manifest。不要把 `.probhub/generations/` 中的预览直接作为正式包发布。
 
+正式 `build` 会要求工作区 collection 中每道题的最新 checkpoint 都是与当前 live source/data 一致的 sealed revision，并在 Manifest v3 中记录所选题目的 `sealed_revision_id`。任一题仍是 draft、缺少 checkpoint 或 seal 后又被修改时，整批构建会在创建快照前以 `sealed_revision_required` 拒绝；构建期间 revision 变化则以 `sealed_revision_changed` 拒绝发布。
+
 ## 5. 当前性能模型
 
 当前第一阶段仍会为每个新 generation 编译一次完整 Typst 集合，但不会重复 judge 或 stress。下一阶段可把题目正文渲染为独立内容寻址 PDF 分片，再由轻量 assembler 合并并覆盖全局页码，从而只重渲染发生变化的题目。

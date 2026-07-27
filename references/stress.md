@@ -184,6 +184,14 @@ probhub --json stress L01 --rounds 10000 --seed 12345
 probhub stress L01 --replay latest
 ```
 
+`--against` 猎杀产生的 `replay_command` 会同时保留目标路径，例如：
+
+```powershell
+probhub stress L01 --against "code/wrong.cpp" --replay "L01/.probhub/stress/<反例目录>"
+```
+
+不能删掉其中的 `--against`：否则命令会退回 accepted-vs-brute 的普通 stress 语义，无法确认同一个 killer。
+
 显式传入反例目录或其中的输入文件：
 
 ```powershell
@@ -277,19 +285,21 @@ probhub stress L05 --against code/wrong_greedy.cpp --fixate greedy-kill01 --grou
 
 ### 一步固化（`--fixate`）
 
-命中 killer 时，`--fixate <case>` 原子完成三件事：
+命中 killer 时，`--fixate <case>` 在工作区写锁内以一个可回滚事务完成三件事：
 
 1. 归一化后的输入与 accepted 输出写入 `data/secret/<case>.in` / `.ans`；
 2. `data.recipes` 追加配方（stress 生成器 + 命中轮的精确 argv）——之后 `probhub gen` 可字节一致地复现该测试点；
 3. `data.groups` 追加（或并入 `--group` 指定的既有组）`wrong-solution-killer` 组，pattern `secret/<case>`、target 指向目标解法。
 
-固化后按期望矩阵闭环：在 `solutions.wrong` 中为目标解法声明 `expected: {status: WA, groups: [<组名>], forbid: [FAIL]}`，再运行 `probhub judge` 确认击杀——期望矩阵仍是击杀判定的唯一事实来源。同名 case 或已有配方时固化以 `fixate_exists` 拒绝，不覆盖既有数据。
+固化后按期望矩阵闭环：在 `solutions.wrong` 中为目标解法声明 `expected: {status: WA, groups: [<组名>], forbid: [FAIL]}`，再运行 `probhub judge` 确认击杀——期望矩阵仍是击杀判定的唯一事实来源。同名 case、数据文件或已有配方按大小写不敏感规则检查；冲突时以 `fixate_exists` 拒绝，不覆盖既有数据。
 
 固化约束：
 
 - `--fixate` 要求 `--against` 目标已在 `solutions.*` 声明（否则以 `fixate_undeclared` 拒绝）——未声明的目标写进 `data.groups.targets` 会直接 lint 失败。`--against` 本身可指向题目目录内任意文件，用于探索。
-- 预检在开跑前完成：case 名不合法（`fixate_invalid`）、case 数据或配方已存在（`fixate_exists`）、目标未声明（`fixate_undeclared`）都立即失败，不浪费猎杀轮次；写入前在工作区写锁内以 live 配置复查一遍。
-- 固化的 `.ans` 始终来自 `solutions.accepted` 第一项（与 `probhub gen` 重放同源，保证字节一致复现）；`stress.accepted` 覆盖只影响猎杀对拍，不影响固化答案，必要时固化前会自动编译并运行首个 accepted（非 AC 报 `fixate_answer_failed`）。
+- 预检在开跑前完成：case 名不合法（`fixate_invalid`）、case 数据或配方已存在（`fixate_exists`）、目标未声明（`fixate_undeclared`）都立即失败，不浪费猎杀轮次。命中后在写锁内重读 live 配置，并复核配置以及 Generator、Validator、Checker、accepted 和目标源码；猎杀期间发生相关变化时返回 `fixate_inputs_changed`，不发布文件。
+- Core 会用命中轮记录的精确 argv 重新运行 live Generator，并要求归一化后的输入逐字节一致；不确定生成器返回 `fixate_nondeterministic`。随后重新运行 live Validator、stress accepted、目标解法与 Checker，确认当前输入仍是 killer。固化的 `.ans` 始终重新运行 `solutions.accepted` 第一项生成，与 `probhub gen` 同源；Custom Judge 还会让 Checker 复核该 jury answer，失败返回 `fixate_answer_failed`。
+- `.in`、`.ans` 和 `probhub.yaml` 先全部写入题目目录内的 staging，并在替换前写 journal；三者准备完成后才发布。任一写入或替换失败返回 `fixate_publish_failed` 并回滚。回滚不完整时以 `fixate_rollback_failed` 保留恢复材料；进程硬中断遗留的 journal 会在下次 fixate 取得锁后恢复。
+- 既有组名、pattern 和 target 也按大小写不敏感规则合并；写回时统一使用本次 case 与声明解法的规范路径，避免在 Linux 上生成无法匹配的数据组。
 - 目标进程无法启动（`start_error`，如不可执行/损坏的文件）不算击杀：按基础设施错误处理，不产生 `killer_found`。
 - 固化会以规范形式重写 `probhub.yaml`（键序保留、注释不保留）；本项目规范源为机器可写 YAML，不在其中维护手写注释。
 

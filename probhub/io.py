@@ -6,14 +6,35 @@ from pathlib import Path
 
 import yaml
 
+from .errors import ProbHubError
+
 
 def read_yaml(path):
     path = Path(path)
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise
-    return data or {}
+    except (OSError, UnicodeError) as exc:
+        raise ProbHubError(
+            f"failed to read YAML {path}: {exc}",
+            code="invalid_yaml",
+        ) from exc
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ProbHubError(
+            f"invalid YAML in {path}: {exc}",
+            code="invalid_yaml",
+        ) from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ProbHubError(
+            f"invalid YAML in {path}: expected a mapping at the document root",
+            code="invalid_yaml",
+        )
+    return data
 
 
 def _atomic_write_text(path, text):

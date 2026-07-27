@@ -121,7 +121,14 @@ def _problem_copy_ignore(source_root):
     return ignore
 
 
-def _copy_problem_consistently(root, entry, destination):
+def _copy_problem_consistently(
+    root,
+    entry,
+    destination,
+    *,
+    expected_source_hash=None,
+    expected_data_hash=None,
+):
     expected_problem_dir = _problem_path(root, entry)
     problem_dir, config = load_problem(root, entry)
     problem_dir = problem_dir.resolve()
@@ -129,6 +136,17 @@ def _copy_problem_consistently(root, entry, destination):
         raise ProbHubError(f"unexpected problem directory: {problem_dir}")
     source_hash = compute_source_hash(problem_dir, config)
     data_hash = compute_data_hash(problem_dir, config)
+    if (
+        expected_source_hash is not None
+        and source_hash != expected_source_hash
+    ) or (
+        expected_data_hash is not None
+        and data_hash != expected_data_hash
+    ):
+        raise ProbHubError(
+            f"verified inputs changed before creating checkpoint for {entry['id']}",
+            code="inputs_changed",
+        )
     shutil.copytree(
         problem_dir,
         destination,
@@ -153,6 +171,14 @@ def _copy_problem_consistently(root, entry, destination):
         or copied_data_hash != data_hash
         or current_source_hash != source_hash
         or current_data_hash != data_hash
+        or (
+            expected_source_hash is not None
+            and copied_source_hash != expected_source_hash
+        )
+        or (
+            expected_data_hash is not None
+            and copied_data_hash != expected_data_hash
+        )
     ):
         raise ProbHubError(
             f"problem changed while creating checkpoint for {entry['id']}",
@@ -163,6 +189,10 @@ def _copy_problem_consistently(root, entry, destination):
 
 def _checkpoint_manifest_path(root, problem_id, revision_id):
     return _checkpoint_root(root, problem_id) / revision_id / "revision.json"
+
+
+def _checkpoint_display_name(config, problem_id):
+    return config.get("display_name") or config.get("name") or problem_id
 
 
 def _read_checkpoint(root, problem_id, revision_id):
@@ -182,10 +212,23 @@ def _read_checkpoint(root, problem_id, revision_id):
         manifest.get("schema_version") != CHECKPOINT_SCHEMA_VERSION
         or manifest.get("problem_id") != problem_id
         or manifest.get("revision_id") != revision_id
+        or manifest.get("state") not in {"draft", "sealed"}
         or not problem_dir.is_dir()
     ):
         raise ProbHubError(
             f"invalid checkpoint for {problem_id}: {revision_id}",
+            code="checkpoint_invalid",
+        )
+    expected_revision_id = _digest_json({
+        "problem_id": manifest.get("problem_id"),
+        "state": manifest.get("state"),
+        "source_hash": manifest.get("source_hash"),
+        "data_hash": manifest.get("data_hash"),
+        "evidence": manifest.get("evidence"),
+    })
+    if expected_revision_id != revision_id:
+        raise ProbHubError(
+            f"checkpoint identity mismatch for {problem_id}: {revision_id}",
             code="checkpoint_invalid",
         )
     config = read_yaml(problem_dir / "probhub.yaml")
@@ -193,6 +236,7 @@ def _read_checkpoint(root, problem_id, revision_id):
         compute_source_hash(problem_dir, config) != manifest.get("source_hash")
         or compute_data_hash(problem_dir, config) != manifest.get("data_hash")
         or config.get("id") != problem_id
+        or _checkpoint_display_name(config, problem_id) != manifest.get("display_name")
     ):
         raise ProbHubError(
             f"checkpoint content hash mismatch for {problem_id}: {revision_id}",
@@ -219,10 +263,34 @@ def latest_checkpoint(root, problem_id):
     return _read_checkpoint(root, problem_id, revision_id)
 
 
-def create_problem_checkpoint(root, workspace, entry, state="draft", evidence=None):
+def checkpoint_revision(root, problem_id, revision_id):
+    """Read and verify one immutable checkpoint revision by identity."""
+    return _read_checkpoint(root, problem_id, revision_id)
+
+
+def create_problem_checkpoint(
+    root,
+    workspace,
+    entry,
+    state="draft",
+    evidence=None,
+    *,
+    expected_source_hash=None,
+    expected_data_hash=None,
+):
     root = Path(root).resolve()
     if state not in {"draft", "sealed"}:
         raise ProbHubError(f"unsupported checkpoint state: {state}")
+    if state == "sealed" and (
+        not isinstance(expected_source_hash, str)
+        or not expected_source_hash
+        or not isinstance(expected_data_hash, str)
+        or not expected_data_hash
+    ):
+        raise ProbHubError(
+            "sealed checkpoints require the source/data hashes verified by seal",
+            code="seal_revision_required",
+        )
     problem_id = entry["id"]
     lock_path = CHECKPOINTS_DIR / f"{_problem_storage_key(problem_id)}.lock"
     with workspace_file_lock(
@@ -253,6 +321,8 @@ def create_problem_checkpoint(root, workspace, entry, state="draft", evidence=No
                 root,
                 entry,
                 stage_problem,
+                expected_source_hash=expected_source_hash,
+                expected_data_hash=expected_data_hash,
             )
             evidence = _json_safe(evidence or {})
             revision_id = _digest_json({
@@ -269,9 +339,7 @@ def create_problem_checkpoint(root, workspace, entry, state="draft", evidence=No
                 "state": state,
                 "source_hash": source_hash,
                 "data_hash": data_hash,
-                "display_name": copied_config.get("display_name")
-                or copied_config.get("name")
-                or problem_id,
+                "display_name": _checkpoint_display_name(copied_config, problem_id),
                 "created_at": _now(),
                 "probhub_version": __version__,
                 "evidence": evidence,

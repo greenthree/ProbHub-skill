@@ -4,15 +4,24 @@ import os
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
 from probhub.cli import main as cli_main
-from probhub.datagen import GEN_MANIFEST_PATH, generate_problem_data, problem_recipes, recipe_coverage
+from probhub.datagen import (
+    GEN_MANIFEST_PATH,
+    _publish_generated_files,
+    _recover_generated_transactions,
+    generate_problem_data,
+    problem_config_identity,
+    problem_recipes,
+    recipe_coverage,
+)
 from probhub.errors import ProbHubError
-from probhub.linting import lint_workspace
+from probhub.linting import compute_source_hash, lint_workspace
 from probhub.workspace import load_problem, load_workspace
 
 
@@ -95,6 +104,101 @@ class RecipeParsingTests(unittest.TestCase):
             config = {"data": {"recipes": [{"case": "alpha", "manual": True}]}}
             _, uncovered = recipe_coverage(problem, config)
             self.assertEqual(uncovered, ["beta"])
+
+    def test_coverage_matches_recipe_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            secret = problem / "data/secret"
+            secret.mkdir(parents=True)
+            (secret / "Alpha.in").write_text("1\n", encoding="utf-8")
+            config = {"data": {"recipes": [{"case": "alpha", "manual": True}]}}
+            _, uncovered = recipe_coverage(problem, config)
+            self.assertEqual(uncovered, [])
+
+
+class DatagenTransactionTests(unittest.TestCase):
+    def make_published_files(self, root):
+        secret = root / "data/secret"
+        manifest = root / GEN_MANIFEST_PATH
+        secret.mkdir(parents=True)
+        manifest.parent.mkdir(parents=True)
+        finals = [secret / "gen01.in", secret / "gen01.ans", manifest]
+        for index, path in enumerate(finals):
+            path.write_bytes(f"old-{index}\n".encode("ascii"))
+        payloads = [
+            (finals[0], b"new-input\n"),
+            (finals[1], b"new-answer\n"),
+            (finals[2], b'{\n  "schema_version": 1\n}\n'),
+        ]
+        return finals, payloads
+
+    def test_each_replace_failure_rolls_back_every_published_file(self):
+        real_replace = os.replace
+        for fail_at in range(1, 7):
+            with self.subTest(fail_at=fail_at), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                finals, payloads = self.make_published_files(root)
+                before = {path: path.read_bytes() for path in finals}
+                calls = 0
+
+                def injected_replace(source, target):
+                    nonlocal calls
+                    calls += 1
+                    if calls == fail_at:
+                        raise OSError(f"injected replace failure {fail_at}")
+                    return real_replace(source, target)
+
+                with mock.patch("probhub.datagen.os.replace", side_effect=injected_replace):
+                    with self.assertRaises(ProbHubError) as raised:
+                        _publish_generated_files(root, payloads)
+                self.assertEqual(raised.exception.code, "gen_write_failed")
+                self.assertEqual({path: path.read_bytes() for path in finals}, before)
+                self.assertEqual(list(root.glob(".probhub-gen-publish-*")), [])
+
+    def test_manifest_stage_failure_changes_no_published_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            finals, payloads = self.make_published_files(root)
+            before = {path: path.read_bytes() for path in finals}
+            real_write_bytes = Path.write_bytes
+
+            def injected_write(path, payload):
+                if b'"schema_version"' in payload:
+                    raise OSError("injected manifest staging failure")
+                return real_write_bytes(path, payload)
+
+            with mock.patch.object(Path, "write_bytes", autospec=True, side_effect=injected_write):
+                with self.assertRaises(ProbHubError) as raised:
+                    _publish_generated_files(root, payloads)
+            self.assertEqual(raised.exception.code, "gen_write_failed")
+            self.assertEqual({path: path.read_bytes() for path in finals}, before)
+            self.assertEqual(list(root.glob(".probhub-gen-publish-*")), [])
+
+    def test_next_apply_recovers_interrupted_publish_journal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            final = root / "data/secret/gen01.in"
+            final.parent.mkdir(parents=True)
+            final.write_bytes(b"new partial\n")
+            transaction = root / ".probhub-gen-publish-interrupted"
+            transaction.mkdir()
+            (transaction / "backup-0").write_bytes(b"old complete\n")
+            (transaction / "journal.json").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "entries": [{
+                        "final": "data/secret/gen01.in",
+                        "backup": "backup-0",
+                        "existed": True,
+                    }],
+                }),
+                encoding="utf-8",
+            )
+
+            _recover_generated_transactions(root)
+
+            self.assertEqual(final.read_bytes(), b"old complete\n")
+            self.assertFalse(transaction.exists())
 
 
 class DatagenWorkspaceTests(unittest.TestCase):
@@ -243,6 +347,197 @@ class DatagenWorkspaceTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertEqual(result.get("code"), "build_busy")
 
+    def test_gen_apply_reloads_problem_config_after_acquiring_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.make_workspace(root)
+            set_recipes(problem, [
+                {"case": "random01", "manual": True},
+                {"case": "overflow01", "manual": True},
+            ])
+
+            @contextmanager
+            def edit_before_lock_yields(_root):
+                set_recipes(problem, [
+                    {"case": "random01", "manual": True},
+                ])
+                yield
+
+            with mock.patch(
+                "probhub.cli.workspace_build_lock",
+                side_effect=edit_before_lock_yields,
+            ):
+                code, result = run_cli([
+                    "--workspace", str(root), "--json", "gen", "A", "--apply",
+                ])
+
+            self.assertEqual(code, 0, result)
+            self.assertEqual(result["summary"]["manual"], 1)
+            manifest = json.loads((problem / GEN_MANIFEST_PATH).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["cases"], {})
+
+    def test_config_identity_fence_rejects_stale_and_midrun_config(self):
+        import probhub.datagen as datagen
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.make_workspace(root)
+            config_path = problem / "probhub.yaml"
+            original = config_path.read_bytes()
+            _, config = load_problem(root, {"id": "A", "directory": "A"})
+            expected = problem_config_identity(problem)
+            before_data = {
+                path.relative_to(problem).as_posix(): path.read_bytes()
+                for path in (problem / "data").rglob("*")
+                if path.is_file()
+            }
+
+            config_path.write_bytes(original + b"\n# concurrent edit\n")
+            with self.assertRaises(ProbHubError) as raised:
+                generate_problem_data(
+                    problem,
+                    config,
+                    apply_changes=True,
+                    expected_config_identity=expected,
+                )
+            self.assertEqual(raised.exception.code, "inputs_changed")
+            self.assertFalse((problem / GEN_MANIFEST_PATH).exists())
+
+            config_path.write_bytes(original)
+            _, config = load_problem(root, {"id": "A", "directory": "A"})
+            expected = problem_config_identity(problem)
+            real_merge = datagen._merged_manifest_cases
+
+            def edit_during_publish(*args, **kwargs):
+                merged = real_merge(*args, **kwargs)
+                config_path.write_bytes(original + b"\n# edit during gen\n")
+                return merged
+
+            with mock.patch("probhub.datagen._merged_manifest_cases", side_effect=edit_during_publish):
+                with self.assertRaises(ProbHubError) as raised:
+                    generate_problem_data(
+                        problem,
+                        config,
+                        apply_changes=True,
+                        expected_config_identity=expected,
+                    )
+            self.assertEqual(raised.exception.code, "inputs_changed")
+            self.assertFalse((problem / GEN_MANIFEST_PATH).exists())
+            self.assertEqual({
+                path.relative_to(problem).as_posix(): path.read_bytes()
+                for path in (problem / "data").rglob("*")
+                if path.is_file()
+            }, before_data)
+
+    def test_source_identity_fence_rejects_midrun_header_change(self):
+        import probhub.datagen as datagen
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.make_workspace(root)
+            _, config = load_problem(root, {"id": "A", "directory": "A"})
+            header = problem / "code/helper.hpp"
+            header.write_text("#pragma once\n", encoding="utf-8")
+            expected_config = problem_config_identity(problem)
+            expected_source = compute_source_hash(problem, config)
+            real_merge = datagen._merged_manifest_cases
+
+            def edit_source_during_publish(*args, **kwargs):
+                merged = real_merge(*args, **kwargs)
+                header.write_text("#pragma once\n#define CHANGED 1\n", encoding="utf-8")
+                return merged
+
+            with mock.patch(
+                "probhub.datagen._merged_manifest_cases",
+                side_effect=edit_source_during_publish,
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    generate_problem_data(
+                        problem,
+                        config,
+                        apply_changes=True,
+                        expected_config_identity=expected_config,
+                        expected_source_hash=expected_source,
+                    )
+            self.assertEqual(raised.exception.code, "inputs_changed")
+            self.assertFalse((problem / GEN_MANIFEST_PATH).exists())
+
+    def test_custom_checker_acceptance_and_failure_classification(self):
+        def fixture(root):
+            problem = root / "A"
+            (problem / "code").mkdir(parents=True)
+            for name in ("validator.cpp", "std.cpp", "checker.cpp", "gen.cpp"):
+                (problem / "code" / name).write_text("int main(){}\n", encoding="utf-8")
+            config = {
+                "schema_version": 1,
+                "id": "A",
+                "limits": {"time": 1, "memory": 256, "output": 4, "processes": 8},
+                "judge": {
+                    "type": "custom",
+                    "validator": "code/validator.cpp",
+                    "checker": "code/checker.cpp",
+                },
+                "solutions": {"accepted": ["code/std.cpp"]},
+                "generators": ["code/gen.cpp"],
+                "data": {
+                    "secret_dir": "data/secret",
+                    "recipes": [{"case": "gen01", "args": ["1"]}],
+                },
+            }
+            return problem, config
+
+        def prepare(_source, _build_dir, role):
+            return [role], None
+
+        def run(command, _input, *_args, **_kwargs):
+            stdout = b"1 1\n" if command[0].startswith("generator") else b""
+            if command[0] == "accepted":
+                stdout = b"2\n"
+            return {"status": "AC", "stdout": stdout, "stderr": b"", "message": ""}
+
+        outcomes = (
+            ({"status": "WA", "match": False, "message": "rejected", "stderr": b""}, "WA", None),
+            ({"status": "FAIL", "match": False, "message": "checker failed", "stderr": b""}, "FAIL", None),
+            ({
+                "status": "FAIL",
+                "execution_status": "TLE",
+                "match": False,
+                "message": "checker timed out",
+                "stderr": b"",
+            }, "FAIL", "TLE"),
+        )
+        for comparison, expected_status, execution_status in outcomes:
+            with self.subTest(comparison=comparison), tempfile.TemporaryDirectory() as temp:
+                problem, config = fixture(Path(temp))
+                with (
+                    mock.patch("probhub.datagen._prepare_program", side_effect=prepare),
+                    mock.patch("probhub.datagen._run", side_effect=run),
+                    mock.patch("probhub.datagen._compare_custom", return_value=comparison),
+                ):
+                    result = generate_problem_data(problem, config, apply_changes=True)
+                self.assertFalse(result["ok"])
+                failure = result["failures"][0]
+                self.assertEqual(failure["stage"], "checker")
+                self.assertEqual(failure["status"], expected_status)
+                self.assertEqual(failure.get("execution_status"), execution_status)
+                self.assertFalse((problem / "data/secret/gen01.in").exists())
+                self.assertFalse((problem / GEN_MANIFEST_PATH).exists())
+
+        with tempfile.TemporaryDirectory() as temp:
+            problem, config = fixture(Path(temp))
+            accepted = {"status": "AC", "match": True, "message": "", "stderr": b""}
+            with (
+                mock.patch("probhub.datagen._prepare_program", side_effect=prepare),
+                mock.patch("probhub.datagen._run", side_effect=run),
+                mock.patch("probhub.datagen._compare_custom", return_value=accepted) as checker,
+            ):
+                result = generate_problem_data(problem, config, apply_changes=True)
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["applied"])
+            self.assertEqual((problem / "data/secret/gen01.ans").read_bytes(), b"2\n")
+            self.assertTrue((problem / GEN_MANIFEST_PATH).is_file())
+            self.assertEqual(checker.call_args.args[3], b"2\n")
+
     def test_lint_reports_recipe_errors_and_coverage_warnings(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -350,6 +645,31 @@ class DatagenIntegrationTests(unittest.TestCase):
 
             code, judged = run_cli(["--workspace", str(root), "--json", "judge", "A"])
             self.assertEqual(code, 0, judged)
+
+    @unittest.skipIf(os.name == "nt", "case-insensitive file systems reuse the same path")
+    def test_apply_reuses_existing_case_insensitive_stem(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.make_workspace(root)
+            set_recipes(problem, [
+                {"case": "random01", "manual": True},
+                {"case": "overflow01", "manual": True},
+                {"case": "GEN01", "args": ["small", "1"]},
+            ])
+            lower_input = problem / "data/secret/gen01.in"
+            lower_answer = problem / "data/secret/gen01.ans"
+            lower_input.write_text("0 0\n", encoding="utf-8")
+            lower_answer.write_text("0\n", encoding="utf-8")
+
+            code, result = run_cli([
+                "--workspace", str(root), "--json", "gen", "A", "--apply",
+            ])
+
+            self.assertEqual(code, 0, result)
+            self.assertTrue(lower_input.is_file())
+            self.assertTrue(lower_answer.is_file())
+            self.assertFalse((problem / "data/secret/GEN01.in").exists())
+            self.assertFalse((problem / "data/secret/GEN01.ans").exists())
 
     def test_partial_case_apply_preserves_manifest_entries(self):
         with tempfile.TemporaryDirectory() as temp:
