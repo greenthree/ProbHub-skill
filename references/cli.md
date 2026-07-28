@@ -165,6 +165,7 @@ probhub lint [ID...]
 - 样例/隐藏数据目录。
 - `.in` 与 `.ans` 配对。
 - 源文件与数据哈希。
+- 最近一次完整 Judge 校准证据及 accepted/TLE 余量；缺失、过期或不足只产生结构化 warning，不使 lint 失败。
 
 示例：
 
@@ -188,6 +189,8 @@ probhub status [ID...]
 
 `status` 非 `current` 时返回非零退出码。
 
+每题结果还包含 `calibration.state`、`diagnostics` 与兼容字符串 `warnings`。校准证据缺失/过期、accepted 余量不足或 expected-TLE 探针不足不会改变正式构建状态；它们是交付体检信息，不是 Manifest stale 字段。
+
 Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以及所有题目实际生成 Typst metadata 的输入计算。其他题的题面、题面图片、样例、展示配置或题序变化可能改变当前题的页码、总页数或单题 PDF，因此会使当前题变为 `stale`；其他题仅修改不参与排版的 secret 数据不会使当前题过期。
 
 正式 Build Manifest 使用 schema v3。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`，并分别记录其 `sealed_revision_id`；缺失时显示对应的 `stale_fields`。旧 v1/v2 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
@@ -206,6 +209,7 @@ probhub judge [ID...] [--no-cache]
 4. 按 `judge.type` 使用标准比较、Checker 或 Interactor。
 5. 根据每个程序的结构化 `expected` 宿命验证状态、目标数据组与禁止状态；未配置时保持 accepted 全 AC、brute 不 WA 且至少 TLE/MLE、wrong 至少一个非 AC 的默认语义。
 6. 对普通程序、Checker、Validator、编译器和 Interactor 应用完整进程树、时间、内存、输出与进程数控制。
+7. 为每个解法汇总 `max_time`、最大用例、`time_limit_ratio` 和 headroom；对期望 TLE 的已命中用例执行延长时限校准探针，MLE/OLE 报告可证明的阈值下界。
 
 支持的评测类型：
 
@@ -266,6 +270,31 @@ limits:
 }
 ```
 
+每个 `summary` 事件新增 `calibration`：
+
+```json
+{
+  "schema_version": 1,
+  "max_time": 0.214321,
+  "max_time_case": "secret/max01",
+  "time_limit": 1.0,
+  "time_limit_ratio": 0.214321,
+  "headroom_factor": 4.6659,
+  "fresh_cases": 30,
+  "cached_cases": 0,
+  "accepted_check": {
+    "applicable": true,
+    "required_multiplier": 3.0,
+    "ok": true
+  },
+  "resource_kills": []
+}
+```
+
+期望 TLE 的 `resource_kills` 会记录用例、正式 TL、延长探针上限、观测比值、`exact|lower_bound|inferred|unavailable` 证据类型和进程结果。MLE/OLE 的 `lower_bound` 分别来自明确触限的受控进程树峰值内存与截断前 stdout+stderr 总字节数；接近 ML 后异常退出但未观测到明确 `memory_limit` 的结果只标为 `inferred`。`expected.status` 列表是备选结果，只有实际发生的资源状态才产生余量诊断。完整成功的 Judge 会在单题证据锁内原子写入 `<problem>/.probhub/judge-evidence-v1.json`；失败、取消或外层超时不覆盖上一份成功证据。
+
+所有校准 JSON 都包含 `target_guarantee: false`。本机测量不是正式评测承诺：Windows 与 Linux/DOMjudge 的进程启动、链接、调度、计时和内存口径不同，正式限制必须在目标 Linux 评测机重新校准。
+
 ### 缓存
 
 默认模式 `normal` 读取并更新：
@@ -286,7 +315,7 @@ limits:
 probhub judge L01 --no-cache
 ```
 
-缓存事件包含 `mode`、`compile_hits/misses`、`validator_hits/misses`、`case_hits/misses`。进程树、OLE 或资源限制语义变化会提升缓存 Schema，防止旧结果绕过新策略。
+缓存事件包含 `mode`、`compile_hits/misses`、`validator_hits/misses`、`case_hits/misses` 和 `probe_hits/misses`。进程树、OLE、校准探针或资源限制语义变化会提升缓存 Schema，防止旧结果绕过新策略。
 
 ## 10. `stress`
 

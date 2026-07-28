@@ -310,6 +310,7 @@ class ProcessControlTests(unittest.TestCase):
                 output_limit_bytes=1024,
             )
             self.assertEqual(result["reason"], "output_limit", result)
+            self.assertGreater(result["output_bytes"], 1024)
             self.assertLessEqual((root / "stdout.txt").stat().st_size, 1024)
 
     def test_managed_quick_process_completes(self):

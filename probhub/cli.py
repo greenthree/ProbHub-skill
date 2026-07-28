@@ -76,6 +76,9 @@ def _ensure_local_gitignore(root):
         "**/.probhub/generation.lock",
         "**/.probhub/generations/",
         "**/.probhub/generation-tmp/",
+        "**/.probhub/judge-evidence.lock",
+        "**/.probhub/judge-evidence-v1.json",
+        "**/.probhub/judge-evidence-v1.json.*.tmp",
         "**/.probhub/sandbox-cache-v1.json",
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",
@@ -228,6 +231,7 @@ def command_status(args):
 def command_judge(args):
     root, workspace = workspace_context(args)
     ensure_no_pending_transactions(root, workspace)
+    _ensure_local_gitignore(root)
     results = {}
     for entry in select_entries(workspace, args.problem):
         problem_dir, _ = load_problem(root, entry)
@@ -311,6 +315,10 @@ def command_seal(args):
             f"cannot seal {entry['id']}: sandbox failed: {judge.get('final')}",
             code="seal_judge_failed",
         )
+    # Judge publishes the successful local calibration evidence. Refresh the
+    # read-only lint view so the sealed checkpoint does not preserve the
+    # pre-judge "evidence missing" warning.
+    lint = lint_workspace(root, workspace, [entry])
 
     stress = None
     if config.get("stress"):
@@ -347,6 +355,8 @@ def command_seal(args):
             "returncode": judge["returncode"],
             "final": judge["final"],
             "cache": judge.get("cache", {}),
+            "summaries": judge.get("summaries", []),
+            "calibration": judge.get("calibration"),
         },
         "stress": stress,
     }
@@ -413,6 +423,7 @@ def command_verify(args):
 
 def command_build(args):
     root, workspace = workspace_context(args)
+    _ensure_local_gitignore(root)
     entries = select_entries(workspace, args.problem)
     return build_workspace(
         root,

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +118,18 @@ class SandboxCacheTests(unittest.TestCase):
             cache.set("case", "key", {"status": "AC"})
             cache.save()
             self.assertFalse((problem / ".probhub" / MODULE.CACHE_FILENAME).exists())
+
+    def test_previous_cache_schema_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "A"
+            cache_path = problem / ".probhub" / MODULE.CACHE_FILENAME
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text(
+                json.dumps({"schema_version": 2, "case": {"old": {"status": "OLE"}}}),
+                encoding="utf-8",
+            )
+            loaded = MODULE.SandboxCache(problem)
+            self.assertIsNone(loaded.get("case", "old"))
 
 
 if __name__ == "__main__":

@@ -600,6 +600,7 @@ def wait_managed(
     last_resource_sample = started
     returncode = None
     elapsed = 0.0
+    output_bytes = 0
     try:
         while managed.proc.poll() is None:
             now = time.perf_counter()
@@ -635,9 +636,10 @@ def wait_managed(
         elapsed = time.perf_counter() - started
         # A short process can exit before the first polling iteration. Recheck
         # file size and deadline after exit so fast output floods cannot bypass OLE.
+        output_bytes = _files_size(output_paths)
         if cancellation_requested():
             reason, message = "cancelled", "execution cancelled"
-        elif output_limit_bytes is not None and _files_size(output_paths) > int(output_limit_bytes):
+        elif output_limit_bytes is not None and output_bytes > int(output_limit_bytes):
             reason, message = "output_limit", "output limit exceeded"
         elif elapsed > float(timeout) and reason == "completed":
             reason, message = "time_limit", "time limit exceeded"
@@ -657,6 +659,7 @@ def wait_managed(
         "memory": managed.peak_memory_mb,
         "memory_enforced": managed.memory_enforced,
         "process_limit_enforced": managed.process_limit_enforced,
+        "output_bytes": output_bytes,
     }
 
 
