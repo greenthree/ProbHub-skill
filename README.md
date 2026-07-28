@@ -17,6 +17,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 - **本机限制校准**：Judge 汇总每个解法的最大用时、TL 占比和 TLE/MLE/OLE 击杀余量；lint/status 读取最近一次完整成功的本地证据，按可配置阈值提示余量不足，并明确本机结果不等于目标 Linux/DOMjudge 承诺。
 - **题面与样例体检**：lint 确定性检查题面标题、章节、样例来源和问题内路径，并以非阻断报告对照题面范围与 Validator 字面量；`sample-check` 只运行样例和首个 accepted，严格确认 `.ans` 与当前标程输出一致。
 - **双实现互证与运行域**：accepted 可记录算法/关键实现独立性；较慢参考解可通过 `run_on` 只覆盖可承受的数据组，同时保留样例必跑、期望覆盖栅栏和高难度单标程 warning。
+- **整场只读体检**：`probhub report` 汇总题号、难度、标签、测试规模、数据组配比、recipe 覆盖、TL 余量和错解击杀矩阵；支持终端、Markdown 与 JSON，不写正式工作区路径。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 出题工作台**：提供响应式明暗双主题控制台，支持题目导航与排序、Markdown 和题面图片预览、题面/样例/封面编辑、revision 冲突保护、隔离 PDF 编译预览及临时代码沙箱评测，正式分发统一调用 Core。
 - **可重复构建 Core**：Workspace Schema v1、不可变 checkpoint/generation、sealed revision 正式发布门禁、Manifest v3、过期检测和统一 `probhub` CLI。
@@ -130,6 +131,8 @@ probhub doctor
 probhub new L05 --name "新题"
 probhub lint L01
 probhub status
+probhub report                    # 终端整场体检
+probhub report --format markdown  # Markdown 报告
 probhub gen L01              # 只读计划
 probhub gen L01 --apply      # 事务化生成数据与答案
 probhub sample-check L01     # 只运行样例与首个 accepted

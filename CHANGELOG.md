@@ -13,6 +13,7 @@
 - solution 结构化条目支持本地 Judge `run_on` 运行域：多组并集、sample 隐式执行、首 accepted 全量栅栏、期望覆盖校验，并在结果/evidence 中公开执行与跳过用例；stress 与 DOMjudge 包语义不变。
 - accepted 可声明 `independence.from/basis/note` 供人工复核，Core 阻断同路径、同字节和直接 include 等确定反证；高难度单 accepted 且无额外全域 AC 参考时给结构化 warning。`new` 的 std2 改为真正不同的按位进位加法实现。
 - 本地校准证据升级为 `judge-evidence-v2.json`：记录并验证每个解法的实际运行域，状态判断按 schema、source/data、平台、策略与结构分层；旧 v1 文件继续忽略但不再读取。
+- 新增只读 `probhub report`：按正式题序汇总难度、标签、测试规模、数据组配比、recipe 覆盖、TL headroom 与错解击杀矩阵；支持终端、Markdown 和 JSON。recipe 的随机/定向/近上界判断明确标为启发式，报告不运行外部工具或写入工作区。
 
 ## [0.4.0] - 2026-07-27
 
