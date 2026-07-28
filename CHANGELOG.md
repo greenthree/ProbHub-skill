@@ -4,7 +4,9 @@
 
 ## [Unreleased]
 
-0.5.0 校准与题面体检开发线。
+## [0.5.0] - 2026-07-28
+
+校准与题面体检版本。
 
 - Judge 生成本机资源校准 evidence，汇总 accepted 的 TL 余量和期望 TLE/MLE/OLE 的击杀证据；lint/status 以 `current/missing/stale/invalid` 报告，并固定声明本地测量不等于目标 Linux/DOMjudge 承诺。
 - 新增只读 `sample-check`：只运行样例与首个 accepted，按换行归一后的严格字节比较核对 `.ans`；Custom Checker 不能掩盖样例答案不一致，完整 Judge/build/seal 复用同一门禁。
