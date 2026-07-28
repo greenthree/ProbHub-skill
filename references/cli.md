@@ -197,7 +197,28 @@ Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以
 
 正式 Build Manifest 使用 schema v3。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`，并分别记录其 `sealed_revision_id`；缺失时显示对应的 `stale_fields`。旧 v1/v2 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
 
-## 8.1 `sample-check`
+## 8.1 `report`
+
+```powershell
+probhub report [ID...]
+probhub report [ID...] --format markdown
+probhub --json report [ID...]
+```
+
+生成只读工作区体检，默认输出适合终端阅读的文本；`--format markdown` 输出 Markdown；全局 `--json` 输出 `report schema v1` 结构化文档并优先于文本格式。报告按正式题序汇总：
+
+- 题号、稳定 ID、题名、难度与标签；
+- sample/secret 数量、输入/答案字节规模和最大输入；
+- `data.groups` 的角色、targets、命中用例数和 secret 占比；分组可重叠，因此占比之和不要求为 100%；
+- `data.recipes` 覆盖率，以及无 recipe、随机型比例过高、缺少定向 recipe、缺少近上界信号等结构化 warning；
+- 最近一次完整成功 Judge evidence 中 accepted 的 TL headroom；本机测量固定 `target_guarantee: false`；
+- 按错解 × 数据组展示声明目标和当前 evidence 的击杀矩阵：`killed`、`missed`、`unknown`、`not-targeted`。
+
+recipe 的随机/定向/近上界分类是显式标注的启发式分析：读取 recipe case/args、数据组 role/targets，以及与题面直接上界相等的参数。它用于提醒人工复核，不证明生成器真的覆盖了算法边界。
+
+`report` 不运行编译器、Judge、Generator 或 Typst，也不创建 `.gitignore`、evidence、PDF、ZIP、metadata、Manifest 或报告文件。存在待恢复事务时返回 `recovery_required`；lint 错误使退出码非零，warning 不改变退出码。
+
+## 8.2 `sample-check`
 
 ```powershell
 probhub sample-check [ID...] [--no-cache]

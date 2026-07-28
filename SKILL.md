@@ -89,6 +89,7 @@ probhub build
 | `gen <ID>` | 按 `data.recipes` 配方生成/校验 secret 数据；默认 plan 只报告，`--apply` 才写入，失败零写入 |
 | `lint [ID...]` | 检查规范源文件、代码路径和数据配对 |
 | `status [ID...]` | 报告 `current`、`stale`、`never-built` |
+| `report [ID...]` | 只读汇总难度、数据画像、recipe、TL 余量和错解击杀矩阵；`--format markdown` 输出 Markdown |
 | `sample-check [ID...]` | 只运行样例与首个 accepted，严格核对 `.ans`；不发布 Judge 校准 evidence |
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
 | `stress ID...` | 反复生成小数据，对拍 accepted 与 brute，保存首个可重放反例；`--against <解法>` 反向找刀，`--fixate <case>` 把命中一步固化为 secret 数据 + 配方 + 定向数据组 |

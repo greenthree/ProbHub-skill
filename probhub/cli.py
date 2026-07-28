@@ -26,6 +26,7 @@ from .linting import (
 )
 from .datagen import generate_problem_data, problem_config_identity
 from .package_tools import verify_package
+from .reporting import build_workspace_report, render_workspace_report
 from .scaffold import JUDGE_TYPES, scaffold_config, scaffold_files
 from .stressing import stress_problem
 from .typesetting import compile_collection, extract_problem_pdfs
@@ -228,6 +229,17 @@ def command_status(args):
             collection_hash=collection_hash,
         )
     return {"ok": all(item["state"] == "current" for item in result.values()), "problems": result}
+
+
+def command_report(args):
+    root, workspace = workspace_context(args)
+    ensure_no_pending_transactions(root, workspace)
+    entries = select_entries(workspace, args.problem)
+    return build_workspace_report(root, workspace, entries)
+
+
+def render_report_result(result, args):
+    return render_workspace_report(result, args.format)
 
 
 def command_judge(args):
@@ -484,6 +496,11 @@ def build_parser():
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(handler=command_doctor)
 
+    report = sub.add_parser("report")
+    report.add_argument("problem", nargs="*")
+    report.add_argument("--format", choices=("text", "markdown"), default="text")
+    report.set_defaults(handler=command_report, renderer=render_report_result)
+
     for name, handler in (("lint", command_lint), ("status", command_status), ("judge", command_judge), ("sample-check", command_sample_check), ("typeset", command_typeset), ("package", command_package), ("build", command_build)):
         item = sub.add_parser(name)
         item.add_argument("problem", nargs="*")
@@ -535,7 +552,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         result = args.handler(args)
-        emit(result, args.json_output)
+        renderer = getattr(args, "renderer", None)
+        if renderer is not None and not args.json_output:
+            print(renderer(result, args), end="")
+        else:
+            emit(result, args.json_output)
         return 0 if result.get("ok", True) else 1
     except ProbHubError as exc:
         result = {"ok": False, "error": str(exc)}
