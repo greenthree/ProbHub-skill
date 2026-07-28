@@ -37,6 +37,11 @@ __pycache__/
 # Local ProbHub stress counterexamples
 **/.probhub/stress/
 
+# Local judge calibration evidence
+**/.probhub/judge-evidence-v1.json
+**/.probhub/judge-evidence-v1.json.*.tmp
+**/.probhub/judge-evidence.lock
+
 # Local WebUI submission workspaces
 **/.probhub/submissions/
 

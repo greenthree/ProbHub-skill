@@ -4,6 +4,7 @@ import math
 import re
 from pathlib import Path
 
+from .calibration import evaluate_calibration, validate_calibration_config
 from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
@@ -200,6 +201,7 @@ def lint_problem(root, workspace, entry):
         errors.append("limits.output must be a positive integer in MB")
     if isinstance(process_limit, bool) or not isinstance(process_limit, int) or process_limit <= 0:
         errors.append("limits.processes must be a positive integer")
+    errors.extend(validate_calibration_config(config))
     source = problem_dir / ((config.get("statement") or {}).get("source", "problem.md"))
     try:
         parsed = parse_statement(source)
@@ -482,7 +484,25 @@ def lint_problem(root, workspace, entry):
                     f"secret data has no generation recipes "
                     f"({len(uncovered)} case(s) not reproducible)"
                 )
-    return {"id": entry["id"], "ok": not errors, "errors": errors, "warnings": warnings, "source_hash": compute_source_hash(problem_dir, config), "data_hash": compute_data_hash(problem_dir, config)}
+    source_hash = compute_source_hash(problem_dir, config)
+    data_hash = compute_data_hash(problem_dir, config)
+    calibration = evaluate_calibration(
+        problem_dir,
+        config,
+        source_hash,
+        data_hash,
+    )
+    warnings.extend(calibration["warnings"])
+    return {
+        "id": entry["id"],
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "diagnostics": calibration["diagnostics"],
+        "calibration": calibration,
+        "source_hash": source_hash,
+        "data_hash": data_hash,
+    }
 
 
 def lint_workspace(root, workspace, selected=None):
@@ -578,10 +598,19 @@ def problem_status(
             else collection_hash
         )
     if not manifest:
+        calibration = evaluate_calibration(
+            problem_dir,
+            config,
+            current["source_hash"],
+            current["data_hash"],
+        )
         return {
             "state": "never-built",
             **({"manifest_error": manifest_error} if manifest_error else {}),
             **current,
+            "warnings": calibration["warnings"],
+            "diagnostics": calibration["diagnostics"],
+            "calibration": calibration,
         }
     stale = []
     if manifest.get("schema_version") != BUILD_MANIFEST_SCHEMA_VERSION:
@@ -594,4 +623,18 @@ def problem_status(
     ):
         stale.append("sealed_revision_id")
     stale.extend(key for key, value in current.items() if manifest.get(key) != value)
-    return {"state": "stale" if stale else "current", "stale_fields": stale, **current, "manifest": manifest}
+    calibration = evaluate_calibration(
+        problem_dir,
+        config,
+        current["source_hash"],
+        current["data_hash"],
+    )
+    return {
+        "state": "stale" if stale else "current",
+        "stale_fields": stale,
+        **current,
+        "manifest": manifest,
+        "warnings": calibration["warnings"],
+        "diagnostics": calibration["diagnostics"],
+        "calibration": calibration,
+    }

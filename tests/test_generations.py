@@ -199,18 +199,18 @@ class GenerationTests(unittest.TestCase):
             data_hash = compute_data_hash(problem_dir, config)
             copy_started = threading.Event()
             continue_copy = threading.Event()
-            real_copyfile = shutil.copyfile
+            real_copytree = shutil.copytree
 
-            def delayed_copyfile(source, destination, *args, **kwargs):
+            def delayed_copytree(source, destination, *args, **kwargs):
                 if not copy_started.is_set():
                     copy_started.set()
                     self.assertTrue(continue_copy.wait(timeout=5))
-                return real_copyfile(source, destination, *args, **kwargs)
+                return real_copytree(source, destination, *args, **kwargs)
 
             with (
                 patch(
-                    "probhub.generations.shutil.copyfile",
-                    side_effect=delayed_copyfile,
+                    "probhub.generations.shutil.copytree",
+                    side_effect=delayed_copytree,
                 ),
                 ThreadPoolExecutor(max_workers=1) as executor,
             ):

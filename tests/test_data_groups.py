@@ -199,9 +199,18 @@ class SandboxUiEventTests(unittest.TestCase):
             "first_expected_match": {"case": "secret/overflow1", "status": "WA"},
         }
         self.ui._apply_sandbox_event(result, expectation)
+        self.ui._apply_sandbox_event(result, {
+            "type": "summary",
+            "kind": "wrong",
+            "program": "code/wrong.cpp",
+            "stats": {"WA": 1},
+            "expectation": expectation,
+            "calibration": {"max_time": 0.01, "time_limit_ratio": 0.01},
+        })
         self.assertEqual(result["groups"][0]["name"], "overflow")
         self.assertEqual(result["cases"][0]["groups"], ["overflow"])
         self.assertTrue(result["expectations"]["code/wrong.cpp"]["ok"])
+        self.assertEqual(result["summaries"]["code/wrong.cpp"]["calibration"]["max_time"], 0.01)
         self.assertIn("expectation:PASS", self.ui._sandbox_log_line(expectation))
 
 

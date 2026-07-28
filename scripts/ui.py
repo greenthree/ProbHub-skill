@@ -2568,6 +2568,10 @@ def _apply_sandbox_event(result, event):
             "judge_type": event.get("judge_type", "standard"),
             "idle_limit": event.get("idle_limit"),
             "transcript_limit": event.get("transcript_limit"),
+            "platform": event.get("platform"),
+            "machine": event.get("machine"),
+            "target_guarantee": event.get("target_guarantee", False),
+            "measurement_note": event.get("measurement_note"),
         }
     elif typ == "groups":
         result["groups"] = event.get("groups") or []
@@ -2601,6 +2605,8 @@ def _apply_sandbox_event(result, event):
             "message": event.get("message", ""),
             "timeout_kind": event.get("timeout_kind"),
             "transcript_truncated": bool(event.get("transcript_truncated")),
+            "output_bytes": event.get("output_bytes"),
+            "termination_reason": event.get("termination_reason"),
             "cached": bool(event.get("cached")),
         })
     elif typ == "transcript":
@@ -2619,6 +2625,7 @@ def _apply_sandbox_event(result, event):
             "program": program,
             "stats": event.get("stats", {}),
             "expectation": event.get("expectation") or {},
+            "calibration": event.get("calibration") or {},
         }
     elif typ == "expectation":
         program = event.get("program") or f"{event.get('kind', 'unknown')}-expectation"

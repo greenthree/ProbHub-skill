@@ -14,6 +14,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 - **严谨数据闭环**：`probhub gen` 按 recipe 复现 secret 数据和答案；数据逻辑分组、结构化宿命与 Checker 复核共同保证生成结果可追踪、可验证。
 - **可复现差分测试**：`probhub stress` 按 seed 对拍 accepted 与 brute，也可用 `--against` 给指定错解找 killer，并把反例一键固化为分组数据与生成配方。
 - **跨平台资源控制**：共享 `probhub/process_control.py` 为普通程序、Checker、Validator、编译器、Interactor 和 stress 提供完整进程树清理、时间/内存/输出/进程数限制，并报告 TLE/MLE/OLE/RE/WA/AC。
+- **本机限制校准**：Judge 汇总每个解法的最大用时、TL 占比和 TLE/MLE/OLE 击杀余量；lint/status 读取最近一次完整成功的本地证据，按可配置阈值提示余量不足，并明确本机结果不等于目标 Linux/DOMjudge 承诺。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 出题工作台**：提供响应式明暗双主题控制台，支持题目导航与排序、Markdown 和题面图片预览、题面/样例/封面编辑、revision 冲突保护、隔离 PDF 编译预览及临时代码沙箱评测，正式分发统一调用 Core。
 - **可重复构建 Core**：Workspace Schema v1、不可变 checkpoint/generation、sealed revision 正式发布门禁、Manifest v3、过期检测和统一 `probhub` CLI。
@@ -242,6 +243,9 @@ python scripts/local_judge.py <problem_dir> --jsonl
 - 每个测试点的时间、内存、输出和进程数状态，以及 Checker/Interactor 判定信息；选手输出超过限制时报告 `OLE`。
 - 普通程序、Checker、Validator、编译器、Interactor 与 stress 统一使用完整进程树控制；即使父进程正常退出，残留后代也会被清理。
 - `data.groups` 与 `solutions.*[].expected` 定义的数据组击杀矩阵、目标/禁止状态和首个相关用例；详见 `references/data-groups-expectations.md`。
+- 每个解法的 `max_time`、最大用例、TL 占比和资源击杀余量。默认建议 accepted 满足 `max_time × 3 <= TL`；期望 TLE 的目标用例通过延长探针证明至少 `1.5 × TL` 的本机运行下界。
+
+完整成功的 Judge 会原子更新本地忽略文件 `<problem>/.probhub/judge-evidence-v1.json`。失败、取消或超时保留上一份成功证据；lint/status 只使用与当前 source/data hash、平台和测量策略一致的 evidence。Windows 与 Linux/DOMjudge 的启动、调度、计时和内存口径不同，正式限制仍需在目标 Linux 评测环境重新校准。
 
 ### 沙箱增量缓存
 

@@ -20,6 +20,11 @@ if PACKAGE_ROOT in sys.path:
     sys.path.remove(PACKAGE_ROOT)
 sys.path.insert(0, PACKAGE_ROOT)
 
+from probhub.calibration import (
+    MEASUREMENT_NOTE,
+    SANDBOX_CACHE_SCHEMA_VERSION,
+    calibration_policy,
+)
 from probhub.output_compare import compare_standard_output, normalize_standard_output
 from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
@@ -39,9 +44,9 @@ DEFAULT_MEMORY_LIMIT = 256
 DEFAULT_OUTPUT_LIMIT = 64
 PROTOCOL_NAME = "probhub.local_judge"
 PROTOCOL_VERSION = 1
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = SANDBOX_CACHE_SCHEMA_VERSION
 CACHE_FILENAME = "sandbox-cache-v1.json"
-CACHE_LIMITS = {"validator": 4000, "case": 12000}
+CACHE_LIMITS = {"validator": 4000, "case": 12000, "probe": 2000}
 _COMPILER_IDENTITY = None
 _FILE_DIGEST_CACHE = {}
 
@@ -181,6 +186,30 @@ def testcase_cache_key(
     )
 
 
+def calibration_probe_cache_key(
+    program_fingerprint,
+    in_file,
+    time_limit,
+    memory_limit,
+    output_limit,
+    process_limit,
+    probe_factor,
+):
+    return _hash_parts(
+        CACHE_SCHEMA_VERSION,
+        "calibration-probe",
+        platform.system(),
+        platform.machine(),
+        program_fingerprint,
+        _file_digest(in_file),
+        f"{float(time_limit):.9g}",
+        int(memory_limit),
+        int(output_limit),
+        int(process_limit),
+        f"{float(probe_factor):.9g}",
+    )
+
+
 class SandboxCache:
     def __init__(self, prob_dir, enabled=True, read_enabled=None):
         self.enabled = enabled
@@ -191,6 +220,7 @@ class SandboxCache:
             "compile": {},
             "validator": {},
             "case": {},
+            "probe": {},
         }
         self.dirty = False
         self.stats = {
@@ -203,6 +233,8 @@ class SandboxCache:
             "validator_misses": 0,
             "case_hits": 0,
             "case_misses": 0,
+            "probe_hits": 0,
+            "probe_misses": 0,
         }
         if self.read_enabled:
             self._load()
@@ -213,7 +245,7 @@ class SandboxCache:
                 loaded = json.load(stream)
             if loaded.get("schema_version") != CACHE_SCHEMA_VERSION:
                 return
-            for section in ("compile", "validator", "case"):
+            for section in ("compile", "validator", "case", "probe"):
                 if isinstance(loaded.get(section), dict):
                     self.data[section] = loaded[section]
         except (OSError, ValueError, TypeError):
@@ -657,23 +689,29 @@ def run_program_to_file(
             stderr = open(stderr_path, "r", encoding="utf-8", errors="replace").read().strip()
         except OSError:
             stderr = ""
+        details = {
+            "output_bytes": int(result.get("output_bytes") or 0),
+            "termination_reason": result.get("reason"),
+        }
         reason = result["reason"]
         if reason == "time_limit":
-            return "TLE", result["time"], result["memory"], result["memory_enforced"], result["message"]
+            return "TLE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
         if reason == "output_limit":
-            return "OLE", result["time"], result["memory"], result["memory_enforced"], result["message"]
+            return "OLE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
         if reason == "memory_limit":
-            return "MLE", result["time"], result["memory"], result["memory_enforced"], result["message"]
+            return "MLE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
         if reason == "process_limit":
-            return "RE", result["time"], result["memory"], result["memory_enforced"], result["message"]
+            return "RE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
         if result["returncode"] != 0:
             status = _failed_status(
                 result["returncode"], stderr, result["memory_enforced"], result["memory"], memory_limit
             )
-            return status, result["time"], result["memory"], result["memory_enforced"], stderr
-        return "AC", result["time"], result["memory"], result["memory_enforced"], ""
+            if status == "MLE" and result.get("reason") != "memory_limit":
+                details["termination_reason"] = "inferred_memory_limit"
+            return status, result["time"], result["memory"], result["memory_enforced"], stderr, details
+        return "AC", result["time"], result["memory"], result["memory_enforced"], "", details
     except OSError as exc:
-        return "RE", 0.0, None, False, str(exc)
+        return "RE", 0.0, None, False, str(exc), {"output_bytes": 0}
     finally:
         _remove_file_with_retries(stderr_path)
 
@@ -684,6 +722,110 @@ def _temporary_output_path(bin_path):
     )
     os.close(descriptor)
     return path
+
+
+def _probe_status(result, memory_limit):
+    reason = result.get("reason")
+    if reason == "time_limit":
+        return "TLE"
+    if reason == "output_limit":
+        return "OLE"
+    if reason == "memory_limit":
+        return "MLE"
+    if reason == "process_limit":
+        return "RE"
+    if result.get("returncode") != 0:
+        return _failed_status(
+            result.get("returncode"),
+            "",
+            bool(result.get("memory_enforced")),
+            result.get("memory"),
+            memory_limit,
+        )
+    return "completed"
+
+
+def probe_tle_margin(
+    bin_path,
+    in_file,
+    case_name,
+    program_fingerprint,
+    time_limit,
+    memory_limit,
+    output_limit,
+    process_limit,
+    probe_factor,
+    cache=None,
+):
+    """Measure one expected-TLE case beyond the official TL without changing verdicts."""
+    probe_factor = max(float(probe_factor), 1.0)
+    probe_limit = float(time_limit) * probe_factor
+    key = calibration_probe_cache_key(
+        program_fingerprint,
+        in_file,
+        time_limit,
+        memory_limit,
+        output_limit,
+        process_limit,
+        probe_factor,
+    )
+    cached_result = cache.get("probe", key) if cache is not None else None
+    if cached_result is not None:
+        result = dict(cached_result)
+        result["cached"] = True
+        return result
+
+    output_file = _temporary_output_path(bin_path)
+    stderr_path = output_file + ".stderr"
+    try:
+        try:
+            run = run_managed_to_files(
+                [bin_path],
+                input_path=in_file,
+                stdout_path=output_file,
+                stderr_path=stderr_path,
+                timeout=probe_limit,
+                memory_limit_mb=memory_limit,
+                output_limit_bytes=int(output_limit * 1024 * 1024),
+                process_limit=process_limit,
+            )
+        except OSError as exc:
+            result = {
+                "status": "TLE",
+                "case": case_name,
+                "limit": float(time_limit),
+                "observed": None,
+                "limit_ratio": None,
+                "probe_limit": probe_limit,
+                "process_status": "RE",
+                "evidence_kind": "unavailable",
+                "censored": False,
+                "supported": True,
+                "message": str(exc),
+            }
+        else:
+            observed = float(run.get("time") or 0.0)
+            result = {
+                "status": "TLE",
+                "case": case_name,
+                "limit": float(time_limit),
+                "observed": round(observed, 6),
+                "limit_ratio": round(observed / float(time_limit), 6),
+                "probe_limit": probe_limit,
+                "process_status": _probe_status(run, memory_limit),
+                "evidence_kind": (
+                    "lower_bound" if run.get("reason") == "time_limit" else "exact"
+                ),
+                "censored": run.get("reason") == "time_limit",
+                "supported": True,
+                "message": run.get("message", ""),
+            }
+        if cache is not None:
+            cache.set("probe", key, result)
+        return {**result, "cached": False}
+    finally:
+        _remove_file_with_retries(output_file)
+        _remove_file_with_retries(stderr_path)
 
 
 def run_standard_testcase(
@@ -697,17 +839,17 @@ def run_standard_testcase(
 ):
     output_file = _temporary_output_path(bin_path)
     try:
-        status, elapsed, memory, memory_enforced, message = run_program_to_file(
+        status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
             bin_path, in_file, output_file, time_limit, memory_limit, output_limit, process_limit
         )
         if status != "AC":
-            return status, elapsed, memory, memory_enforced, message
+            return status, elapsed, memory, memory_enforced, message, details
         with open(ans_file, "r", encoding="utf-8", errors="replace") as answer, open(
             output_file, "r", encoding="utf-8", errors="replace"
         ) as actual:
             matched, message = compare_standard_output(answer.read(), actual.read())
         status = "AC" if matched else "WA"
-        return status, elapsed, memory, memory_enforced, message
+        return status, elapsed, memory, memory_enforced, message, details
     finally:
         for _ in range(20):
             try:
@@ -759,11 +901,11 @@ def run_custom_testcase(
     output_file = _temporary_output_path(bin_path)
     feedback_dir = tempfile.mkdtemp(prefix=".probhub-feedback-", dir=os.path.dirname(bin_path))
     try:
-        status, elapsed, memory, memory_enforced, message = run_program_to_file(
+        status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
             bin_path, in_file, output_file, time_limit, memory_limit, output_limit, process_limit
         )
         if status != "AC":
-            return status, elapsed, memory, memory_enforced, message
+            return status, elapsed, memory, memory_enforced, message, details
         checker_stdout = output_file + ".checker.out"
         checker_stderr = output_file + ".checker.stderr"
         try:
@@ -784,13 +926,13 @@ def run_custom_testcase(
             checker_message = _feedback_message(feedback_dir, stderr)
             if checker["reason"] != "completed":
                 detail = checker["message"] or checker["reason"].replace("_", " ")
-                return "FAIL", elapsed, memory, memory_enforced, f"checker {detail}"
+                return "FAIL", elapsed, memory, memory_enforced, f"checker {detail}", details
             checker_status, checker_message = _checker_result(
                 checker["returncode"], checker_message
             )
-            return checker_status, elapsed, memory, memory_enforced, checker_message
+            return checker_status, elapsed, memory, memory_enforced, checker_message, details
         except OSError as exc:
-            return "FAIL", elapsed, memory, memory_enforced, f"checker failed to start: {exc}"
+            return "FAIL", elapsed, memory, memory_enforced, f"checker failed to start: {exc}", details
         finally:
             for file_name in (checker_stdout, checker_stderr):
                 _remove_file_with_retries(file_name)
@@ -837,11 +979,36 @@ def _pump_interactive_stream(source, destination, direction, transcript, activit
             pass
 
 
-def _interactive_result(status, elapsed, memory, memory_enforced, message, transcript, timeout_kind=None):
+def _interactive_solution_output_bytes(traffic, solution_stderr):
+    try:
+        stderr_size = os.path.getsize(solution_stderr)
+    except OSError:
+        stderr_size = 0
+    return int(traffic.get("solution_to_interactor", 0) + stderr_size)
+
+
+def _interactive_result(
+    status,
+    elapsed,
+    memory,
+    memory_enforced,
+    message,
+    transcript,
+    timeout_kind=None,
+    traffic=None,
+    solution_stderr=None,
+    termination_reason=None,
+):
     details = {
         "transcript": transcript["entries"],
         "transcript_truncated": transcript["truncated"],
     }
+    if traffic is not None and solution_stderr is not None:
+        details["output_bytes"] = _interactive_solution_output_bytes(
+            traffic, solution_stderr
+        )
+    if termination_reason:
+        details["termination_reason"] = termination_reason
     if timeout_kind:
         details["timeout_kind"] = timeout_kind
     return status, elapsed, memory, memory_enforced, message, details
@@ -849,10 +1016,9 @@ def _interactive_result(status, elapsed, memory, memory_enforced, message, trans
 
 def _interactive_output_status(traffic, solution_stderr, interactor_stderr):
     """Classify combined protocol/stderr output after every lifecycle edge."""
-    try:
-        solution_stderr_size = os.path.getsize(solution_stderr)
-    except OSError:
-        solution_stderr_size = 0
+    solution_stderr_size = _interactive_solution_output_bytes(
+        traffic, solution_stderr
+    ) - traffic.get("solution_to_interactor", 0)
     try:
         interactor_stderr_size = os.path.getsize(interactor_stderr)
     except OSError:
@@ -1001,6 +1167,13 @@ def run_interactive_testcase(
                         memory_enforced,
                         resource_message,
                         transcript,
+                        traffic=traffic,
+                        solution_stderr=solution_stderr,
+                        termination_reason=(
+                            "memory_limit" if resource_status == "MLE"
+                            else "output_limit" if resource_status == "OLE"
+                            else None
+                        ),
                     )
                 timeout_kind = None
                 if now >= deadline:
@@ -1030,6 +1203,9 @@ def run_interactive_testcase(
                         message,
                         transcript,
                         timeout_kind=timeout_kind,
+                        traffic=traffic,
+                        solution_stderr=solution_stderr,
+                        termination_reason="time_limit",
                     )
                 time.sleep(0.005)
 
@@ -1076,6 +1252,13 @@ def run_interactive_testcase(
                 memory_enforced,
                 resource_message,
                 transcript,
+                traffic=traffic,
+                solution_stderr=solution_stderr,
+                termination_reason=(
+                    "memory_limit" if resource_status == "MLE"
+                    else "output_limit" if resource_status == "OLE"
+                    else None
+                ),
             )
 
         if solution.returncode != 0:
@@ -1087,11 +1270,28 @@ def run_interactive_testcase(
                 memory_limit,
             )
             return _interactive_result(
-                status, elapsed, peak_memory_mb, memory_enforced, solution_message, transcript
+                status,
+                elapsed,
+                peak_memory_mb,
+                memory_enforced,
+                solution_message,
+                transcript,
+                traffic=traffic,
+                solution_stderr=solution_stderr,
+                termination_reason=(
+                    "inferred_memory_limit" if status == "MLE" else None
+                ),
             )
         interactor_status, message = _checker_result(interactor.returncode, interactor_message)
         return _interactive_result(
-            interactor_status, elapsed, peak_memory_mb, memory_enforced, message, transcript
+            interactor_status,
+            elapsed,
+            peak_memory_mb,
+            memory_enforced,
+            message,
+            transcript,
+            traffic=traffic,
+            solution_stderr=solution_stderr,
         )
     except OSError as exc:
         return _interactive_result(
@@ -1101,6 +1301,8 @@ def run_interactive_testcase(
             memory_enforced,
             str(exc),
             transcript,
+            traffic=traffic,
+            solution_stderr=solution_stderr,
         )
     finally:
         if solution_managed is not None:
@@ -1125,10 +1327,10 @@ def run_testcase(
     transcript_limit=65536,
 ):
     if judge_type == "custom":
-        status, elapsed, memory, memory_enforced, message = run_custom_testcase(
+        status, elapsed, memory, memory_enforced, message, details = run_custom_testcase(
             bin_path, judge_bin, in_file, ans_file, time_limit, memory_limit, output_limit, process_limit
         )
-        return status, elapsed, memory, memory_enforced, message, {}
+        return status, elapsed, memory, memory_enforced, message, details
     if judge_type == "interactive":
         return run_interactive_testcase(
             bin_path,
@@ -1142,10 +1344,10 @@ def run_testcase(
             output_limit=output_limit,
             process_limit=process_limit,
         )
-    status, elapsed, memory, memory_enforced, message = run_standard_testcase(
+    status, elapsed, memory, memory_enforced, message, details = run_standard_testcase(
         bin_path, in_file, ans_file, time_limit, memory_limit, output_limit, process_limit
     )
-    return status, elapsed, memory, memory_enforced, message, {}
+    return status, elapsed, memory, memory_enforced, message, details
 
 def run_validator(val_bin, in_file, timeout=5.0):
     """Validate LF-normalized input under the shared process-tree controller."""
@@ -1256,12 +1458,23 @@ def _expectation_cases(kind, testcases, expected, group_definitions, program_nam
 def _result_snapshot(item):
     if item is None:
         return None
-    return {
+    snapshot = {
         "case": item.get("case"),
         "groups": list(item.get("groups") or []),
         "status": item.get("status"),
         "message": item.get("message", ""),
     }
+    for key in (
+        "time",
+        "memory",
+        "memory_enforced",
+        "output_bytes",
+        "termination_reason",
+        "cached",
+    ):
+        if key in item:
+            snapshot[key] = item.get(key)
+    return snapshot
 
 
 def evaluate_expectation(kind, program_name, expected, case_results, testcases, group_definitions):
@@ -1297,6 +1510,105 @@ def evaluate_expectation(kind, program_name, expected, case_results, testcases, 
         "first_forbidden": _result_snapshot(first_forbidden),
     }
 
+
+def _status_only_resource_kill(status, case_result, limits):
+    if case_result is None:
+        return {
+            "status": status,
+            "case": None,
+            "groups": [],
+            "observed": None,
+            "limit": limits[status],
+            "limit_ratio": None,
+            "evidence_kind": "unavailable",
+            "supported": True,
+            "censored": True,
+        }
+    if status == "MLE":
+        observed = case_result.get("memory")
+        termination_reason = case_result.get("termination_reason")
+        supported = (
+            termination_reason == "memory_limit"
+            and bool(case_result.get("memory_enforced"))
+            and observed is not None
+        )
+        evidence_kind = (
+            "lower_bound" if supported
+            else "inferred" if termination_reason == "inferred_memory_limit"
+            else "unavailable"
+        )
+    else:
+        output_bytes = case_result.get("output_bytes")
+        observed = (
+            float(output_bytes) / (1024 * 1024)
+            if isinstance(output_bytes, (int, float)) and output_bytes > 0
+            else None
+        )
+        supported = (
+            case_result.get("termination_reason") == "output_limit"
+            and observed is not None
+        )
+        evidence_kind = "lower_bound" if supported else "unavailable"
+    limit = float(limits[status])
+    return {
+        "status": status,
+        "case": case_result.get("case"),
+        "groups": list(case_result.get("groups") or []),
+        "observed": round(float(observed), 6) if observed is not None else None,
+        "limit": limit,
+        "limit_ratio": (
+            round(float(observed) / limit, 6)
+            if supported and limit > 0
+            else None
+        ),
+        "evidence_kind": evidence_kind,
+        "supported": supported,
+        "censored": True,
+    }
+
+
+def build_solution_calibration(
+    kind,
+    case_results,
+    time_limit,
+    policy,
+    resource_kills,
+):
+    timed = [item for item in case_results if isinstance(item.get("time"), (int, float))]
+    max_item = max(timed, key=lambda item: item["time"]) if timed else None
+    max_time = float(max_item["time"]) if max_item is not None else None
+    ratio = (
+        max_time / float(time_limit)
+        if max_time is not None and float(time_limit) > 0
+        else None
+    )
+    headroom = (
+        float(time_limit) / max_time
+        if max_time is not None and max_time > 0
+        else None
+    )
+    required = policy["accepted_time_multiplier"]
+    return {
+        "schema_version": 1,
+        "target_guarantee": False,
+        "max_time": round(max_time, 6) if max_time is not None else None,
+        "max_time_case": max_item.get("case") if max_item is not None else None,
+        "time_limit": float(time_limit),
+        "time_limit_ratio": round(ratio, 6) if ratio is not None else None,
+        "headroom_factor": round(headroom, 6) if headroom is not None else None,
+        "fresh_cases": sum(1 for item in case_results if not item.get("cached")),
+        "cached_cases": sum(1 for item in case_results if item.get("cached")),
+        "accepted_check": {
+            "applicable": kind == "std",
+            "required_multiplier": required,
+            "ok": (
+                kind != "std"
+                or (headroom is not None and headroom + 1e-12 >= required)
+            ),
+        },
+        "resource_kills": resource_kills,
+    }
+
 def finish(reporter, ok, message, exit_code, result_code=None):
     cache = getattr(reporter, "cache", None)
     if cache is not None:
@@ -1306,7 +1618,8 @@ def finish(reporter, ok, message, exit_code, result_code=None):
             "Cache: "
             f"compile {cache.stats['compile_hits']} hit/{cache.stats['compile_misses']} miss, "
             f"validator {cache.stats['validator_hits']} hit/{cache.stats['validator_misses']} miss, "
-            f"case {cache.stats['case_hits']} hit/{cache.stats['case_misses']} miss"
+            f"case {cache.stats['case_hits']} hit/{cache.stats['case_misses']} miss, "
+            f"probe {cache.stats['probe_hits']} hit/{cache.stats['probe_misses']} miss"
         )
     result_code = result_code or ("all_expectations_met" if ok else "validation_failed")
     reporter.event(
@@ -1350,6 +1663,7 @@ def main():
 
     time_limit, memory_limit = read_problem_limits(prob_dir, config)
     output_limit, process_limit = read_problem_output_limit(prob_dir, config)
+    policy = calibration_policy(config)
     testcases = collect_testcases(prob_dir, config)
     if not testcases:
         finish(reporter, False, "No .in test cases found under data/sample or data/secret", 1)
@@ -1364,6 +1678,7 @@ def main():
         f"Cases: {sum(1 for t in testcases if t['suite'] == 'sample')} sample / "
         f"{sum(1 for t in testcases if t['suite'] == 'secret')} secret"
     )
+    reporter.text("Calibration note: local measurements are not a target Linux judge guarantee.")
     reporter.text("=" * 50)
     judge_type = configured_judge_type(config)
     judge_config = (config or {}).get("judge") or {}
@@ -1387,6 +1702,12 @@ def main():
         judge_type=judge_type,
         idle_limit=idle_limit if judge_type == "interactive" else None,
         transcript_limit=transcript_limit if judge_type == "interactive" else None,
+        platform=platform.system(),
+        machine=platform.machine(),
+        compiler=compiler_identity(),
+        target_guarantee=False,
+        measurement_note=MEASUREMENT_NOTE,
+        calibration_policy=policy,
     )
 
     # 1. Compile and run Validator
@@ -1578,6 +1899,8 @@ def main():
                     message=judge_message,
                     timeout_kind=judge_details.get("timeout_kind"),
                     transcript_truncated=judge_details.get("transcript_truncated", False),
+                    output_bytes=judge_details.get("output_bytes"),
+                    termination_reason=judge_details.get("termination_reason"),
                     cached=cached,
                 )
                 case_results.append({
@@ -1585,6 +1908,12 @@ def main():
                     "groups": testcase.get("groups", []),
                     "status": status,
                     "message": judge_message,
+                    "time": round(t, 6),
+                    "memory": memory,
+                    "memory_enforced": memory_enforced,
+                    "output_bytes": judge_details.get("output_bytes"),
+                    "termination_reason": judge_details.get("termination_reason"),
+                    "cached": cached,
                 })
                 if judge_type == "interactive" and judge_details.get("transcript"):
                     reporter.event(
@@ -1617,15 +1946,101 @@ def main():
                 testcases,
                 group_definitions,
             )
+            selected_names = set(expectation.get("selected_cases") or [])
+            selected_results = [
+                item for item in case_results if item.get("case") in selected_names
+            ]
+            resource_kills = []
+            expected_resource_statuses = set(expectation.get("expected_statuses") or []) & {
+                "TLE", "MLE", "OLE"
+            }
+            for resource_status in ("TLE", "MLE", "OLE"):
+                if resource_status not in expected_resource_statuses:
+                    continue
+                matched = next(
+                    (
+                        item for item in selected_results
+                        if item.get("status") == resource_status
+                    ),
+                    None,
+                )
+                # expected.status is a set of acceptable alternatives, not a
+                # requirement that every listed resource status must occur.
+                if matched is None:
+                    continue
+                if resource_status == "TLE":
+                    if judge_type == "interactive":
+                        resource_kills.append({
+                            "status": "TLE",
+                            "case": matched.get("case"),
+                            "groups": list(matched.get("groups") or []),
+                            "observed": None,
+                            "limit": float(time_limit),
+                            "limit_ratio": None,
+                            "evidence_kind": "unavailable",
+                            "supported": False,
+                            "censored": True,
+                            "reason": "interactive probe requires the interactor harness",
+                            "required_ratio": policy["expected_tle_time_multiplier"],
+                        })
+                    else:
+                        testcase = next(
+                            item for item in testcases
+                            if item["case"] == matched["case"]
+                        )
+                        required_ratio = policy["expected_tle_time_multiplier"]
+                        probe_factor = max(2.0, required_ratio * 1.25)
+                        margin = probe_tle_margin(
+                            bin_path,
+                            testcase["in_path"],
+                            testcase["case"],
+                            fingerprint,
+                            time_limit,
+                            memory_limit,
+                            output_limit,
+                            process_limit,
+                            probe_factor,
+                            cache=cache,
+                        )
+                        margin["groups"] = list(matched.get("groups") or [])
+                        margin["required_ratio"] = required_ratio
+                        resource_kills.append(margin)
+                else:
+                    margin = _status_only_resource_kill(
+                        resource_status,
+                        matched,
+                        {"MLE": memory_limit, "OLE": output_limit},
+                    )
+                    resource_kills.append(margin)
+
+            calibration = build_solution_calibration(
+                kind,
+                case_results,
+                time_limit,
+                policy,
+                resource_kills,
+            )
             reporter.event(
                 "summary",
                 kind=kind,
                 program=prog_name,
                 stats=stats,
                 expectation=expectation,
+                calibration=calibration,
             )
             reporter.event("expectation", **expectation)
             reporter.text(f"  Summary: {stats}")
+            if (
+                calibration["max_time"] is not None
+                and calibration["time_limit_ratio"] is not None
+                and calibration["headroom_factor"] is not None
+            ):
+                reporter.text(
+                    "  Calibration: "
+                    f"max={calibration['max_time']:.3f}s "
+                    f"({calibration['time_limit_ratio']:.3f}x TL), "
+                    f"headroom={calibration['headroom_factor']:.3f}x"
+                )
             reporter.text(
                 "  Expectation: "
                 f"{'PASS' if expectation['ok'] else 'FAIL'} "
