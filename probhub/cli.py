@@ -15,7 +15,7 @@ from .generations import (
     generation_status,
 )
 from .io import atomic_write_text, write_yaml
-from .judging import judge_problem
+from .judging import check_sample_answers, judge_problem
 from .linting import (
     compute_collection_hash,
     compute_data_hash,
@@ -237,6 +237,23 @@ def command_judge(args):
         problem_dir, _ = load_problem(root, entry)
         results[entry["id"]] = judge_problem(root, problem_dir, use_cache=not args.no_cache)
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
+
+
+def command_sample_check(args):
+    root, workspace = workspace_context(args)
+    ensure_no_pending_transactions(root, workspace)
+    results = {}
+    for entry in select_entries(workspace, args.problem):
+        problem_dir, _ = load_problem(root, entry)
+        results[entry["id"]] = check_sample_answers(
+            root,
+            problem_dir,
+            use_cache=not args.no_cache,
+        )
+    return {
+        "ok": all(item["ok"] for item in results.values()),
+        "problems": results,
+    }
 
 
 def command_stress(args):
@@ -465,12 +482,12 @@ def build_parser():
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(handler=command_doctor)
 
-    for name, handler in (("lint", command_lint), ("status", command_status), ("judge", command_judge), ("typeset", command_typeset), ("package", command_package), ("build", command_build)):
+    for name, handler in (("lint", command_lint), ("status", command_status), ("judge", command_judge), ("sample-check", command_sample_check), ("typeset", command_typeset), ("package", command_package), ("build", command_build)):
         item = sub.add_parser(name)
         item.add_argument("problem", nargs="*")
         if name == "package":
             item.add_argument("--allow-missing-pdf", action="store_true")
-        if name in {"judge", "build"}:
+        if name in {"judge", "sample-check", "build"}:
             item.add_argument("--no-cache", action="store_true", help="ignore existing sandbox caches and refresh them")
         if name == "build":
             item.add_argument("--skip-judge", action="store_true")

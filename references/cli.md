@@ -159,13 +159,14 @@ probhub lint [ID...]
 检查：
 
 - 工作区和题目 Schema。
-- 题名、题面章节和禁止占位符。
+- 题名、唯一 H1、必需章节完整/非空/不重复/按序、提示位置、Markdown 样例章节和禁止占位符；fenced code 内的伪标题不参与扫描。
 - 时间与内存限制。
-- Validator 路径。
+- `statement.source` 与 Validator 必须是题目目录内的普通非符号链接文件。
 - 样例/隐藏数据目录。
 - `.in` 与 `.ans` 配对。
 - 源文件与数据哈希。
 - 最近一次完整 Judge 校准证据及 accepted/TLE 余量；缺失、过期或不足只产生结构化 warning，不使 lint 失败。
+- `constraint_reconciliation` 以 `analysis_state: partial` 列出题面输入范围和 Validator 的直接字面约束。只有唯一同名变量、双方直接数值边界的高置信差异才产生 warning；动态、歧义和不支持的表达式只进入 info/report，任何约束对账结果都不改变 lint 退出码。
 
 示例：
 
@@ -195,6 +196,16 @@ Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以
 
 正式 Build Manifest 使用 schema v3。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`，并分别记录其 `sealed_revision_id`；缺失时显示对应的 `stale_fields`。旧 v1/v2 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
 
+## 8.1 `sample-check`
+
+```powershell
+probhub sample-check [ID...] [--no-cache]
+```
+
+只编译并运行 `data/sample` 与配置顺序中的首个 accepted，不运行 Validator、brute、wrong 或 Custom Checker。accepted stdout 与 `.ans` 只把 CRLF/裸 CR 归一为 LF，之后执行严格字节比较；尾空格、缺少尾换行和其他字节差异均返回 `sample_answer_mismatch`。Custom Checker 即使允许非唯一输出，也不能替代正式样例答案必须由首个 accepted 精确复现的不变量。
+
+交互题返回成功但 `applicable: false` / `sample_check_not_applicable`。命令可复用并更新忽略的编译/样例 case cache；`--no-cache` 强制重跑当前样例但保留无关缓存项。它不运行完整 Judge、不发布或覆盖 `judge-evidence-v1.json`，也不写规范源、PDF、ZIP、metadata 或 Manifest。完整 `judge`、`seal` 与 `build` 同样执行该样例不变量，因此错误 `.ans` 会在正式交付前被确定性拦截。
+
 ## 9. `judge`
 
 ```powershell
@@ -206,10 +217,11 @@ probhub judge [ID...] [--no-cache]
 1. 编译并运行 Validator。
 2. 编译 `solutions.accepted`、`solutions.brute`、`solutions.wrong`。
 3. 对 `data/sample` 和 `data/secret` 逐点评测。
-4. 按 `judge.type` 使用标准比较、Checker 或 Interactor。
-5. 根据每个程序的结构化 `expected` 宿命验证状态、目标数据组与禁止状态；未配置时保持 accepted 全 AC、brute 不 WA 且至少 TLE/MLE、wrong 至少一个非 AC 的默认语义。
-6. 对普通程序、Checker、Validator、编译器和 Interactor 应用完整进程树、时间、内存、输出与进程数控制。
-7. 为每个解法汇总 `max_time`、最大用例、`time_limit_ratio` 和 headroom；对期望 TLE 的已命中用例执行延长时限校准探针，MLE/OLE 报告可证明的阈值下界。
+4. 对非交互题，严格核对首个 accepted 的 sample stdout 与 `.ans`；仅归一换行，Custom Checker AC 不能掩盖字节不一致。
+5. 按 `judge.type` 使用标准比较、Checker 或 Interactor。
+6. 根据每个程序的结构化 `expected` 宿命验证状态、目标数据组与禁止状态；未配置时保持 accepted 全 AC、brute 不 WA 且至少 TLE/MLE、wrong 至少一个非 AC 的默认语义。
+7. 对普通程序、Checker、Validator、编译器和 Interactor 应用完整进程树、时间、内存、输出与进程数控制。
+8. 为每个解法汇总 `max_time`、最大用例、`time_limit_ratio` 和 headroom；对期望 TLE 的已命中用例执行延长时限校准探针，MLE/OLE 报告可证明的阈值下界。
 
 支持的评测类型：
 

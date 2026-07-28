@@ -15,6 +15,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 - **可复现差分测试**：`probhub stress` 按 seed 对拍 accepted 与 brute，也可用 `--against` 给指定错解找 killer，并把反例一键固化为分组数据与生成配方。
 - **跨平台资源控制**：共享 `probhub/process_control.py` 为普通程序、Checker、Validator、编译器、Interactor 和 stress 提供完整进程树清理、时间/内存/输出/进程数限制，并报告 TLE/MLE/OLE/RE/WA/AC。
 - **本机限制校准**：Judge 汇总每个解法的最大用时、TL 占比和 TLE/MLE/OLE 击杀余量；lint/status 读取最近一次完整成功的本地证据，按可配置阈值提示余量不足，并明确本机结果不等于目标 Linux/DOMjudge 承诺。
+- **题面与样例体检**：lint 确定性检查题面标题、章节、样例来源和问题内路径，并以非阻断报告对照题面范围与 Validator 字面量；`sample-check` 只运行样例和首个 accepted，严格确认 `.ans` 与当前标程输出一致。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 出题工作台**：提供响应式明暗双主题控制台，支持题目导航与排序、Markdown 和题面图片预览、题面/样例/封面编辑、revision 冲突保护、隔离 PDF 编译预览及临时代码沙箱评测，正式分发统一调用 Core。
 - **可重复构建 Core**：Workspace Schema v1、不可变 checkpoint/generation、sealed revision 正式发布门禁、Manifest v3、过期检测和统一 `probhub` CLI。
@@ -130,6 +131,7 @@ probhub lint L01
 probhub status
 probhub gen L01              # 只读计划
 probhub gen L01 --apply      # 事务化生成数据与答案
+probhub sample-check L01     # 只运行样例与首个 accepted
 probhub judge L01
 probhub judge L01 --no-cache  # 强制完整重跑并刷新缓存
 probhub stress L01 --rounds 10000 --seed 12345
@@ -235,6 +237,7 @@ python scripts/local_judge.py <problem_dir> --jsonl
 
 - `probhub.yaml` 中 `judge.validator` 指向的验证器是否接受所有输入数据。
 - `solutions.accepted` 指向的程序是否全部 AC。
+- 首个 accepted 在每个样例上的原始输出是否与 `.ans` 经换行归一后字节一致；Custom Checker 接受非唯一输出也不能绕过该不变量。
 - `solutions.brute` 指向的程序是否不 WA，并且至少出现 TLE 或 MLE，用于证明强数据足够强。
 - `solutions.wrong` 指向的程序是否不能全 AC。
 - `judge.type: standard` 的普通题按行比较，允许每行末尾多余的空格或 Tab；行内空格和内部换行仍严格检查。

@@ -125,7 +125,10 @@ class SandboxCacheTests(unittest.TestCase):
             cache_path = problem / ".probhub" / MODULE.CACHE_FILENAME
             cache_path.parent.mkdir(parents=True)
             cache_path.write_text(
-                json.dumps({"schema_version": 2, "case": {"old": {"status": "OLE"}}}),
+                json.dumps({
+                    "schema_version": MODULE.CACHE_SCHEMA_VERSION - 1,
+                    "case": {"old": {"status": "AC"}},
+                }),
                 encoding="utf-8",
             )
             loaded = MODULE.SandboxCache(problem)

@@ -249,7 +249,13 @@ source hash 会递归覆盖 `code/` 下全部普通源码与辅助文本，包�
 ... optional ...
 ```
 
-Samples are not duplicated in Markdown. `data/sample/*.in` and matching `.ans` files are their only source.
+题面必须恰好有一个非空 H1；`题目描述 -> 输入格式 -> 输出格式` 三个 H2 必须存在、非空、不重复且按序出现，可选 `提示` 只能位于输出之后。明确的样例输入/输出 Markdown 标题（任意 H2 及更深层级）会被 lint 拒绝；fenced code 内标题不参与扫描。Samples are not duplicated in Markdown. `data/sample/*.in` and matching `.ans` files are their only source.
+
+`statement.source` 和 `judge.validator` 必须解析为题目目录内的普通非符号链接文件。lint 的 `constraint_reconciliation` 会保留题面输入范围与 Validator `readInt/readLong/readDouble/readStrictDouble/ensuref` 直接字面量的 path/line/raw 证据，并固定声明 `analysis_state: partial`。它不是完整 Markdown/C++ 语义分析：只有唯一同名变量的确定数值差异给 warning，动态、析取、歧义或不支持结构只要求人工复核，永不改变 lint 的 `ok` 或退出码。
+
+当前 Schema v1 不支持可执行的 `constraints` 单一事实源。未来 Token、临时 C++ header、缓存/hash、WebUI round-trip 和构建快照的完整评估见 [`constraints-schema-evaluation.md`](constraints-schema-evaluation.md)；在该设计落地前，不要向 `probhub.yaml` 添加未知 `constraints` 字段或宣称题面与 Validator 已自动同步。
+
+非交互题的 `data/sample/*.ans` 还必须由配置顺序中的首个 accepted 精确复现。`probhub sample-check` 与完整 Judge 都只归一 CRLF/裸 CR 为 LF，尾空格、缺少尾换行等差异仍失败；Custom Checker 接受非唯一输出不能绕过正式样例答案一致性。交互题对此检查明确不适用。
 
 ## Generated artifacts
 
@@ -289,7 +295,7 @@ Schema v1 WebUI 遵循以下写入边界：
 
 这些路径不属于 Schema 规范源，不得提交或手工编辑。generation 不替换正式 PDF、ZIP、metadata 或 Build Manifest。完整语义见 `references/generations.md`。
 
-`<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results. Relevant source, header, input, answer, time/memory/output/process limit, compiler, platform, sandbox policy, or cache-schema changes invalidate entries automatically. Use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run and refresh the cache.
+`<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results, including normalized sample stdout/answer summaries used by sample-check. Relevant source, header, input, answer, time/memory/output/process limit, compiler, platform, sandbox policy, or cache-schema changes invalidate entries automatically. Use `probhub sample-check <id> --no-cache` to refresh only the current sample execution while preserving unrelated entries; use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run.
 
 `<problem>/.probhub/judge-evidence-v1.json` 是最近一次完整成功 Judge 的本地校准证据，不进入 Manifest、ZIP 或正式发布身份。lint/status 会用当前 source/data hash 验证它；失败 Judge 保留上一份成功证据。
 

@@ -6,7 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from probhub.calibration import evidence_path
-from probhub.judging import JUDGE_OUTPUT_LIMIT_BYTES, JUDGE_TIMEOUT_SECONDS, judge_problem
+from probhub.judging import (
+    JUDGE_OUTPUT_LIMIT_BYTES,
+    JUDGE_TIMEOUT_SECONDS,
+    check_sample_answers,
+    judge_problem,
+)
 from probhub.process_control import process_alive
 
 
@@ -181,6 +186,45 @@ class JudgingTests(unittest.TestCase):
             ):
                 result = judge_problem(root, problem)
             self.assertFalse(result["ok"])
+            self.assertEqual(evidence.read_bytes(), before)
+
+    def test_sample_check_uses_dedicated_mode_and_never_publishes_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.make_root(temp)
+            problem = self.make_problem(root)
+            evidence = evidence_path(problem)
+            evidence.parent.mkdir(parents=True)
+            evidence.write_text('{"previous":true}\n', encoding="utf-8")
+            before = evidence.read_bytes()
+            events = [
+                {
+                    "type": "sample_check",
+                    "applicable": True,
+                    "ok": True,
+                    "case": "sample/1",
+                    "matches": True,
+                },
+                {
+                    "type": "final",
+                    "status": "passed",
+                    "code": "sample_answers_match",
+                    "applicable": True,
+                },
+            ]
+            side_effect = _fake_run(
+                "".join(json.dumps(event) + "\n" for event in events)
+            )
+
+            with patch(
+                "probhub.judging.run_managed_to_files", side_effect=side_effect
+            ) as run:
+                result = check_sample_answers(root, problem, use_cache=False)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["applicable"])
+            command = run.call_args.args[0]
+            self.assertIn("--sample-check", command)
+            self.assertIn("--no-cache", command)
             self.assertEqual(evidence.read_bytes(), before)
 
     def test_hanging_judge_is_killed_after_timeout(self):

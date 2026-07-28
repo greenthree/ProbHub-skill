@@ -149,9 +149,10 @@ class CoreWorkspaceTests(unittest.TestCase):
             _, workspace = load_workspace(root)
             self.assertEqual([entry["id"] for entry in problem_entries(workspace)], ["A", "B"])
 
-    def test_judge_and_build_accept_no_cache(self):
+    def test_judge_sample_check_and_build_accept_no_cache(self):
         parser = build_parser()
         self.assertTrue(parser.parse_args(["judge", "A", "--no-cache"]).no_cache)
+        self.assertTrue(parser.parse_args(["sample-check", "A", "--no-cache"]).no_cache)
         self.assertTrue(parser.parse_args(["build", "A", "--no-cache"]).no_cache)
 
     def test_lint_metadata_and_stale_detection(self):
