@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from probhub.calibration import evidence_path
 from probhub.judging import JUDGE_OUTPUT_LIMIT_BYTES, JUDGE_TIMEOUT_SECONDS, judge_problem
 from probhub.process_control import process_alive
 
@@ -33,6 +34,31 @@ class JudgingTests(unittest.TestCase):
         script.parent.mkdir()
         script.write_text(script_body, encoding="utf-8")
         return root
+
+    def make_problem(self, root):
+        problem = root / "A"
+        (problem / "code").mkdir(parents=True)
+        (problem / "data/sample").mkdir(parents=True)
+        (problem / "data/secret").mkdir(parents=True)
+        (problem / "problem.md").write_text(
+            "# A\n\n## 题目描述\nA\n\n## 输入格式\nA\n\n## 输出格式\nA\n",
+            encoding="utf-8",
+        )
+        (problem / "code/std.cpp").write_text("int main(){}\n", encoding="utf-8")
+        (problem / "data/sample/1.in").write_text("1\n", encoding="utf-8")
+        (problem / "data/sample/1.ans").write_text("1\n", encoding="utf-8")
+        (problem / "data/secret/1.in").write_text("1\n", encoding="utf-8")
+        (problem / "data/secret/1.ans").write_text("1\n", encoding="utf-8")
+        (problem / "probhub.yaml").write_text(
+            "schema_version: 1\nid: A\nname: A\n"
+            "limits:\n  time: 1\n  memory: 256\n"
+            "statement:\n  source: problem.md\n"
+            "judge:\n  type: standard\n  validator: code/std.cpp\n"
+            "solutions:\n  accepted: [code/std.cpp]\n"
+            "data:\n  sample_dir: data/sample\n  secret_dir: data/secret\n",
+            encoding="utf-8",
+        )
+        return problem
 
     def test_local_judge_subprocess_is_forced_to_utf8(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -95,6 +121,67 @@ class JudgingTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual(result["final"]["code"], "judge_output_limit")
             self.assertEqual(len(result["events"]), 1)
+
+    def test_successful_complete_judge_atomically_publishes_calibration_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.make_root(temp)
+            problem = self.make_problem(root)
+            events = [
+                {
+                    "type": "limits",
+                    "time_limit": 1,
+                    "memory_limit": 256,
+                    "output_limit": 64,
+                    "process_limit": 32,
+                    "platform": "Windows",
+                    "machine": "AMD64",
+                    "compiler": "g++ test",
+                },
+                {
+                    "type": "summary",
+                    "kind": "std",
+                    "program": "code/std.cpp",
+                    "stats": {"AC": 2},
+                    "expectation": {"expected_statuses": ["AC"], "ok": True},
+                    "calibration": {
+                        "max_time": 0.1,
+                        "headroom_factor": 10,
+                        "resource_kills": [],
+                    },
+                },
+                {
+                    "type": "final",
+                    "status": "passed",
+                    "code": "all_expectations_met",
+                },
+            ]
+            side_effect = _fake_run(
+                "".join(json.dumps(event) + "\n" for event in events)
+            )
+            with patch("probhub.judging.run_managed_to_files", side_effect=side_effect):
+                result = judge_problem(root, problem)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(result["summaries"]), 1)
+            self.assertIsNotNone(result["calibration"])
+            self.assertTrue(evidence_path(problem).is_file())
+
+    def test_failed_judge_preserves_last_successful_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.make_root(temp)
+            problem = self.make_problem(root)
+            evidence = evidence_path(problem)
+            evidence.parent.mkdir(parents=True)
+            evidence.write_text('{"previous":true}\n', encoding="utf-8")
+            before = evidence.read_bytes()
+            event = {"type": "final", "status": "failed", "code": "expectation_not_met"}
+            with patch(
+                "probhub.judging.run_managed_to_files",
+                side_effect=_fake_run(json.dumps(event) + "\n", returncode=1),
+            ):
+                result = judge_problem(root, problem)
+            self.assertFalse(result["ok"])
+            self.assertEqual(evidence.read_bytes(), before)
 
     def test_hanging_judge_is_killed_after_timeout(self):
         with tempfile.TemporaryDirectory() as temp:

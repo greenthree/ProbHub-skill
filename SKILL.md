@@ -39,6 +39,8 @@ description: 当用户需要创作或维护算法竞赛题目、生成测试数�
 
 `.probhub/build.lock` 与 `.probhub/generation.lock` 是可保留的 OS 文件锁载体，不能用“文件是否存在”判断是否占用；`.probhub/sandbox-cache-v1.json` 是本地缓存，`.probhub/stress/` 保存可重放差分反例，`.probhub/checkpoints/` 与 `.probhub/generations/` 保存并行出题期间的不可变本地版本。这些路径都应被 Git 忽略，禁止提交或手工维护。
 
+`<problem>/.probhub/judge-evidence-v1.json` 是最近一次完整成功 Judge 的本地校准证据，`judge-evidence.lock` 是其 OS 发布锁。lint/status 只在 evidence schema、测量策略、平台和 source/data hash 与当前题目一致时使用；失败 Judge 不覆盖上一份成功证据，较旧的 build 快照也不能覆盖较新的本地测量。它们不进入 Manifest 或 ZIP，也不得提交。
+
 # 3. CLI 操作规则
 
 ## 3.1 入口和工作区定位
@@ -171,6 +173,9 @@ probhub build L01 --skip-judge
    ```
 
 8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 验证成功且 `status` 为 `current` 时才可交付。Manifest 的 `collection_hash` 会跟踪整场排版输入；其他题题面、题面媒体、样例、题序或模板变化后，受影响题目也必须重新构建。
+9. 查看 judge summary 与 lint/status 的 `calibration`、`diagnostics`：默认 accepted 应满足 `max_time × 3 <= TL`，期望 TLE 的目标用例应有至少 `1.5 × TL` 的延长探针证据。缺失或低余量 warning 必须在交付前人工处理或在题目 `calibration` 中有意识地调整阈值。
+
+本地 `max_time`、内存和输出余量不是正式评测承诺。Windows 与 Linux/DOMjudge 的启动、链接、调度、计时和内存口径不同；正式 TL/ML/OL 必须在目标 Linux 评测环境重新校准，结构化结果中的 `target_guarantee` 固定为 `false`。
 
 # 5. 出题内容要求
 

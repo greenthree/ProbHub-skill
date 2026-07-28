@@ -59,6 +59,8 @@ limits:
 3. 把捕获文件截断到配置预算以内；
 4. 选手程序返回 `OLE`，官方工具返回基础设施失败。
 
+共享进程控制会在截断前记录 stdout 与 stderr 的总字节数为 `output_bytes`。该值用于 OLE 校准下界；正式保存文件仍被截断到预算内，不能用截断后的文件大小代替实际观测值。
+
 进程可能在一次轮询间隔内多写少量内容，因此判定依据是“观测到超限”，而最终保存文件会被截断。快速大量输出并立即退出也会在结束后的最终检查中被识别，不能绕过 OLE。
 
 交互题同时限制选手到 Interactor 的通信流量以及 stderr；选手超限为 `OLE`，Interactor 自身输出洪泛为 `FAIL`。Transcript 仍受 `judge.interactive.transcript_limit` 单独限制，Transcript 截断不等于 OLE。
@@ -125,6 +127,8 @@ probhub build L01 --no-cache
 ```
 
 缓存文件仍是 `<problem>/.probhub/sandbox-cache-v1.json`；文件名中的 `v1` 是本地存储名称，不代表内部缓存 Schema 永远不变。
+
+期望 TLE 的校准探针仍使用同一进程树控制：正常判定先在正式 TL 处结束；随后只对一个已命中的目标用例以更长监督上限重新运行，记录精确完成时间或超时下界。探针不改变原 verdict，不运行 Checker；因此正常退出只表示进程完成，不表示答案 AC。交互题当前不做这种脱离 Interactor 的探针。
 
 ## 10. WebUI 临时提交评测
 

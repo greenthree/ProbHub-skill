@@ -46,6 +46,9 @@ limits:
   memory: 256
   output: 64
   processes: 32
+calibration:
+  accepted_time_multiplier: 3.0
+  expected_tle_time_multiplier: 1.5
 statement:
   source: problem.md
 judge:
@@ -110,6 +113,28 @@ domjudge:
 | `processes` | processes | `32` | Maximum processes in the controlled process tree |
 
 `time`, `output`, and `processes` must be positive integers. `memory` must be a power of two and at least `256` MiB. Output above the budget is terminated and reported as `OLE`, with captured files truncated. Official tools use bounded internal time/output policies and the same full-tree containment; their resource failure is infrastructure `FAIL`, not contestant WA. Windows uses Job Objects and refuses to run if containment cannot be established. Linux/Unix uses a separate process group, `RLIMIT_AS`, and low-frequency `/proc` tree monitoring. See `references/process-control.md`.
+
+### Calibration policy
+
+`calibration` 可选，用于本地 Judge 的余量诊断：
+
+```yaml
+calibration:
+  accepted_time_multiplier: 3.0
+  expected_tle_time_multiplier: 1.5
+```
+
+- `accepted_time_multiplier` 默认为 `3.0`，要求每个 accepted 的本机最大用时满足 `max_time × 3 <= TL`。必须是至少 `1` 的有限实数。
+- `expected_tle_time_multiplier` 默认为 `1.5`。对期望状态包含 `TLE` 且确实在目标组被 TLE 的解法，Judge 会额外选择一个相关用例做延长时限探针；探针上限与验收阈值分离，默认至少运行到 `2 × TL`。必须是大于 `1` 的有限实数。
+- TLE 探针不改变正常 Judge verdict 或宿命判断。程序若在探针上限前正常结束，记录精确本机用时；若仍超时，只记录 `runtime >= probe_limit` 的 `lower_bound`。
+- MLE/OLE 的本地结果在触限时已被终止，summary 只报告峰值内存或截断前 stdout+stderr 总字节数的阈值下界；仅接近 ML 后异常退出的启发式 MLE 标为 `inferred`，无可靠遥测时明确为 `unavailable`，不得把缺失值当作零。
+- 交互题不能脱离 Interactor 单独运行选手程序，当前 expected-TLE 延长探针明确标记为 `unavailable`；普通逐点最大时间仍会报告。
+
+完整成功的 Judge 会原子更新本地忽略文件 `<problem>/.probhub/judge-evidence-v1.json`。只有 evidence schema、source hash 和 data hash 与当前题目一致时，lint/status 才使用数值生成余量 warning；缺失或过期证据只提示重新运行 Judge，不改变 lint 的 `ok` 或正式 build 的 `current/stale` 状态。失败、取消或超时不会覆盖上一份完整成功证据。
+
+`expected.status` 列表表示可接受的备选结果；只有实际在 expectation 选中范围内发生的 TLE/MLE/OLE 才生成对应资源余量。程序已由 WA 或 MLE 满足宿命时，不会因为列表中同时允许 TLE 而产生虚假的 TLE 余量 warning。
+
+`max_time` 与资源余量仅表示本次本机沙箱的观测结果。Windows 与 Linux/DOMjudge 在进程启动、静态链接、调度、计时和内存统计口径上可能不同；正式 TL、ML、OL 必须在目标 Linux 评测环境重新校准，本地结果不能作为评测承诺。结构化结果固定包含 `target_guarantee: false`。
 
 ### Judge modes
 
@@ -260,9 +285,12 @@ Schema v1 WebUI 遵循以下写入边界：
 - `<workspace>/.probhub/checkpoints/`：不可变题目 revision；
 - `<workspace>/.probhub/generations/`：不可变完整试卷预览；
 - `<workspace>/.probhub/generation.lock`：组卷 single-writer OS 锁。
+- `<problem>/.probhub/judge-evidence.lock`：单题校准证据发布 OS 锁。
 
 这些路径不属于 Schema 规范源，不得提交或手工编辑。generation 不替换正式 PDF、ZIP、metadata 或 Build Manifest。完整语义见 `references/generations.md`。
 
 `<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results. Relevant source, header, input, answer, time/memory/output/process limit, compiler, platform, sandbox policy, or cache-schema changes invalidate entries automatically. Use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run and refresh the cache.
+
+`<problem>/.probhub/judge-evidence-v1.json` 是最近一次完整成功 Judge 的本地校准证据，不进入 Manifest、ZIP 或正式发布身份。lint/status 会用当前 source/data hash 验证它；失败 Judge 保留上一份成功证据。
 
 `<problem>/.probhub/stress/` is a separate ignored diagnostic directory containing replayable counterexamples and `latest.json`; stress does not reuse the sandbox cache. Resource-control semantics are versioned in the cache Schema, so older cached AC/RE/TLE results cannot bypass newer OLE or process-tree policies. Do not package or commit either local artifact.

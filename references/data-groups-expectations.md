@@ -106,6 +106,7 @@ forbid: [FAIL]
 - `groups`：全部分组定义；
 - `case.groups`：每个测试点所属的数据组；
 - `summary.expectation`：程序统计和宿命结果；
+- `summary.calibration`：逐解法最大时间、TL 占比、缓存来源与期望 TLE/MLE/OLE 的资源击杀证据；
 - `expectation`：独立宿命事件。
 
 `expectation` 关键字段包括：
@@ -117,3 +118,7 @@ forbid: [FAIL]
 - `ok`：宿命是否满足。
 
 宿命配置和数据组配置不参与逐点执行缓存键。仅修改 `expected` 或分组映射时，程序运行结果可以复用，但宿命断言会按新配置重新计算。
+
+校准只在 expectation 选中的用例范围内寻找相应资源状态。组外 TLE/MLE/OLE 不能充当目标组的击杀余量。普通 TLE 事件在 TL 处即被终止，只能证明 `runtime >= TL`；因此 expected-TLE 余量使用额外延长时限探针，不能把普通 case elapsed 冒充为 `1.5 × TL` 实测值。
+
+`expected.status: [TLE, MLE]` 表示两种状态任选其一即可满足宿命，不表示两种状态都必须出现。若实际由 MLE 满足，则只报告 MLE 证据，不额外制造缺失 TLE 的 warning。

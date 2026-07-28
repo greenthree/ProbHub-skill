@@ -12,6 +12,12 @@ from pathlib import Path, PurePosixPath
 
 from . import __version__
 from .build_lock import workspace_build_lock
+from .calibration import (
+    EVIDENCE_FILENAME,
+    EVIDENCE_LOCK_FILENAME,
+    read_calibration_evidence,
+    write_calibration_evidence,
+)
 from .errors import ProbHubError
 from .generations import checkpoint_revision, latest_checkpoint
 from .hashing import hash_file
@@ -260,6 +266,7 @@ def _snapshot_ignore(plan):
         "generation-tmp",
         "generation.lock",
         "generations",
+        EVIDENCE_LOCK_FILENAME,
         "sandbox-cache-v1.json.tmp",
         "stress",
         "submissions",
@@ -280,6 +287,8 @@ def _snapshot_ignore(plan):
                 result.append(name)
                 continue
             if directory.name == ".probhub" and name.startswith("build-publish-"):
+                result.append(name)
+            if directory.name == ".probhub" and name.startswith(EVIDENCE_FILENAME + "."):
                 result.append(name)
         return result
 
@@ -530,6 +539,27 @@ def _publish_cache(source_problem, destination_problem):
                 temporary.unlink()
             except OSError:
                 pass
+
+
+def _publish_calibration_evidence(source_problem, destination_problem):
+    evidence = read_calibration_evidence(source_problem)
+    if evidence is None:
+        return {"published": False, "reason": "missing_staged_evidence"}
+    try:
+        published = write_calibration_evidence(destination_problem, evidence)
+        return {
+            "published": bool(published),
+            "reason": None if published else "newer_live_evidence_preserved",
+        }
+    except (OSError, ValueError, TypeError, ProbHubError) as exc:
+        # Calibration evidence is a local diagnostic artifact. A failure to
+        # refresh it must not roll back an otherwise valid formal build, but it
+        # must remain visible to the caller.
+        return {
+            "published": False,
+            "reason": "publish_failed",
+            "error": str(exc),
+        }
 
 
 def _publish_targets(plan):
@@ -842,11 +872,22 @@ def publish_build(plan, snapshot, manifests, pdfs, packages, publish_cache):
             "path": str(plan.root / f"{problem_id}.zip"),
         }
 
+    calibration_warnings = []
     for staged in snapshot.selected:
         problem_id = staged.config["id"]
         live = live_by_id[problem_id]
         if publish_cache:
             _publish_cache(staged.problem_dir, live.problem_dir)
+            evidence_publish = _publish_calibration_evidence(
+                staged.problem_dir, live.problem_dir
+            )
+            if evidence_publish.get("reason") == "publish_failed":
+                calibration_warnings.append({
+                    "code": "calibration_publish_failed",
+                    "severity": "warning",
+                    "problem": problem_id,
+                    "message": evidence_publish.get("error") or "failed to publish calibration evidence",
+                })
 
     return {
         "typst_dir": str(live_typst),
@@ -854,6 +895,7 @@ def publish_build(plan, snapshot, manifests, pdfs, packages, publish_cache):
         "pdfs": live_pdfs,
         "packages": live_packages,
         "manifests": manifests,
+        "warnings": calibration_warnings,
     }
 
 
@@ -923,6 +965,8 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
                         "returncode": result["returncode"],
                         "final": result["final"],
                         "cache": result.get("cache", {}),
+                        "summaries": result.get("summaries", []),
+                        "calibration": result.get("calibration"),
                     }
                     if not result["ok"]:
                         raise ProbHubError(
