@@ -4,11 +4,11 @@ import io
 import json
 import re
 import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+from probhub.process_control import run_managed_to_files
 from werkzeug.test import EnvironBuilder
 
 
@@ -195,27 +195,35 @@ class UiSecurityTests(unittest.TestCase):
             root = Path(temp)
             page_path = root / "sanitizer.html"
             profile = root / "profile"
+            stdout_path = root / "browser.stdout"
+            stderr_path = root / "browser.stderr"
             page_path.write_text(page, encoding="utf-8")
-            completed = subprocess.run(
+            completed = run_managed_to_files(
                 [
                     HEADLESS_BROWSER,
                     "--headless=new",
                     "--disable-gpu",
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--disable-default-apps",
+                    "--disable-extensions",
                     "--no-first-run",
                     f"--user-data-dir={profile}",
                     "--dump-dom",
                     page_path.as_uri(),
                 ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                check=False,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=60,
+                output_limit_bytes=16 * 1024 * 1024,
+                process_limit=64,
             )
-        self.assertEqual(completed.returncode, 0, completed.stderr[-2000:])
-        match = re.search(r'<div id="result">(.*?)</div>', completed.stdout, re.DOTALL)
-        self.assertIsNotNone(match, completed.stdout[-2000:])
+            browser_stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
+            browser_stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+        self.assertEqual(completed["reason"], "completed", browser_stderr[-2000:])
+        self.assertEqual(completed["returncode"], 0, browser_stderr[-2000:])
+        match = re.search(r'<div id="result">(.*?)</div>', browser_stdout, re.DOTALL)
+        self.assertIsNotNone(match, browser_stdout[-2000:])
         sanitized = html.unescape(match.group(1))
         self.assertEqual(
             sanitized,

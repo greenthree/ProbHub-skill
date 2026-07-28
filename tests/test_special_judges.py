@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import platform
@@ -86,6 +87,49 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
         ) as rmtree, mock.patch.object(JUDGE_MODULE.time, "sleep"):
             JUDGE_MODULE._remove_interactive_temp("temporary")
         self.assertEqual(rmtree.call_count, 2)
+
+    def test_interactive_deadlines_exclude_process_setup(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO()
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+        class FakeManaged:
+            memory_enforced = True
+            peak_memory_mb = 1
+
+            def __init__(self):
+                self.proc = FakeProcess()
+
+            def sample(self):
+                return 1, 1
+
+            def terminate(self):
+                self.proc.returncode = -1
+
+        def slow_spawn(*_args, **_kwargs):
+            time.sleep(0.15)
+            return FakeManaged()
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            JUDGE_MODULE, "spawn_managed", side_effect=slow_spawn
+        ):
+            root = Path(temp)
+            result = JUDGE_MODULE.run_interactive_testcase(
+                str(root / "solution"),
+                str(root / "interactor"),
+                str(root / "case.in"),
+                str(root / "case.ans"),
+                time_limit=0.2,
+                idle_limit=0.1,
+            )
+
+        self.assertEqual(result[0], "TLE", result)
+        self.assertEqual(result[5]["timeout_kind"], "idle", result)
 
 
 @unittest.skipUnless(shutil.which("g++"), "g++ is required for special-judge integration tests")

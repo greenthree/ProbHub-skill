@@ -1119,9 +1119,13 @@ def run_interactive_testcase(
             for thread in threads:
                 thread.start()
             # Process creation and Windows Job setup are infrastructure time, not
-            # protocol idleness. Start the idle clock once both pumps can observe
-            # traffic so a tight idle limit does not erase the first transcript.
-            activity["last"] = time.monotonic()
+            # contestant execution or protocol idleness. Start both clocks once
+            # both pumps can observe traffic so a slow runner cannot consume the
+            # formal TL before the interactive session is ready.
+            monotonic_start = time.monotonic()
+            start = time.time()
+            activity["last"] = max(activity["last"], monotonic_start)
+            last_resource_sample = monotonic_start
 
             deadline = monotonic_start + float(time_limit)
             while solution.poll() is None or interactor.poll() is None:
