@@ -218,7 +218,11 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
                 {"type": "custom", "checker": "code/checker.cpp"},
                 """
                 #include <iostream>
-                int main(){ long long x; std::cin >> x; std::cout << -x << '\\n'; }
+                int main(){
+                    long long x;
+                    std::cin >> x;
+                    std::cout << (x == 2 ? x : -x) << '\\n';
+                }
                 """,
                 """
                 #include <iostream>
@@ -250,6 +254,54 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
             self.assertTrue(std_cases and all(event["status"] == "AC" for event in std_cases))
             self.assertTrue(wrong_cases and all(event["status"] == "WA" for event in wrong_cases))
             self.assertTrue(all(event["judge_type"] == "custom" for event in std_cases + wrong_cases))
+            sample_check = next(
+                event for event in events if event.get("type") == "sample_check"
+            )
+            self.assertTrue(sample_check["matches"], sample_check)
+
+    def test_custom_checker_ac_cannot_hide_sample_answer_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {"type": "custom", "checker": "code/checker.cpp"},
+                """
+                #include <iostream>
+                int main(){ long long x; std::cin >> x; std::cout << -x << '\\n'; }
+                """,
+                """
+                #include <iostream>
+                int main(){ long long x; std::cin >> x; std::cout << 0 << '\\n'; }
+                """,
+                {
+                    "checker.cpp": """
+                    #include "testlib.h"
+                    #include <cstdlib>
+                    int main(int argc, char** argv) {
+                        registerTestlibCmd(argc, argv);
+                        long long actual = ouf.readLong();
+                        long long expected = ans.readLong();
+                        if (std::llabs(actual) == std::llabs(expected))
+                            quitf(_ok, "accepted absolute value");
+                        quitf(_wa, "wrong absolute value");
+                    }
+                    """,
+                },
+            )
+            result, events = self.run_judge(problem)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(events[-1]["code"], "sample_answer_mismatch")
+            sample_case = next(
+                event
+                for event in events
+                if event.get("type") == "case"
+                and event.get("kind") == "std"
+                and event.get("case") == "sample/1"
+            )
+            self.assertEqual(sample_case["status"], "AC", sample_case)
+            sample_check = next(
+                event for event in events if event.get("type") == "sample_check"
+            )
+            self.assertFalse(sample_check["matches"], sample_check)
 
     def test_interactor_runs_bidirectional_protocol_and_kills_wrong_solution(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -2,6 +2,15 @@
 
 本文件整理自 README 历史快照、GitHub PR 与 npm 发布记录（首次建立于 2026-07-26）。此前版本的条目为事后补记，粒度以 PR 为准。
 
+## [Unreleased]
+
+0.5.0 校准与题面体检开发线。
+
+- Judge 生成本机资源校准 evidence，汇总 accepted 的 TL 余量和期望 TLE/MLE/OLE 的击杀证据；lint/status 以 `current/missing/stale/invalid` 报告，并固定声明本地测量不等于目标 Linux/DOMjudge 承诺。
+- 新增只读 `sample-check`：只运行样例与首个 accepted，按换行归一后的严格字节比较核对 `.ans`；Custom Checker 不能掩盖样例答案不一致，完整 Judge/build/seal 复用同一门禁。
+- lint 确定性拒绝题面 H1/章节/样例来源和 statement/Validator 路径错误，并输出始终非阻断的题面—Validator 约束对账报告；动态、析取和不支持表达式明确要求人工复核。
+- 新增 `constraints` 单一事实源设计评估；当前 Schema 尚未启用该字段，后续实现必须同时覆盖 Judge/stress/gen、缓存与 hash、WebUI round-trip、Typst 和 build snapshot。
+
 ## [0.4.0] - 2026-07-27
 
 数据工坊与正式发布证据版本。

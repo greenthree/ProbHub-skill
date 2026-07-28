@@ -89,6 +89,7 @@ probhub build
 | `gen <ID>` | 按 `data.recipes` 配方生成/校验 secret 数据；默认 plan 只报告，`--apply` 才写入，失败零写入 |
 | `lint [ID...]` | 检查规范源文件、代码路径和数据配对 |
 | `status [ID...]` | 报告 `current`、`stale`、`never-built` |
+| `sample-check [ID...]` | 只运行样例与首个 accepted，严格核对 `.ans`；不发布 Judge 校准 evidence |
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
 | `stress ID...` | 反复生成小数据，对拍 accepted 与 brute，保存首个可重放反例；`--against <解法>` 反向找刀，`--fixate <case>` 把命中一步固化为 secret 数据 + 配方 + 定向数据组 |
 | `checkpoint ID` | 发布当前题目的不可变 draft checkpoint，供并行组卷使用 |
@@ -148,6 +149,7 @@ probhub build L01 --skip-judge
 5. 开发代码或数据时执行：
 
    ```powershell
+   probhub sample-check <ID>
    probhub judge <ID>
    ```
 
@@ -195,6 +197,8 @@ probhub build L01 --skip-judge
 - 非唯一答案和浮点题使用 `judge.type: custom` 与 `code/checker.cpp`；交互题使用 `judge.type: interactive` 与 `code/interactor.cpp`。实现前读取 `references/checker-interactor.md`。
 - Checker/Interactor 必须使用附带的 DOMjudge/testlib 协议；交互题按需设置 `judge.interactive.idle_limit` 和 `transcript_limit`。Core 负责本地编译以及生成 `output_validators/validate/`，不得手工维护该生成目录。
 - 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
+- 样例 `.ans` 必须由配置顺序中的首个 accepted 精确复现；只归一 CRLF/CR 为 LF，尾空格、缺少尾换行和其他字节差异仍失败。Custom Checker 的非唯一输出语义不能替代这条样例不变量；交互题明确不适用。
+- 题面只能有一个 H1，必需 H2 依次为题目描述、输入格式、输出格式且内容非空；提示位于输出之后，样例输入/输出只来自 `data/sample`。lint 的约束对账始终是 `analysis_state: partial` 的人工复核报告，启发式 mismatch 只能 warning，不能作为自动正确性证明。
 - secret 数据优先通过 `data.recipes` 配方生成（`probhub gen`）：生成器 + 精确 args 可复现同一字节，手工数据显式 `manual: true`；没有配方的测试点 lint 会给 warning。配方格式见 `references/workspace-schema-v1.md`。
 - 为定向卡错解和复杂度数据配置 `data.groups` 与结构化 `solutions.*[].expected`；实现或审查时读取 `references/data-groups-expectations.md`。要求错解必须 WA 时显式写 `status: WA`，不得用偶然 RE/TLE 代替。
 - `limits.time` 使用正数秒；`limits.memory` 至少为 `256MB` 且为 2 的幂；`limits.output` 使用正整数 MiB，默认 `64`；`limits.processes` 使用正整数，默认 `32`。

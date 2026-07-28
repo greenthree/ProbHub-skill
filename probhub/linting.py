@@ -2,7 +2,7 @@ import hashlib
 import json
 import math
 import re
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .calibration import evaluate_calibration, validate_calibration_config
 from .datagen import recipe_coverage, resolve_data_dir
@@ -10,6 +10,7 @@ from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
 from .metadata import build_meta
 from .statement import parse_statement
+from .statement_consistency import analyze_constraint_consistency, reconcile_constraints
 from .typesetting import is_temporary_typst_source
 from .transactions import pending_workspace_transactions
 from .workspace import load_problem, problem_entries
@@ -62,6 +63,60 @@ def _problem_relative_path(problem_dir, value):
     return candidate
 
 
+def _is_link_like(path):
+    try:
+        return path.is_symlink() or (
+            hasattr(path, "is_junction") and path.is_junction()
+        )
+    except OSError:
+        return False
+
+
+def _problem_regular_file_path(problem_dir, value):
+    """Resolve a configured problem-local file without accepting links.
+
+    Returns ``(path, reason)`` where reason is one of ``invalid``, ``outside``,
+    ``symlink``, or ``missing``.  The explicit reason lets lint keep stable,
+    field-specific diagnostics without ever opening an escaped path.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        return None, "invalid"
+    problem_dir = Path(problem_dir).resolve()
+    value = value.strip()
+    relative = Path(value)
+    if relative.is_absolute() or PureWindowsPath(value).is_absolute():
+        return None, "outside"
+    if ".." in relative.parts or ".." in PureWindowsPath(value).parts:
+        return None, "outside"
+    candidate = problem_dir / relative
+    current = problem_dir
+    try:
+        for part in relative.parts:
+            if part in {"", "."}:
+                continue
+            current = current / part
+            if _is_link_like(current):
+                return None, "symlink"
+        resolved = candidate.resolve()
+        resolved.relative_to(problem_dir)
+    except (OSError, RuntimeError, ValueError):
+        return None, "outside"
+    if not resolved.is_file():
+        return None, "missing"
+    return resolved, None
+
+
+def _configured_file_error(field, value, reason, missing_label):
+    if reason == "outside":
+        return f"{field} must stay inside the problem directory: {value}"
+    if reason == "symlink":
+        return f"{field} must be a regular non-symlink file: {value}"
+    if reason == "invalid":
+        return f"{field} must be a non-empty relative path"
+    return f"{missing_label} not found: {value}"
+
+
 def problem_statement_asset_paths(problem_dir):
     problem_dir = Path(problem_dir).resolve()
     paths = []
@@ -87,22 +142,37 @@ def compute_statement_assets_hash(problem_dir):
 
 def problem_source_paths(problem_dir, config):
     problem_dir = Path(problem_dir).resolve()
-    paths = [problem_dir / "probhub.yaml", problem_dir / ((config.get("statement") or {}).get("source", "problem.md"))]
+    paths = [problem_dir / "probhub.yaml"]
+    statement_config = config.get("statement") or {}
+    statement_source = (
+        statement_config.get("source", "problem.md")
+        if isinstance(statement_config, dict)
+        else "problem.md"
+    )
+    statement_path = _problem_relative_path(problem_dir, statement_source)
+    if statement_path:
+        paths.append(statement_path)
     judge = config.get("judge") or {}
     for key in ("validator", "checker", "interactor"):
         if judge.get(key):
-            paths.append(problem_dir / judge[key])
+            path = _problem_relative_path(problem_dir, judge[key])
+            if path:
+                paths.append(path)
     for generator in config.get("generators") or []:
         path = generator.get("file") if isinstance(generator, dict) else generator
         if path:
-            paths.append(problem_dir / path)
+            candidate = _problem_relative_path(problem_dir, path)
+            if candidate:
+                paths.append(candidate)
     solutions = config.get("solutions") or {}
     for value in solutions.values():
         entries = value if isinstance(value, list) else [value]
         for entry in entries:
             path = entry.get("file") if isinstance(entry, dict) else entry
             if path:
-                paths.append(problem_dir / path)
+                candidate = _problem_relative_path(problem_dir, path)
+                if candidate:
+                    paths.append(candidate)
     stress = config.get("stress") or {}
     if isinstance(stress, dict):
         for key in ("generator", "accepted", "brute"):
@@ -202,19 +272,57 @@ def lint_problem(root, workspace, entry):
     if isinstance(process_limit, bool) or not isinstance(process_limit, int) or process_limit <= 0:
         errors.append("limits.processes must be a positive integer")
     errors.extend(validate_calibration_config(config))
-    source = problem_dir / ((config.get("statement") or {}).get("source", "problem.md"))
-    try:
-        parsed = parse_statement(source)
-        if parsed["title"] and name and parsed["title"] != name:
-            warnings.append(f"statement title '{parsed['title']}' differs from name '{name}'")
-        if parsed["unknown_headings"]:
-            warnings.append("unknown statement headings: " + ", ".join(parsed["unknown_headings"]))
-        forbidden = (workspace.get("lint") or {}).get("forbidden_patterns", list(DEFAULT_FORBIDDEN))
-        for pattern in forbidden:
-            if re.search(re.escape(str(pattern)), parsed["raw"], re.IGNORECASE):
-                errors.append(f"forbidden pattern in statement: {pattern}")
-    except Exception as exc:
-        errors.append(str(exc))
+    parsed = None
+    statement_value = config.get("statement")
+    statement_config = {} if statement_value is None else statement_value
+    if not isinstance(statement_config, dict):
+        errors.append("statement must be a mapping")
+        source_value = "problem.md"
+    else:
+        source_value = statement_config.get("source", "problem.md")
+    source, source_reason = _problem_regular_file_path(problem_dir, source_value)
+    statement_report = {
+        "source": source_value,
+        "structure": {
+            "ok": False,
+            "errors": [],
+        },
+    }
+    if source_reason:
+        message = _configured_file_error(
+            "statement.source",
+            source_value,
+            source_reason,
+            "statement",
+        )
+        errors.append(message)
+        statement_report["structure"]["errors"].append({
+            "code": "statement_source_invalid",
+            "severity": "error",
+            "message": message,
+        })
+    else:
+        try:
+            parsed = parse_statement(source, strict=False)
+        except Exception as exc:
+            errors.append(str(exc))
+            statement_report["structure"]["errors"].append({
+                "code": "statement_unreadable",
+                "severity": "error",
+                "message": str(exc),
+            })
+        else:
+            statement_report["structure"] = parsed["structure"]
+            errors.extend(issue["message"] for issue in parsed["structure"]["errors"])
+        if parsed is not None:
+            if parsed["title"] and name and parsed["title"] != name:
+                warnings.append(f"statement title '{parsed['title']}' differs from name '{name}'")
+            if parsed["unknown_headings"]:
+                warnings.append("unknown statement headings: " + ", ".join(parsed["unknown_headings"]))
+            forbidden = (workspace.get("lint") or {}).get("forbidden_patterns", list(DEFAULT_FORBIDDEN))
+            for pattern in forbidden:
+                if re.search(re.escape(str(pattern)), parsed["raw"], re.IGNORECASE):
+                    errors.append(f"forbidden pattern in statement: {pattern}")
     judge = config.get("judge") or {}
     judge_type = str(judge.get("type", "standard")).strip().lower()
     if judge_type == "checker":
@@ -223,10 +331,50 @@ def lint_problem(root, workspace, entry):
         errors.append(f"unsupported judge.type: {judge_type}")
 
     validator = judge.get("validator")
+    validator_path = None
     if not validator:
         errors.append("judge.validator is required")
-    elif not (problem_dir / validator).is_file():
-        errors.append(f"validator not found: {validator}")
+    else:
+        validator_path, validator_reason = _problem_regular_file_path(problem_dir, validator)
+        if validator_reason:
+            errors.append(_configured_file_error(
+                "judge.validator",
+                validator,
+                validator_reason,
+                "validator",
+            ))
+
+    constraint_reconciliation = reconcile_constraints([], [])
+    if parsed is not None and validator_path is not None:
+        try:
+            validator_text = validator_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            constraint_reconciliation["requires_review"] = True
+            constraint_reconciliation["diagnostics"].append({
+                "code": "constraint_analysis_unavailable",
+                "severity": "info",
+                "message": f"Validator source could not be read for constraint review: {exc}",
+                "path": str(validator),
+            })
+        else:
+            constraint_reconciliation = analyze_constraint_consistency(
+                parsed,
+                source_value,
+                validator_text,
+                validator,
+            )
+    else:
+        constraint_reconciliation["requires_review"] = True
+        constraint_reconciliation["diagnostics"].append({
+            "code": "constraint_analysis_unavailable",
+            "severity": "info",
+            "message": "constraint review requires a readable statement and problem-local Validator",
+        })
+    warnings.extend(
+        f"[{diagnostic['code']}] {diagnostic['message']}"
+        for diagnostic in constraint_reconciliation["diagnostics"]
+        if diagnostic.get("severity") == "warning"
+    )
 
     checker = judge.get("checker")
     interactor = judge.get("interactor")
@@ -493,12 +641,18 @@ def lint_problem(root, workspace, entry):
         data_hash,
     )
     warnings.extend(calibration["warnings"])
+    diagnostics = [
+        *calibration["diagnostics"],
+        *constraint_reconciliation["diagnostics"],
+    ]
     return {
         "id": entry["id"],
         "ok": not errors,
         "errors": errors,
         "warnings": warnings,
-        "diagnostics": calibration["diagnostics"],
+        "diagnostics": diagnostics,
+        "statement": statement_report,
+        "constraint_reconciliation": constraint_reconciliation,
         "calibration": calibration,
         "source_hash": source_hash,
         "data_hash": data_hash,

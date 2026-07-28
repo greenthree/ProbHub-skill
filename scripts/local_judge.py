@@ -47,6 +47,8 @@ PROTOCOL_VERSION = 1
 CACHE_SCHEMA_VERSION = SANDBOX_CACHE_SCHEMA_VERSION
 CACHE_FILENAME = "sandbox-cache-v1.json"
 CACHE_LIMITS = {"validator": 4000, "case": 12000, "probe": 2000}
+SAMPLE_ANSWER_SCHEMA_VERSION = 1
+SAMPLE_OUTPUT_PREVIEW_BYTES = 160
 _COMPILER_IDENTITY = None
 _FILE_DIGEST_CACHE = {}
 
@@ -89,6 +91,74 @@ def _file_digest(path):
         _FILE_DIGEST_CACHE.clear()
     _FILE_DIGEST_CACHE[cache_key] = value
     return value
+
+
+def normalize_sample_output(payload):
+    """Normalize CRLF and bare CR line endings while preserving every other byte."""
+    return payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _sample_output_summary(payload):
+    preview = payload[:SAMPLE_OUTPUT_PREVIEW_BYTES]
+    return {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+        "preview": preview.decode("utf-8", errors="backslashreplace"),
+        "preview_truncated": len(preview) < len(payload),
+    }
+
+
+def _sample_first_difference(actual, expected):
+    shared = min(len(actual), len(expected))
+    offset = next(
+        (index for index in range(shared) if actual[index] != expected[index]),
+        shared,
+    )
+    if offset == len(actual) == len(expected):
+        return None
+    return {
+        "offset": offset,
+        "actual_byte": actual[offset] if offset < len(actual) else None,
+        "expected_byte": expected[offset] if offset < len(expected) else None,
+    }
+
+
+def compare_sample_answer(output_file, ans_file):
+    """Compare accepted stdout and the stored sample answer as normalized bytes."""
+    try:
+        with open(output_file, "rb") as stream:
+            actual = normalize_sample_output(stream.read())
+        with open(ans_file, "rb") as stream:
+            expected = normalize_sample_output(stream.read())
+    except OSError as exc:
+        return {
+            "schema_version": SAMPLE_ANSWER_SCHEMA_VERSION,
+            "normalization": "crlf_cr_to_lf",
+            "matches": False,
+            "actual": None,
+            "expected": None,
+            "first_difference": None,
+            "error": str(exc),
+        }
+    matches = actual == expected
+    return {
+        "schema_version": SAMPLE_ANSWER_SCHEMA_VERSION,
+        "normalization": "crlf_cr_to_lf",
+        "matches": matches,
+        "actual": _sample_output_summary(actual),
+        "expected": _sample_output_summary(expected),
+        "first_difference": None if matches else _sample_first_difference(actual, expected),
+    }
+
+
+def valid_sample_answer_summary(value):
+    return (
+        isinstance(value, dict)
+        and value.get("schema_version") == SAMPLE_ANSWER_SCHEMA_VERSION
+        and isinstance(value.get("matches"), bool)
+        and isinstance(value.get("actual"), dict)
+        and isinstance(value.get("expected"), dict)
+    )
 
 
 def compiler_identity():
@@ -211,7 +281,13 @@ def calibration_probe_cache_key(
 
 
 class SandboxCache:
-    def __init__(self, prob_dir, enabled=True, read_enabled=None):
+    def __init__(
+        self,
+        prob_dir,
+        enabled=True,
+        read_enabled=None,
+        preserve_existing=False,
+    ):
         self.enabled = enabled
         self.read_enabled = enabled if read_enabled is None else bool(read_enabled and enabled)
         self.path = os.path.join(prob_dir, ".probhub", CACHE_FILENAME)
@@ -236,7 +312,7 @@ class SandboxCache:
             "probe_hits": 0,
             "probe_misses": 0,
         }
-        if self.read_enabled:
+        if self.read_enabled or (self.enabled and preserve_existing):
             self._load()
 
     def _load(self):
@@ -836,12 +912,15 @@ def run_standard_testcase(
     memory_limit=DEFAULT_MEMORY_LIMIT,
     output_limit=DEFAULT_OUTPUT_LIMIT,
     process_limit=DEFAULT_PROCESS_LIMIT,
+    capture_sample_answer=False,
 ):
     output_file = _temporary_output_path(bin_path)
     try:
         status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
             bin_path, in_file, output_file, time_limit, memory_limit, output_limit, process_limit
         )
+        if capture_sample_answer:
+            details["sample_answer"] = compare_sample_answer(output_file, ans_file)
         if status != "AC":
             return status, elapsed, memory, memory_enforced, message, details
         with open(ans_file, "r", encoding="utf-8", errors="replace") as answer, open(
@@ -859,6 +938,38 @@ def run_standard_testcase(
                 break
             except OSError:
                 time.sleep(0.05)
+
+
+def run_sample_answer_testcase(
+    bin_path,
+    in_file,
+    ans_file,
+    time_limit=DEFAULT_TIME_LIMIT,
+    memory_limit=DEFAULT_MEMORY_LIMIT,
+    output_limit=DEFAULT_OUTPUT_LIMIT,
+    process_limit=DEFAULT_PROCESS_LIMIT,
+):
+    """Run the first accepted solution and compare only normalized raw stdout.
+
+    Sample-check deliberately does not invoke a custom Checker. Its sole
+    invariant is that the program reproduces the stored sample answer bytes
+    after newline normalization.
+    """
+    output_file = _temporary_output_path(bin_path)
+    try:
+        status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
+            bin_path,
+            in_file,
+            output_file,
+            time_limit,
+            memory_limit,
+            output_limit,
+            process_limit,
+        )
+        details["sample_answer"] = compare_sample_answer(output_file, ans_file)
+        return status, elapsed, memory, memory_enforced, message, details
+    finally:
+        _remove_file_with_retries(output_file)
 
 
 def _checker_result(returncode, message):
@@ -892,6 +1003,7 @@ def run_custom_testcase(
     memory_limit=DEFAULT_MEMORY_LIMIT,
     output_limit=DEFAULT_OUTPUT_LIMIT,
     process_limit=DEFAULT_PROCESS_LIMIT,
+    capture_sample_answer=False,
 ):
     """Run a DOMjudge/testlib-style output validator.
 
@@ -904,6 +1016,8 @@ def run_custom_testcase(
         status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
             bin_path, in_file, output_file, time_limit, memory_limit, output_limit, process_limit
         )
+        if capture_sample_answer:
+            details["sample_answer"] = compare_sample_answer(output_file, ans_file)
         if status != "AC":
             return status, elapsed, memory, memory_enforced, message, details
         checker_stdout = output_file + ".checker.out"
@@ -1329,10 +1443,19 @@ def run_testcase(
     judge_bin=None,
     idle_limit=None,
     transcript_limit=65536,
+    capture_sample_answer=False,
 ):
     if judge_type == "custom":
         status, elapsed, memory, memory_enforced, message, details = run_custom_testcase(
-            bin_path, judge_bin, in_file, ans_file, time_limit, memory_limit, output_limit, process_limit
+            bin_path,
+            judge_bin,
+            in_file,
+            ans_file,
+            time_limit,
+            memory_limit,
+            output_limit,
+            process_limit,
+            capture_sample_answer=capture_sample_answer,
         )
         return status, elapsed, memory, memory_enforced, message, details
     if judge_type == "interactive":
@@ -1349,7 +1472,14 @@ def run_testcase(
             process_limit=process_limit,
         )
     status, elapsed, memory, memory_enforced, message, details = run_standard_testcase(
-        bin_path, in_file, ans_file, time_limit, memory_limit, output_limit, process_limit
+        bin_path,
+        in_file,
+        ans_file,
+        time_limit,
+        memory_limit,
+        output_limit,
+        process_limit,
+        capture_sample_answer=capture_sample_answer,
     )
     return status, elapsed, memory, memory_enforced, message, details
 
@@ -1613,7 +1743,317 @@ def build_solution_calibration(
         "resource_kills": resource_kills,
     }
 
-def finish(reporter, ok, message, exit_code, result_code=None):
+
+def cached_case_result(cache, key, require_sample_answer=False):
+    cached = cache.get("case", key)
+    if (
+        cached is not None
+        and require_sample_answer
+        and not valid_sample_answer_summary(
+            (cached.get("details") or {}).get("sample_answer")
+        )
+    ):
+        # A manually edited or partially written entry must never bypass the
+        # strict sample invariant. Count it as a miss and refresh this key.
+        cache.stats["case_hits"] -= 1
+        cache.stats["case_misses"] += 1
+        cache.delete("case", key)
+        return None
+    return cached
+
+
+def save_case_result(
+    cache,
+    key,
+    status,
+    elapsed,
+    memory,
+    memory_enforced,
+    message,
+    details,
+):
+    cache.set(
+        "case",
+        key,
+        {
+            "status": status,
+            "time": round(elapsed, 6),
+            "memory": memory,
+            "memory_enforced": memory_enforced,
+            "message": message,
+            "details": details,
+        },
+    )
+
+
+def sample_check_event_payload(
+    program_name,
+    testcase,
+    run_status,
+    run_message,
+    details,
+    cached,
+    judge_type,
+):
+    comparison = (details or {}).get("sample_answer") or {
+        "schema_version": SAMPLE_ANSWER_SCHEMA_VERSION,
+        "normalization": "crlf_cr_to_lf",
+        "matches": False,
+        "actual": None,
+        "expected": None,
+        "first_difference": None,
+        "error": "sample output summary is unavailable",
+    }
+    matches = comparison.get("matches") is True
+    execution_completed = (details or {}).get("termination_reason") == "completed"
+    mismatch = (
+        execution_completed
+        and run_status in {"AC", "WA"}
+        and not matches
+    )
+    return {
+        "applicable": True,
+        "ok": matches and execution_completed and run_status == "AC",
+        "program": program_name,
+        "case": testcase["case"],
+        "judge_type": judge_type,
+        "run_status": run_status,
+        "execution_completed": execution_completed,
+        "message": run_message,
+        "matches": matches,
+        "mismatch": mismatch,
+        "normalization": comparison.get("normalization"),
+        "actual": comparison.get("actual"),
+        "expected": comparison.get("expected"),
+        "first_difference": comparison.get("first_difference"),
+        **(
+            {"error": comparison.get("error")}
+            if comparison.get("error")
+            else {}
+        ),
+        "cached": cached,
+    }
+
+
+def run_sample_check_mode(
+    prob_dir,
+    config,
+    testcases,
+    reporter,
+    cache,
+    time_limit,
+    memory_limit,
+    output_limit,
+    process_limit,
+    judge_type,
+    judge_options_fingerprint,
+):
+    sample_cases = [item for item in testcases if item.get("suite") == "sample"]
+    if judge_type == "interactive":
+        reporter.event(
+            "sample_check",
+            applicable=False,
+            ok=True,
+            judge_type=judge_type,
+            reason="interactive answers are defined by the interactor protocol",
+        )
+        finish(
+            reporter,
+            True,
+            "sample answer consistency is not applicable to interactive problems",
+            0,
+            "sample_check_not_applicable",
+            applicable=False,
+            judge_type=judge_type,
+            checked_cases=0,
+            mismatches=0,
+        )
+    if judge_type not in {"standard", "custom"}:
+        finish(
+            reporter,
+            False,
+            f"unsupported judge.type: {judge_type}",
+            1,
+            "invalid_judge_type",
+            applicable=False,
+            judge_type=judge_type,
+        )
+    if not sample_cases:
+        finish(
+            reporter,
+            False,
+            "No .in test cases found under data/sample",
+            1,
+            "sample_cases_missing",
+            applicable=True,
+            judge_type=judge_type,
+            checked_cases=0,
+            mismatches=0,
+        )
+
+    # Sample-only case results cannot share a full standard/custom Judge key:
+    # this mode intentionally runs no Checker, and a later full Judge must not
+    # mistake that execution result for a completed Checker verdict. Compile
+    # cache entries remain shared between both commands.
+    sample_cache_kind = f"sample-answer-v{SAMPLE_ANSWER_SCHEMA_VERSION}"
+
+    accepted = discover_solution_entries(prob_dir, config).get("std") or []
+    if not accepted:
+        finish(
+            reporter,
+            False,
+            "accepted solution not configured",
+            1,
+            "accepted_missing",
+            applicable=True,
+            judge_type=judge_type,
+        )
+    first = accepted[0]
+    source_path = first["path"]
+    program_name = display_problem_path(prob_dir, source_path)
+    if not os.path.isfile(source_path):
+        finish(
+            reporter,
+            False,
+            f"first accepted source file not found: {program_name}",
+            1,
+            "accepted_missing",
+            applicable=True,
+            judge_type=judge_type,
+            program=program_name,
+        )
+    bin_path = binary_path_for_source(source_path)
+    fingerprint = source_fingerprint(source_path, prob_dir, "std")
+    if not compile_cpp(
+        source_path,
+        bin_path,
+        reporter,
+        "std",
+        program_name,
+        cache=cache,
+        fingerprint=fingerprint,
+    ):
+        finish(
+            reporter,
+            False,
+            f"first accepted solution failed to compile: {program_name}",
+            1,
+            "accepted_compile_failed",
+            applicable=True,
+            judge_type=judge_type,
+            program=program_name,
+        )
+
+    checks = []
+    for testcase in sample_cases:
+        if not os.path.exists(testcase["ans_path"]):
+            finish(
+                reporter,
+                False,
+                f"{testcase['case']}.ans not found",
+                1,
+                "sample_answer_missing",
+                applicable=True,
+                judge_type=judge_type,
+                program=program_name,
+            )
+        key = testcase_cache_key(
+            fingerprint,
+            testcase["in_path"],
+            testcase["ans_path"],
+            time_limit,
+            memory_limit,
+            judge_type=sample_cache_kind,
+            judge_fingerprint=sample_cache_kind,
+            judge_options_fingerprint=judge_options_fingerprint,
+        )
+        cached_result = cached_case_result(
+            cache, key, require_sample_answer=True
+        )
+        if cached_result is not None:
+            status = cached_result["status"]
+            elapsed = float(cached_result.get("time") or 0)
+            memory = cached_result.get("memory")
+            memory_enforced = bool(cached_result.get("memory_enforced"))
+            message = cached_result.get("message", "")
+            details = cached_result.get("details", {})
+            cached = True
+        else:
+            status, elapsed, memory, memory_enforced, message, details = run_sample_answer_testcase(
+                bin_path,
+                testcase["in_path"],
+                testcase["ans_path"],
+                time_limit,
+                memory_limit,
+                output_limit,
+                process_limit,
+            )
+            save_case_result(
+                cache,
+                key,
+                status,
+                elapsed,
+                memory,
+                memory_enforced,
+                message,
+                details,
+            )
+            cached = False
+        payload = sample_check_event_payload(
+            program_name,
+            testcase,
+            status,
+            message,
+            details,
+            cached,
+            judge_type,
+        )
+        checks.append(payload)
+        reporter.event("sample_check", **payload)
+        reporter.text(
+            f"  - {testcase['case'].ljust(16)} : "
+            f"{'MATCH' if payload['matches'] else 'MISMATCH'} "
+            f"({status}){' [cached]' if cached else ''}"
+        )
+
+    mismatches = sum(
+        1
+        for item in checks
+        if item["mismatch"]
+    )
+    failures = [item for item in checks if not item["ok"]]
+    if failures:
+        result_code = (
+            "sample_answer_mismatch" if mismatches else "sample_check_failed"
+        )
+        first_failure = failures[0]
+        finish(
+            reporter,
+            False,
+            f"sample answer check failed for {first_failure['case']} "
+            f"({first_failure['run_status']})",
+            1,
+            result_code,
+            applicable=True,
+            judge_type=judge_type,
+            program=program_name,
+            checked_cases=len(checks),
+            mismatches=mismatches,
+        )
+    finish(
+        reporter,
+        True,
+        f"all {len(checks)} sample answer(s) match the first accepted solution",
+        0,
+        "sample_answers_match",
+        applicable=True,
+        judge_type=judge_type,
+        program=program_name,
+        checked_cases=len(checks),
+        mismatches=0,
+    )
+
+def finish(reporter, ok, message, exit_code, result_code=None, **result_payload):
     cache = getattr(reporter, "cache", None)
     if cache is not None:
         cache.save()
@@ -1633,6 +2073,7 @@ def finish(reporter, ok, message, exit_code, result_code=None):
         code=result_code,
         exit_code=exit_code,
         message=message,
+        **result_payload,
     )
     reporter.text(message)
     sys.exit(exit_code)
@@ -1642,34 +2083,52 @@ def main():
     jsonl = "--jsonl" in sys.argv
     no_cache = "--no-cache" in sys.argv
     cancellable = "--cancellable" in sys.argv
-    args = [arg for arg in sys.argv[1:] if arg not in {"--jsonl", "--no-cache", "--cancellable"}]
+    sample_check_only = "--sample-check" in sys.argv
+    args = [
+        arg
+        for arg in sys.argv[1:]
+        if arg not in {"--jsonl", "--no-cache", "--cancellable", "--sample-check"}
+    ]
     reporter = Reporter(jsonl)
     if cancellable:
         install_cancellation_handlers()
 
     if len(args) != 1:
-        reporter.text("Usage: python scripts/local_judge.py <problem_dir> [--jsonl] [--no-cache] [--cancellable]")
+        reporter.text(
+            "Usage: python scripts/local_judge.py <problem_dir> "
+            "[--jsonl] [--no-cache] [--cancellable] [--sample-check]"
+        )
         finish(reporter, False, "Invalid arguments", 1)
 
     prob_dir = args[0]
-    cache = SandboxCache(prob_dir, enabled=True, read_enabled=not no_cache)
+    cache = SandboxCache(
+        prob_dir,
+        enabled=True,
+        read_enabled=not no_cache,
+        preserve_existing=sample_check_only and no_cache,
+    )
     reporter.cache = cache
     try:
         config = read_probhub_config(prob_dir)
     except ValueError as exc:
         finish(reporter, False, str(exc), 1)
 
+    judge_type = configured_judge_type(config)
     data_config = (config or {}).get("data") or {}
     sample_dir = os.path.join(prob_dir, data_config.get("sample_dir", "data/sample"))
     secret_dir = os.path.join(prob_dir, data_config.get("secret_dir", "data/secret"))
-    if not os.path.isdir(sample_dir) and not os.path.isdir(secret_dir):
+    if (
+        not sample_check_only
+        and not os.path.isdir(sample_dir)
+        and not os.path.isdir(secret_dir)
+    ):
         finish(reporter, False, "configured sample and secret data directories not found", 1)
 
     time_limit, memory_limit = read_problem_limits(prob_dir, config)
     output_limit, process_limit = read_problem_output_limit(prob_dir, config)
     policy = calibration_policy(config)
     testcases = collect_testcases(prob_dir, config)
-    if not testcases:
+    if not testcases and not sample_check_only:
         finish(reporter, False, "No .in test cases found under data/sample or data/secret", 1)
 
     reporter.text("\n" + "=" * 50)
@@ -1684,7 +2143,6 @@ def main():
     )
     reporter.text("Calibration note: local measurements are not a target Linux judge guarantee.")
     reporter.text("=" * 50)
-    judge_type = configured_judge_type(config)
     judge_config = (config or {}).get("judge") or {}
     interactive_config = judge_config.get("interactive") or {}
     idle_limit = _safe_float(interactive_config.get("idle_limit"), min(time_limit, 2.0))
@@ -1713,6 +2171,22 @@ def main():
         measurement_note=MEASUREMENT_NOTE,
         calibration_policy=policy,
     )
+
+    if sample_check_only:
+        run_sample_check_mode(
+            prob_dir,
+            config,
+            testcases,
+            reporter,
+            cache,
+            time_limit,
+            memory_limit,
+            output_limit,
+            process_limit,
+            judge_type,
+            judge_options_fingerprint,
+        )
+        return
 
     # 1. Compile and run Validator
     validator_entry = ((config or {}).get("judge") or {}).get("validator") if config is not None else None
@@ -1801,6 +2275,11 @@ def main():
 
     # 2. Discover and compile all solutions
     source_groups = discover_solution_entries(prob_dir, config)
+    first_accepted_program = (
+        display_problem_path(prob_dir, source_groups["std"][0]["path"])
+        if source_groups.get("std")
+        else None
+    )
     group_definitions = _data_groups(config)
     reporter.event("groups", groups=group_definitions)
     solutions = {"std": [], "brute": [], "wrong": []}
@@ -1828,6 +2307,16 @@ def main():
 
     if not solutions["std"]:
         finish(reporter, False, "accepted solution not found or failed to compile. Aborting.", 1)
+    if first_accepted_program and not any(
+        item[0] == first_accepted_program for item in solutions["std"]
+    ):
+        finish(
+            reporter,
+            False,
+            f"first accepted solution failed to compile: {first_accepted_program}",
+            1,
+            "accepted_compile_failed",
+        )
 
     # 3. Evaluate all solutions
     for kind, progs in solutions.items():
@@ -1840,6 +2329,13 @@ def main():
                 if not os.path.exists(testcase["ans_path"]):
                     finish(reporter, False, f"{testcase['case']}.ans not found", 1)
 
+                requires_sample_answer = (
+                    kind == "std"
+                    and prog_name == first_accepted_program
+                    and testcase.get("suite") == "sample"
+                    and judge_type != "interactive"
+                )
+
                 key = testcase_cache_key(
                     fingerprint,
                     testcase["in_path"],
@@ -1850,7 +2346,11 @@ def main():
                     judge_fingerprint=judge_fingerprint,
                     judge_options_fingerprint=judge_options_fingerprint,
                 )
-                cached_result = cache.get("case", key)
+                cached_result = cached_case_result(
+                    cache,
+                    key,
+                    require_sample_answer=requires_sample_answer,
+                )
                 if cached_result is not None:
                     status = cached_result["status"]
                     t = float(cached_result.get("time") or 0)
@@ -1872,18 +2372,17 @@ def main():
                         judge_bin=judge_bin,
                         idle_limit=idle_limit,
                         transcript_limit=transcript_limit,
+                        capture_sample_answer=requires_sample_answer,
                     )
-                    cache.set(
-                        "case",
+                    save_case_result(
+                        cache,
                         key,
-                        {
-                            "status": status,
-                            "time": round(t, 6),
-                            "memory": memory,
-                            "memory_enforced": memory_enforced,
-                            "message": judge_message,
-                            "details": judge_details,
-                        },
+                        status,
+                        t,
+                        memory,
+                        memory_enforced,
+                        judge_message,
+                        judge_details,
                     )
                     cached = False
                 stats[status] += 1
@@ -1919,6 +2418,30 @@ def main():
                     "termination_reason": judge_details.get("termination_reason"),
                     "cached": cached,
                 })
+                if requires_sample_answer:
+                    sample_payload = sample_check_event_payload(
+                        prog_name,
+                        testcase,
+                        status,
+                        judge_message,
+                        judge_details,
+                        cached,
+                        judge_type,
+                    )
+                    reporter.event("sample_check", **sample_payload)
+                    if sample_payload["mismatch"]:
+                        finish(
+                            reporter,
+                            False,
+                            f"sample answer mismatch for {testcase['case']} "
+                            f"using {prog_name}",
+                            1,
+                            "sample_answer_mismatch",
+                            applicable=True,
+                            judge_type=judge_type,
+                            program=prog_name,
+                            case=testcase["case"],
+                        )
                 if judge_type == "interactive" and judge_details.get("transcript"):
                     reporter.event(
                         "transcript",
