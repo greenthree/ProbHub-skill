@@ -4,12 +4,18 @@ from pathlib import Path
 
 from .build_lock import workspace_file_lock
 from .io import atomic_write_json
+from .solutions import (
+    case_group_names,
+    normalize_data_groups,
+    normalize_solution_entries,
+    select_run_cases,
+)
 
 
-CALIBRATION_SCHEMA_VERSION = 1
-CALIBRATION_STRATEGY_VERSION = 1
+CALIBRATION_SCHEMA_VERSION = 2
+CALIBRATION_STRATEGY_VERSION = 2
 SANDBOX_CACHE_SCHEMA_VERSION = 4
-EVIDENCE_FILENAME = "judge-evidence-v1.json"
+EVIDENCE_FILENAME = "judge-evidence-v2.json"
 EVIDENCE_LOCK_FILENAME = "judge-evidence.lock"
 DEFAULT_ACCEPTED_TIME_MULTIPLIER = 3.0
 DEFAULT_EXPECTED_TLE_TIME_MULTIPLIER = 1.5
@@ -154,6 +160,16 @@ def build_judge_evidence(events, source_hash, data_hash, measured_at):
                 "program": item.get("program"),
                 "stats": item.get("stats", {}),
                 "expectation": item.get("expectation", {}),
+                "execution_domain": {
+                    key: item.get(key)
+                    for key in (
+                        "run_on",
+                        "executed_cases",
+                        "skipped_cases",
+                        "coverage_ok",
+                        "unexecuted_expected_cases",
+                    )
+                },
                 "calibration": item.get("calibration", {}),
             }
             for item in summaries
@@ -187,7 +203,42 @@ def _configured_solutions(config):
     return configured
 
 
-def _evidence_structure_error(evidence, config):
+def _configured_execution_domains(problem_dir, config):
+    configured = _configured_solutions(config)
+    if not configured:
+        return {}
+    problem_dir = Path(problem_dir)
+    groups = normalize_data_groups(config)
+    data = config.get("data") or {}
+    testcases = []
+    for suite, default in (("sample", "data/sample"), ("secret", "data/secret")):
+        directory = problem_dir / data.get(f"{suite}_dir", default)
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.in"), key=lambda item: item.name):
+            case_name = f"{suite}/{path.stem}"
+            testcases.append({
+                "suite": suite,
+                "name": path.stem,
+                "case": case_name,
+                "groups": case_group_names(case_name, suite, path.stem, groups),
+            })
+    result = {}
+    for kind, entries in normalize_solution_entries(config).items():
+        for entry in entries:
+            program = entry.get("file")
+            if not program:
+                continue
+            executed, skipped = select_run_cases(entry, testcases)
+            result[(kind, program.replace("\\", "/"))] = {
+                "run_on": list(entry.get("run_on") or []),
+                "executed_cases": [case["case"] for case in executed],
+                "skipped_cases": [case["case"] for case in skipped],
+            }
+    return result
+
+
+def _evidence_structure_error(evidence, config, problem_dir=None):
     if evidence.get("strategy_version") != CALIBRATION_STRATEGY_VERSION:
         return "calibration strategy changed"
     if evidence.get("sandbox_cache_schema_version") != SANDBOX_CACHE_SCHEMA_VERSION:
@@ -195,25 +246,62 @@ def _evidence_structure_error(evidence, config):
     solutions = evidence.get("solutions")
     if not isinstance(solutions, list) or not solutions:
         return "solution summaries are missing"
-    observed = set()
+    observed = {}
     for solution in solutions:
         if not isinstance(solution, dict):
             return "solution summary is invalid"
         kind = solution.get("kind")
         program = solution.get("program")
+        expectation = solution.get("expectation")
+        execution_domain = solution.get("execution_domain")
         calibration = solution.get("calibration")
         if not isinstance(kind, str) or not isinstance(program, str):
             return "solution identity is invalid"
+        if not isinstance(expectation, dict):
+            return f"solution expectation is missing for {program}"
+        if not isinstance(execution_domain, dict):
+            return f"solution execution domain is missing for {program}"
+        for key in ("run_on", "executed_cases", "skipped_cases", "unexecuted_expected_cases"):
+            value = expectation.get(key)
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                return f"solution expectation {key} is invalid for {program}"
+            if execution_domain.get(key) != value:
+                return f"solution execution domain disagrees with expectation for {program}"
+        if not isinstance(expectation.get("coverage_ok"), bool):
+            return f"solution expectation coverage_ok is invalid for {program}"
+        if execution_domain.get("coverage_ok") != expectation.get("coverage_ok"):
+            return f"solution execution domain disagrees with expectation for {program}"
         if not isinstance(calibration, dict) or not _finite_number(
             calibration.get("max_time")
         ):
             return f"solution calibration is incomplete for {program}"
-        observed.add((kind, program.replace("\\", "/")))
-    missing = sorted(_configured_solutions(config) - observed)
-    if missing:
-        return "solution summaries are incomplete: " + ", ".join(
-            f"{kind}:{program}" for kind, program in missing
-        )
+        identity = (kind, program.replace("\\", "/"))
+        if identity in observed:
+            return f"solution summary is duplicated for {program}"
+        observed[identity] = solution
+    configured = _configured_solutions(config)
+    if configured and set(observed) != configured:
+        missing = sorted(configured - set(observed))
+        extra = sorted(set(observed) - configured)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(f"{kind}:{program}" for kind, program in missing))
+        if extra:
+            details.append("unexpected " + ", ".join(f"{kind}:{program}" for kind, program in extra))
+        return "solution identities do not match current config: " + "; ".join(details)
+    if configured and problem_dir is not None:
+        domains = _configured_execution_domains(problem_dir, config)
+        for identity, current in domains.items():
+            solution = observed.get(identity) or {}
+            recorded = solution.get("execution_domain") or {}
+            for key in ("run_on", "executed_cases", "skipped_cases"):
+                if recorded.get(key) != current[key]:
+                    return (
+                        f"solution execution domain does not match current config for "
+                        f"{identity[1]} ({key})"
+                    )
+            if recorded.get("coverage_ok") is not True or recorded.get("unexecuted_expected_cases"):
+                return f"solution execution coverage is incomplete for {identity[1]}"
     return None
 
 
@@ -233,12 +321,6 @@ def evaluate_calibration(problem_dir, config, source_hash, data_hash):
         diagnostics.append(_diagnostic(
             "calibration_evidence_stale",
             "local judge calibration evidence uses an unsupported schema; rerun probhub judge",
-        ))
-    elif (structure_error := _evidence_structure_error(evidence, config)) is not None:
-        state = "invalid"
-        diagnostics.append(_diagnostic(
-            "calibration_evidence_invalid",
-            f"local judge calibration evidence is incomplete ({structure_error}); rerun probhub judge",
         ))
     elif (
         evidence.get("source_hash") != source_hash
@@ -260,6 +342,12 @@ def evaluate_calibration(problem_dir, config, source_hash, data_hash):
         diagnostics.append(_diagnostic(
             "calibration_evidence_stale",
             "local judge calibration evidence was measured on a different platform; rerun probhub judge",
+        ))
+    elif (structure_error := _evidence_structure_error(evidence, config, problem_dir)) is not None:
+        state = "invalid"
+        diagnostics.append(_diagnostic(
+            "calibration_evidence_invalid",
+            f"local judge calibration evidence is incomplete ({structure_error}); rerun probhub judge",
         ))
     else:
         accepted_required = policy["accepted_time_multiplier"]

@@ -9,6 +9,7 @@ from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
 from .metadata import build_meta
+from .solutions import analyze_solution_verification
 from .statement import parse_statement
 from .statement_consistency import analyze_constraint_consistency, reconcile_constraints
 from .typesetting import is_temporary_typst_source
@@ -411,47 +412,16 @@ def lint_problem(root, workspace, entry):
             errors.append("judge.interactor requires judge.type: interactive")
     solutions = config.get("solutions") or {}
     configured_programs = set()
-    referenced_groups = set()
-    allowed_statuses = {"AC", "WA", "TLE", "MLE", "OLE", "RE", "FAIL"}
+    if not isinstance(solutions, dict):
+        errors.append("solutions must be a mapping")
+        solutions = {}
     for solution_kind in ("accepted", "brute", "wrong"):
         entries = solutions.get(solution_kind) or []
         entries = entries if isinstance(entries, list) else [entries]
         for solution in entries:
             solution_file = solution.get("file") if isinstance(solution, dict) else solution
-            if solution_file:
-                solution_file = str(solution_file).replace("\\", "/")
-                configured_programs.add(solution_file)
-                if not (problem_dir / solution_file).is_file():
-                    errors.append(f"solution not found: {solution_file}")
-            if not isinstance(solution, dict) or not solution.get("expected"):
-                continue
-            expected = solution.get("expected")
-            if not isinstance(expected, dict):
-                errors.append(f"solutions.{solution_kind}.expected must be a mapping")
-                continue
-            if "status" not in expected:
-                errors.append(f"expected.status is required for {solution_file}")
-            for field in ("status", "forbid"):
-                values = expected.get(field)
-                values = [values] if isinstance(values, str) else values or []
-                if not isinstance(values, list):
-                    errors.append(f"expected.{field} must be a status or list for {solution_file}")
-                    continue
-                if field == "status" and not values:
-                    errors.append(f"expected.status must not be empty for {solution_file}")
-                invalid = sorted({str(status).upper() for status in values} - allowed_statuses)
-                if invalid:
-                    errors.append(
-                        f"invalid expected {field} for {solution_file}: {', '.join(invalid)}"
-                    )
-            groups = expected.get("groups")
-            groups = [groups] if isinstance(groups, str) else groups or []
-            if not isinstance(groups, list):
-                errors.append(f"expected.groups must be a name or list for {solution_file}")
-                groups = []
-            referenced_groups.update(str(group) for group in groups)
-            if "all" in expected and not isinstance(expected.get("all"), bool):
-                errors.append(f"expected.all must be boolean for {solution_file}")
+            if isinstance(solution_file, str) and solution_file.strip():
+                configured_programs.add(solution_file.strip().replace("\\", "/"))
 
     stress = config.get("stress")
     if stress is not None:
@@ -547,10 +517,6 @@ def lint_problem(root, workspace, entry):
     duplicate_groups = sorted({name for name in group_names if group_names.count(name) > 1})
     if duplicate_groups:
         errors.append("duplicate data group names: " + ", ".join(duplicate_groups))
-    unknown_groups = sorted(referenced_groups - set(group_names))
-    if unknown_groups:
-        errors.append("unknown expected groups: " + ", ".join(unknown_groups))
-
     for kind, default in (("sample", "data/sample"), ("secret", "data/secret")):
         try:
             directory = resolve_data_dir(problem_dir, config, f"{kind}_dir", default)
@@ -632,6 +598,9 @@ def lint_problem(root, workspace, entry):
                     f"secret data has no generation recipes "
                     f"({len(uncovered)} case(s) not reproducible)"
                 )
+    solution_verification = analyze_solution_verification(problem_dir, config)
+    errors.extend(solution_verification.get("errors") or [])
+    warnings.extend(solution_verification.get("warnings") or [])
     source_hash = compute_source_hash(problem_dir, config)
     data_hash = compute_data_hash(problem_dir, config)
     calibration = evaluate_calibration(
@@ -644,6 +613,7 @@ def lint_problem(root, workspace, entry):
     diagnostics = [
         *calibration["diagnostics"],
         *constraint_reconciliation["diagnostics"],
+        *(solution_verification.get("diagnostics") or []),
     ]
     return {
         "id": entry["id"],
@@ -653,6 +623,7 @@ def lint_problem(root, workspace, entry):
         "diagnostics": diagnostics,
         "statement": statement_report,
         "constraint_reconciliation": constraint_reconciliation,
+        "solution_verification": solution_verification,
         "calibration": calibration,
         "source_hash": source_hash,
         "data_hash": data_hash,

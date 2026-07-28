@@ -60,6 +60,18 @@ class ScaffoldTests(unittest.TestCase):
                     [entry["file"] for entry in config["solutions"]["accepted"]],
                     ["code/std.cpp", "code/std2.cpp"],
                 )
+                self.assertEqual(
+                    config["solutions"]["accepted"][1]["independence"],
+                    {
+                        "from": "code/std.cpp",
+                        "basis": "key_implementation",
+                        "note": "使用按位异或与进位迭代实现加法，不依赖 std.cpp 的直接算术相加。",
+                    },
+                )
+                std2 = (problem_dir / "code/std2.cpp").read_text(encoding="utf-8")
+                self.assertIn("x ^= y", std2)
+                self.assertIn("(x & y) << 1", std2)
+                self.assertNotIn("a + b", std2)
                 self.assertEqual(config["solutions"]["brute"], [])
                 self.assertEqual(
                     [entry["file"] for entry in config["solutions"]["wrong"]],

@@ -16,6 +16,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 - **跨平台资源控制**：共享 `probhub/process_control.py` 为普通程序、Checker、Validator、编译器、Interactor 和 stress 提供完整进程树清理、时间/内存/输出/进程数限制，并报告 TLE/MLE/OLE/RE/WA/AC。
 - **本机限制校准**：Judge 汇总每个解法的最大用时、TL 占比和 TLE/MLE/OLE 击杀余量；lint/status 读取最近一次完整成功的本地证据，按可配置阈值提示余量不足，并明确本机结果不等于目标 Linux/DOMjudge 承诺。
 - **题面与样例体检**：lint 确定性检查题面标题、章节、样例来源和问题内路径，并以非阻断报告对照题面范围与 Validator 字面量；`sample-check` 只运行样例和首个 accepted，严格确认 `.ans` 与当前标程输出一致。
+- **双实现互证与运行域**：accepted 可记录算法/关键实现独立性；较慢参考解可通过 `run_on` 只覆盖可承受的数据组，同时保留样例必跑、期望覆盖栅栏和高难度单标程 warning。
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 出题工作台**：提供响应式明暗双主题控制台，支持题目导航与排序、Markdown 和题面图片预览、题面/样例/封面编辑、revision 冲突保护、隔离 PDF 编译预览及临时代码沙箱评测，正式分发统一调用 Core。
 - **可重复构建 Core**：Workspace Schema v1、不可变 checkpoint/generation、sealed revision 正式发布门禁、Manifest v3、过期检测和统一 `probhub` CLI。
@@ -237,8 +238,10 @@ python scripts/local_judge.py <problem_dir> --jsonl
 
 - `probhub.yaml` 中 `judge.validator` 指向的验证器是否接受所有输入数据。
 - `solutions.accepted` 指向的程序是否全部 AC。
+- 首个 accepted 是否保持全量运行；第二及后续 accepted 的 `run_on` 是否只引用有效数据组，且完整公开实际执行与跳过用例。
+- accepted 的 `independence` 是否包含可人工复核的来源、依据和说明；Core 会拒绝同路径、同字节或直接 include 复用等确定反证，但不会冒充算法独立性证明。
 - 首个 accepted 在每个样例上的原始输出是否与 `.ans` 经换行归一后字节一致；Custom Checker 接受非唯一输出也不能绕过该不变量。
-- `solutions.brute` 指向的程序是否不 WA，并且至少出现 TLE 或 MLE，用于证明强数据足够强。
+- `solutions.brute` 指向的程序是否不 WA，并且至少出现 TLE、MLE 或 OLE，用于证明强数据足够强。
 - `solutions.wrong` 指向的程序是否不能全 AC。
 - `judge.type: standard` 的普通题按行比较，允许每行末尾多余的空格或 Tab；行内空格和内部换行仍严格检查。
 - `judge.type: custom` 时，使用 `code/checker.cpp` 按 DOMjudge/testlib 协议判定输出。
@@ -246,9 +249,10 @@ python scripts/local_judge.py <problem_dir> --jsonl
 - 每个测试点的时间、内存、输出和进程数状态，以及 Checker/Interactor 判定信息；选手输出超过限制时报告 `OLE`。
 - 普通程序、Checker、Validator、编译器、Interactor 与 stress 统一使用完整进程树控制；即使父进程正常退出，残留后代也会被清理。
 - `data.groups` 与 `solutions.*[].expected` 定义的数据组击杀矩阵、目标/禁止状态和首个相关用例；详见 `references/data-groups-expectations.md`。
+- `difficulty >= 4` 且缺少额外全域 AC 参考实现时给出结构化 warning；只在局部组运行的参考解不会消除该提示。
 - 每个解法的 `max_time`、最大用例、TL 占比和资源击杀余量。默认建议 accepted 满足 `max_time × 3 <= TL`；期望 TLE 的目标用例通过延长探针证明至少 `1.5 × TL` 的本机运行下界。
 
-完整成功的 Judge 会原子更新本地忽略文件 `<problem>/.probhub/judge-evidence-v1.json`。失败、取消或超时保留上一份成功证据；lint/status 只使用与当前 source/data hash、平台和测量策略一致的 evidence。Windows 与 Linux/DOMjudge 的启动、调度、计时和内存口径不同，正式限制仍需在目标 Linux 评测环境重新校准。
+完整成功的 Judge 会原子更新本地忽略文件 `<problem>/.probhub/judge-evidence-v2.json`。失败、取消或超时保留上一份成功证据；lint/status 先按 schema、当前 source/data hash 与平台识别过期证据，再验证测量策略、结构和每个解法的运行域。Windows 与 Linux/DOMjudge 的启动、调度、计时和内存口径不同，正式限制仍需在目标 Linux 评测环境重新校准。
 
 ### 沙箱增量缓存
 

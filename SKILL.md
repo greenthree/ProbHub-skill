@@ -39,7 +39,7 @@ description: 当用户需要创作或维护算法竞赛题目、生成测试数�
 
 `.probhub/build.lock` 与 `.probhub/generation.lock` 是可保留的 OS 文件锁载体，不能用“文件是否存在”判断是否占用；`.probhub/sandbox-cache-v1.json` 是本地缓存，`.probhub/stress/` 保存可重放差分反例，`.probhub/checkpoints/` 与 `.probhub/generations/` 保存并行出题期间的不可变本地版本。这些路径都应被 Git 忽略，禁止提交或手工维护。
 
-`<problem>/.probhub/judge-evidence-v1.json` 是最近一次完整成功 Judge 的本地校准证据，`judge-evidence.lock` 是其 OS 发布锁。lint/status 只在 evidence schema、测量策略、平台和 source/data hash 与当前题目一致时使用；失败 Judge 不覆盖上一份成功证据，较旧的 build 快照也不能覆盖较新的本地测量。它们不进入 Manifest 或 ZIP，也不得提交。
+`<problem>/.probhub/judge-evidence-v2.json` 是最近一次完整成功 Judge 的本地校准证据，`judge-evidence.lock` 是其 OS 发布锁。lint/status 先按 schema、source/data hash 与平台判断 evidence 是否过期，再验证测量策略、结构和每个解法的运行域；失败 Judge 不覆盖上一份成功证据，较旧的 build 快照也不能覆盖较新的本地测量。它们不进入 Manifest 或 ZIP，也不得提交；旧 `judge-evidence-v1.json` 继续被 Git 忽略，但不会作为当前证据读取。
 
 # 3. CLI 操作规则
 
@@ -85,7 +85,7 @@ probhub build
 | 命令 | 作用 |
 |---|---|
 | `doctor` | 检查 Python、Node、Typst、g++ 和依赖 |
-| `new <ID>` | 创建可编译、judge 开箱即过的题目骨架（`--judge` 可选 standard/custom/interactive），含双 accepted、示例错解与定向数据组 |
+| `new <ID>` | 创建可编译、judge 开箱即过的题目骨架（`--judge` 可选 standard/custom/interactive），含带独立性声明的双 accepted、示例错解与定向数据组 |
 | `gen <ID>` | 按 `data.recipes` 配方生成/校验 secret 数据；默认 plan 只报告，`--apply` 才写入，失败零写入 |
 | `lint [ID...]` | 检查规范源文件、代码路径和数据配对 |
 | `status [ID...]` | 报告 `current`、`stale`、`never-built` |
@@ -190,7 +190,7 @@ probhub build L01 --skip-judge
 - 在 `code/` 中维护：
   - `std.cpp`：最优正确解。
   - `validator.cpp`：基于 testlib.h，严格验证范围与格式。
-  - `brute.cpp`：朴素但绝对正确，允许 TLE/MLE，不允许 WA。
+  - `brute.cpp`：朴素但绝对正确，允许 TLE/MLE/OLE，不允许 WA。
   - `wrong*.cpp`：针对典型错误，必须被数据击杀。编写前先按 `references/mistake-taxonomy.md` 做三层（思路/复杂度/实现）题目特定枚举，每层至少一个错解或说明不适用；与正解等价的错解不得保留；不得只枚举 WA 型错法。
   - `inmaker.cpp` 或生成脚本：覆盖样例、随机、边界、极限和定向卡错解数据。数量与配比遵循 `references/mistake-taxonomy.md` 的数据强度纪律：单测试文件 ≥30、多组测试 ≥20，边界/定向/近上界大数据占明显比例，纯随机只作补充，数据预算主动打满。
 - 普通唯一答案题使用 `judge.type: standard`：忽略整个输出首尾空白和每行末尾空格/Tab，但行内空格与内部换行仍需一致。需要 Token 级宽松比较时改用 Checker。
@@ -201,6 +201,9 @@ probhub build L01 --skip-judge
 - 题面只能有一个 H1，必需 H2 依次为题目描述、输入格式、输出格式且内容非空；提示位于输出之后，样例输入/输出只来自 `data/sample`。lint 的约束对账始终是 `analysis_state: partial` 的人工复核报告，启发式 mismatch 只能 warning，不能作为自动正确性证明。
 - secret 数据优先通过 `data.recipes` 配方生成（`probhub gen`）：生成器 + 精确 args 可复现同一字节，手工数据显式 `manual: true`；没有配方的测试点 lint 会给 warning。配方格式见 `references/workspace-schema-v1.md`。
 - 为定向卡错解和复杂度数据配置 `data.groups` 与结构化 `solutions.*[].expected`；实现或审查时读取 `references/data-groups-expectations.md`。要求错解必须 WA 时显式写 `status: WA`，不得用偶然 RE/TLE 代替。
+- 慢参考解可在第二及后续 accepted 上配置 `run_on: [groups]`；多个组取并集，sample 始终执行。首个 accepted 禁止缩域；局部 accepted 必须显式写 `expected.groups`，且期望和 target 覆盖不得超出运行域。该字段只影响本地 Judge，不影响 stress 或 DOMjudge 包。
+- 第二及后续 accepted 用 `independence: {from, basis, note}` 记录独立思路或关键实现及人工复核说明；`basis` 只能是 `algorithm` / `key_implementation`。不得用变量重命名、I/O 改写、同字节源码或直接 include 主实现冒充独立解。Core 只能检查确定反证，不能自动证明算法独立。
+- `difficulty >= 4` 且只有一个 accepted、没有额外全域 AC 参考实现时，lint 会给结构化 warning；局部 `run_on` 参考解不能替代全域互证。
 - `limits.time` 使用正数秒；`limits.memory` 至少为 `256MB` 且为 2 的幂；`limits.output` 使用正整数 MiB，默认 `64`；`limits.processes` 使用正整数，默认 `32`。
 - 复杂生成器读取 `references/cyaron.md`；简单 C++ 生成器读取 `references/fast.md`。用于差分测试的 Generator 必须把单个测试点写到 stdout，并只由 `{seed}` / `{round}` 参数控制随机性；读取 `references/stress.md`。
 
@@ -210,7 +213,7 @@ probhub build L01 --skip-judge
 - accepted 非全 AC：修复标程、答案或 Checker/Interactor。
 - Checker/Interactor 返回 `FAIL`：这是题目基础设施错误，不得当作错解被击杀；检查官方答案、协议和评测程序。
 - brute 出现 WA：修复 brute、标程或答案；不得忽略。
-- brute 没有任何 TLE/MLE：检查复杂度与数据强度。
+- brute 没有任何 TLE/MLE/OLE：检查复杂度与数据强度。
 - wrong 全 AC：用 `probhub stress <ID> --against <该错解> --fixate <case>` 找刀并一步固化；`not_separated` 时加强生成器分布或修正错解模型（见 `references/stress.md` 第 8 节）。
 - 出现 `OLE`：先检查程序是否无限输出，再判断 `limits.output` 是否确实过小；不得用放宽上限掩盖错误程序。
 - 出现 `process limit exceeded`：检查递归创建进程或未回收子进程；官方 Validator、Checker、Interactor、Generator 或编译器触发限制时按基础设施错误处理。

@@ -93,7 +93,7 @@ probhub new L07 --name "交互题" --judge interactive
 ├── code/
 │   ├── validator.cpp       # testlib 严格校验样板
 │   ├── std.cpp             # 主标程
-│   ├── std2.cpp            # 独立第二实现槽位（交叉验证）
+│   ├── std2.cpp            # 按位进位加法的独立第二实现（带 independence 声明）
 │   ├── brute.cpp           # 暴力槽位；写好后自行登记进 solutions.brute
 │   ├── wrong.cpp           # 思路层示例错解（被样例击杀）
 │   ├── wrong2.cpp          # 实现层示例错解（被 overflow 定向组击杀）
@@ -108,8 +108,9 @@ probhub new L07 --name "交互题" --judge interactive
 要点：
 
 - `--judge` 可选 `standard`（默认）、`custom`、`interactive`；custom 附 Checker 骨架，interactive 附 Interactor 骨架并使用带刷新的标程模板。
+- `std2.cpp` 不只是更换 I/O：它用异或与进位迭代实现加法，并在第二 accepted 上声明 `independence.from/basis/note`，示范真正的交叉实现证据。
 - 两个 secret 测试点以 `manual: true` 配方登记（配方覆盖完整，lint 无 warning）；换成生成器数据时改写 `data.recipes` 后运行 `probhub gen`。
-- `solutions.brute` 初始为空：judge 对已登记的 brute 要求至少一个 TLE/MLE，脚手架数据尚无 brute-killer，实现真实暴力并准备击杀数据后再登记。
+- `solutions.brute` 初始为空：judge 对已登记的 brute 默认要求至少一个 TLE/MLE/OLE，脚手架数据尚无 brute-killer，实现真实暴力并准备击杀数据后再登记。
 - 错解枚举与数据强度纪律见 `references/mistake-taxonomy.md`；示例的 `overflow` 组演示了 `data.groups` + `targets` + `expected` 的定向击杀写法。
 - `new` 会持有工作区写锁并原子写入 `workspace.yaml`；并发写入返回 `build_busy`。
 - 题目 ID 与 `--directory` 的每级路径组件仅允许 `[A-Za-z0-9][A-Za-z0-9_.-]*`，且目录必须位于工作区内（拒绝 `../`、绝对路径与工作区根本身）；注册进 `workspace.yaml` 的 directory 统一为 POSIX 相对路径。
@@ -204,7 +205,7 @@ probhub sample-check [ID...] [--no-cache]
 
 只编译并运行 `data/sample` 与配置顺序中的首个 accepted，不运行 Validator、brute、wrong 或 Custom Checker。accepted stdout 与 `.ans` 只把 CRLF/裸 CR 归一为 LF，之后执行严格字节比较；尾空格、缺少尾换行和其他字节差异均返回 `sample_answer_mismatch`。Custom Checker 即使允许非唯一输出，也不能替代正式样例答案必须由首个 accepted 精确复现的不变量。
 
-交互题返回成功但 `applicable: false` / `sample_check_not_applicable`。命令可复用并更新忽略的编译/样例 case cache；`--no-cache` 强制重跑当前样例但保留无关缓存项。它不运行完整 Judge、不发布或覆盖 `judge-evidence-v1.json`，也不写规范源、PDF、ZIP、metadata 或 Manifest。完整 `judge`、`seal` 与 `build` 同样执行该样例不变量，因此错误 `.ans` 会在正式交付前被确定性拦截。
+交互题返回成功但 `applicable: false` / `sample_check_not_applicable`。命令可复用并更新忽略的编译/样例 case cache；`--no-cache` 强制重跑当前样例但保留无关缓存项。它不运行完整 Judge、不发布或覆盖 `judge-evidence-v2.json`，也不写规范源、PDF、ZIP、metadata 或 Manifest。完整 `judge`、`seal` 与 `build` 同样执行该样例不变量，因此错误 `.ans` 会在正式交付前被确定性拦截。
 
 ## 9. `judge`
 
@@ -216,12 +217,12 @@ probhub judge [ID...] [--no-cache]
 
 1. 编译并运行 Validator。
 2. 编译 `solutions.accepted`、`solutions.brute`、`solutions.wrong`。
-3. 对 `data/sample` 和 `data/secret` 逐点评测。
+3. 按每个 solution 的运行域逐点评测；未配置 `run_on` 时覆盖全部数据，配置后取所列数据组并集，sample 始终隐式执行。
 4. 对非交互题，严格核对首个 accepted 的 sample stdout 与 `.ans`；仅归一换行，Custom Checker AC 不能掩盖字节不一致。
 5. 按 `judge.type` 使用标准比较、Checker 或 Interactor。
-6. 根据每个程序的结构化 `expected` 宿命验证状态、目标数据组与禁止状态；未配置时保持 accepted 全 AC、brute 不 WA 且至少 TLE/MLE、wrong 至少一个非 AC 的默认语义。
+6. 根据每个程序的结构化 `expected` 宿命验证状态、目标数据组与禁止状态；只基于实际执行域计算，未配置时保持 accepted 全 AC、brute 不 WA 且至少 TLE/MLE/OLE、wrong 至少一个非 AC 的默认语义。
 7. 对普通程序、Checker、Validator、编译器和 Interactor 应用完整进程树、时间、内存、输出与进程数控制。
-8. 为每个解法汇总 `max_time`、最大用例、`time_limit_ratio` 和 headroom；对期望 TLE 的已命中用例执行延长时限校准探针，MLE/OLE 报告可证明的阈值下界。
+8. 为每个解法汇总 `run_on`、实际执行/跳过用例、`max_time`、最大用例、`time_limit_ratio` 和 headroom；对期望 TLE 的已命中用例执行延长时限校准探针，MLE/OLE 报告可证明的阈值下界。
 
 支持的评测类型：
 
@@ -254,7 +255,11 @@ judge:
 
 Checker/Interactor 的参数协议、testlib 模板和状态映射见 `references/checker-interactor.md`。
 
-数据逻辑分组、`solutions.*[].expected`、默认宿命和首个击杀用例字段见 `references/data-groups-expectations.md`。仅修改分组或宿命会复用逐点缓存，并重新计算断言。
+数据逻辑分组、`solutions.*[].expected`、`run_on`、`independence`、默认宿命和首个击杀用例字段见 `references/data-groups-expectations.md`。
+
+运行域规则：首个 accepted 禁止 `run_on`；第二及后续 accepted 缩域时必须显式声明 `expected.groups`，且期望组和隐式目标组都必须位于执行域。未知/空组会被 lint 拒绝。运行域仅控制本地 Judge，不改变 `stress` 或 DOMjudge 包。结构化结果公开执行与跳过用例，`forbid`、expectation、calibration 都不会越过实际执行域。仅修改分组、宿命或运行域可复用仍匹配的逐点缓存，并重新计算断言与 evidence。
+
+`independence` 是第二 accepted 对另一 accepted 的作者声明：`from` 指明被互证实现，`basis` 为 `algorithm` 或 `key_implementation`，`note` 解释具体差异。Core 只阻断能确定的反证（同路径、同字节、直接 include 复用），不把声明冒充自动算法证明。`difficulty >= 4` 的题目若没有额外覆盖全域的 AC 参考实现会给结构化 warning。
 
 资源配置：
 
@@ -303,7 +308,7 @@ limits:
 }
 ```
 
-期望 TLE 的 `resource_kills` 会记录用例、正式 TL、延长探针上限、观测比值、`exact|lower_bound|inferred|unavailable` 证据类型和进程结果。MLE/OLE 的 `lower_bound` 分别来自明确触限的受控进程树峰值内存与截断前 stdout+stderr 总字节数；接近 ML 后异常退出但未观测到明确 `memory_limit` 的结果只标为 `inferred`。`expected.status` 列表是备选结果，只有实际发生的资源状态才产生余量诊断。完整成功的 Judge 会在单题证据锁内原子写入 `<problem>/.probhub/judge-evidence-v1.json`；失败、取消或外层超时不覆盖上一份成功证据。
+期望 TLE 的 `resource_kills` 会记录用例、正式 TL、延长探针上限、观测比值、`exact|lower_bound|inferred|unavailable` 证据类型和进程结果。MLE/OLE 的 `lower_bound` 分别来自明确触限的受控进程树峰值内存与截断前 stdout+stderr 总字节数；接近 ML 后异常退出但未观测到明确 `memory_limit` 的结果只标为 `inferred`。`expected.status` 列表是备选结果，只有实际发生的资源状态才产生余量诊断。完整成功的 Judge 会在单题证据锁内原子写入 `<problem>/.probhub/judge-evidence-v2.json`；失败、取消或外层超时不覆盖上一份成功证据。旧 v1 文件继续被忽略，但不会被当前校准状态读取。
 
 所有校准 JSON 都包含 `target_guarantee: false`。本机测量不是正式评测承诺：Windows 与 Linux/DOMjudge 的进程启动、链接、调度、计时和内存口径不同，正式限制必须在目标 Linux 评测机重新校准。
 

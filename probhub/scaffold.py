@@ -54,13 +54,31 @@ int main() {
 }
 """
 
-_STD2_BATCH = """#include <cstdio>
+_STD2_BATCH = """#include <cstdint>
+#include <cstring>
+#include <iostream>
 
-// 第二正确实现槽位：正式出题时应换成与 std.cpp 不同思路的独立实现，用于交叉验证。
+// 与 std.cpp 的直接算术相加不同：用二进制异或与进位迭代独立实现加法。
+long long bitwise_add(long long a, long long b) {
+    std::uint64_t x, y;
+    std::memcpy(&x, &a, sizeof(x));
+    std::memcpy(&y, &b, sizeof(y));
+    while (y != 0) {
+        std::uint64_t carry = (x & y) << 1;
+        x ^= y;
+        y = carry;
+    }
+    long long result;
+    std::memcpy(&result, &x, sizeof(result));
+    return result;
+}
+
 int main() {
+    std::ios::sync_with_stdio(false);
+    std::cin.tie(nullptr);
     long long a, b;
-    if (std::scanf("%lld %lld", &a, &b) != 2) return 1;
-    std::printf("%lld\\n", a + b);
+    std::cin >> a >> b;
+    std::cout << bitwise_add(a, b) << "\\n";
     return 0;
 }
 """
@@ -68,7 +86,7 @@ int main() {
 _BRUTE_BATCH = """#include <iostream>
 
 // 朴素但绝对正确的实现槽位。实现真实暴力后，把它登记进 probhub.yaml 的
-// solutions.brute，并准备能让它 TLE/MLE 的 brute-killer 数据组；
+// solutions.brute，并准备能让它 TLE/MLE/OLE 的 brute-killer 数据组；
 // 未登记时 judge 不会运行它。
 int main() {
     std::ios::sync_with_stdio(false);
@@ -115,14 +133,29 @@ int main() {
 }
 """
 
-_STD2_INTERACTIVE = """#include <cstdio>
+_STD2_INTERACTIVE = """#include <cstdint>
+#include <cstring>
+#include <iostream>
 
-// 第二正确实现槽位：正式出题时应换成与 std.cpp 不同思路的独立实现。
+// 与 std.cpp 的直接算术相加不同：用二进制异或与进位迭代独立实现加法。
+long long bitwise_add(long long a, long long b) {
+    std::uint64_t x, y;
+    std::memcpy(&x, &a, sizeof(x));
+    std::memcpy(&y, &b, sizeof(y));
+    while (y != 0) {
+        std::uint64_t carry = (x & y) << 1;
+        x ^= y;
+        y = carry;
+    }
+    long long result;
+    std::memcpy(&result, &x, sizeof(result));
+    return result;
+}
+
 int main() {
     long long a, b;
-    if (std::scanf("%lld %lld", &a, &b) != 2) return 1;
-    std::printf("%lld\\n", a + b);
-    std::fflush(stdout);
+    std::cin >> a >> b;
+    std::cout << bitwise_add(a, b) << std::endl;
     return 0;
 }
 """
@@ -271,7 +304,15 @@ def scaffold_config(problem_id, name, judge_type):
         "solutions": {
             "accepted": [
                 {"file": "code/std.cpp", "expected": {"status": "AC", "all": True}},
-                {"file": "code/std2.cpp", "expected": {"status": "AC", "all": True}},
+                {
+                    "file": "code/std2.cpp",
+                    "expected": {"status": "AC", "all": True},
+                    "independence": {
+                        "from": "code/std.cpp",
+                        "basis": "key_implementation",
+                        "note": "使用按位异或与进位迭代实现加法，不依赖 std.cpp 的直接算术相加。",
+                    },
+                },
             ],
             "brute": [],
             "wrong": [

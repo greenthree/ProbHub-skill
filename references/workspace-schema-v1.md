@@ -55,11 +55,20 @@ judge:
   type: standard
   validator: code/validator.cpp
 solutions:
-  accepted: [code/std.cpp]
+  accepted:
+    - file: code/std.cpp
+      expected: {status: AC, all: true}
+    - file: code/reference_dp.cpp
+      run_on: [reference-small]
+      expected: {status: AC, groups: [reference-small], all: true}
+      independence:
+        from: code/std.cpp
+        basis: algorithm
+        note: 使用独立 DP，而主标程使用贪心。
   brute:
     - file: code/brute.cpp
       expected:
-        status: [TLE, MLE]
+        status: [TLE, MLE, OLE]
         groups: [stress]
   wrong:
     - file: code/wrong_greedy.cpp
@@ -77,6 +86,9 @@ data:
   sample_dir: data/sample
   secret_dir: data/secret
   groups:
+    - name: reference-small
+      role: reference-domain
+      patterns: [sample/*, secret/small*]
     - name: greedy-counterexample
       role: wrong-solution-killer
       patterns: [secret/greedy*]
@@ -130,7 +142,7 @@ calibration:
 - MLE/OLE 的本地结果在触限时已被终止，summary 只报告峰值内存或截断前 stdout+stderr 总字节数的阈值下界；仅接近 ML 后异常退出的启发式 MLE 标为 `inferred`，无可靠遥测时明确为 `unavailable`，不得把缺失值当作零。
 - 交互题不能脱离 Interactor 单独运行选手程序，当前 expected-TLE 延长探针明确标记为 `unavailable`；普通逐点最大时间仍会报告。
 
-完整成功的 Judge 会原子更新本地忽略文件 `<problem>/.probhub/judge-evidence-v1.json`。只有 evidence schema、source hash 和 data hash 与当前题目一致时，lint/status 才使用数值生成余量 warning；缺失或过期证据只提示重新运行 Judge，不改变 lint 的 `ok` 或正式 build 的 `current/stale` 状态。失败、取消或超时不会覆盖上一份完整成功证据。
+完整成功的 Judge 会原子更新本地忽略文件 `<problem>/.probhub/judge-evidence-v2.json`。lint/status 先按 evidence schema、source/data hash 与平台判断是否过期，再验证测量策略、结构和 solution 运行域；缺失、过期或无效证据只提示重新运行 Judge，不改变 lint 的 `ok` 或正式 build 的 `current/stale` 状态。失败、取消或超时不会覆盖上一份完整成功证据。
 
 `expected.status` 列表表示可接受的备选结果；只有实际在 expectation 选中范围内发生的 TLE/MLE/OLE 才生成对应资源余量。程序已由 WA 或 MLE 满足宿命时，不会因为列表中同时允许 TLE 而产生虚假的 TLE 余量 warning。
 
@@ -194,7 +206,14 @@ stress:
 
 ### Data groups and solution expectations
 
-`solutions` 可继续使用字符串列表，也可使用带 `file`、`expected.status`、`expected.groups`、`expected.all` 和 `expected.forbid` 的结构化条目。`data.groups` 使用 glob 将测试点映射到逻辑组，并可通过 `targets` 指定需要被该组击杀的程序。完整语义、默认宿命和 JSONL 字段见 `references/data-groups-expectations.md`。
+`solutions` 可继续使用字符串列表，也可使用结构化条目：
+
+- `file`：程序路径。
+- `expected.status/groups/all/forbid`：该程序在目标组内的结构化宿命。
+- `run_on: [groups]`：本地 Judge 运行域；多个组取并集，sample 始终隐式执行。首个 accepted 禁止缩域，第二及后续 accepted 使用 `run_on` 时必须显式配置 `expected.groups`，且期望覆盖不能超出执行域。
+- `independence: {from, basis, note}`：accepted 之间的作者声明与人工复核证据；`basis` 为 `algorithm` 或 `key_implementation`。Core 不自动证明独立，但确定的同路径、同字节或直接 include 复用会阻断。
+
+`run_on` 只影响本地 Judge，不改变 stress 和 DOMjudge 包。`data.groups` 使用 glob 将测试点映射到逻辑组，并可通过 `targets` 指定需要被该组击杀的程序。`difficulty` 可省略；存在时必须是非 bool 的 `0..5` 整数。`difficulty >= 4` 且只有一个 accepted、没有额外全域 AC 参考实现时会给结构化 warning。完整运行域、独立性、默认宿命和 JSONL 字段见 `references/data-groups-expectations.md`。
 
 ## Problem directory layout
 
@@ -297,6 +316,6 @@ Schema v1 WebUI 遵循以下写入边界：
 
 `<problem>/.probhub/sandbox-cache-v1.json` is an ignored local artifact. It stores content-addressed compile, validator, and per-testcase results, including normalized sample stdout/answer summaries used by sample-check. Relevant source, header, input, answer, time/memory/output/process limit, compiler, platform, sandbox policy, or cache-schema changes invalidate entries automatically. Use `probhub sample-check <id> --no-cache` to refresh only the current sample execution while preserving unrelated entries; use `probhub judge <id> --no-cache` or `probhub build <id> --no-cache` to force a complete run.
 
-`<problem>/.probhub/judge-evidence-v1.json` 是最近一次完整成功 Judge 的本地校准证据，不进入 Manifest、ZIP 或正式发布身份。lint/status 会用当前 source/data hash 验证它；失败 Judge 保留上一份成功证据。
+`<problem>/.probhub/judge-evidence-v2.json` 是最近一次完整成功 Judge 的本地校准证据，不进入 Manifest、ZIP 或正式发布身份。lint/status 会用当前 schema、source/data hash、平台、测量策略与 solution 运行域验证它；失败 Judge 保留上一份成功证据。旧 `judge-evidence-v1.json` 继续被 Git 忽略，但不再读取。
 
 `<problem>/.probhub/stress/` is a separate ignored diagnostic directory containing replayable counterexamples and `latest.json`; stress does not reuse the sandbox cache. Resource-control semantics are versioned in the cache Schema, so older cached AC/RE/TLE results cannot bypass newer OLE or process-tree policies. Do not package or commit either local artifact.

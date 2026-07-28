@@ -278,7 +278,11 @@ def save_editor_data(root, workspace, submitted):
         difficulty = problem.get("difficulty")
         if difficulty is None:
             config.pop("difficulty", None)
-        elif isinstance(difficulty, int) and 0 <= difficulty <= 5:
+        elif (
+            isinstance(difficulty, int)
+            and not isinstance(difficulty, bool)
+            and 0 <= difficulty <= 5
+        ):
             config["difficulty"] = difficulty
         else:
             raise ProbHubError(f"{problem_id} difficulty must be 0..5", code="invalid_editor_payload")

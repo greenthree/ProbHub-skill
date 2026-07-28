@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -17,10 +18,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def find_headless_browser():
     candidates = [
-        shutil.which("msedge"),
         shutil.which("google-chrome"),
+        shutil.which("chrome"),
         shutil.which("chromium"),
         shutil.which("chromium-browser"),
+        Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
+        Path("C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"),
+        shutil.which("msedge"),
         Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
         Path("C:/Program Files/Microsoft/Edge/Application/msedge.exe"),
     ]
@@ -28,6 +32,21 @@ def find_headless_browser():
 
 
 HEADLESS_BROWSER = find_headless_browser()
+
+
+def remove_tree_after_handle_release(path, attempts=20, delay=0.05):
+    """Retry Windows cleanup while a just-exited browser releases log handles."""
+    path = Path(path)
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(delay)
 
 
 def load_ui():
@@ -191,8 +210,8 @@ class UiSecurityTests(unittest.TestCase):
             + f"document.getElementById('result').textContent = sanitizeRenderedMarkdown({encoded});"
             + "</script>"
         )
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+        root = Path(tempfile.mkdtemp())
+        try:
             page_path = root / "sanitizer.html"
             profile = root / "profile"
             stdout_path = root / "browser.stdout"
@@ -220,6 +239,8 @@ class UiSecurityTests(unittest.TestCase):
             )
             browser_stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
             browser_stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+        finally:
+            remove_tree_after_handle_release(root)
         self.assertEqual(completed["reason"], "completed", browser_stderr[-2000:])
         self.assertEqual(completed["returncode"], 0, browser_stderr[-2000:])
         match = re.search(r'<div id="result">(.*?)</div>', browser_stdout, re.DOTALL)

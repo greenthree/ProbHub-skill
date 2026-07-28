@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from probhub.io import write_json, write_yaml
+from probhub.io import read_yaml, write_json, write_yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -177,6 +177,44 @@ class UiWriteBoundaryTests(unittest.TestCase):
             with self.subTest(relative=relative):
                 self.assertEqual((self.root / relative).read_bytes(), content)
 
+    def test_schema_save_preserves_solution_run_domain_and_independence_fields(self):
+        problem = self.root / "A"
+        (problem / "code/std2.cpp").write_text(
+            "int alternate(){return 1;}\n",
+            encoding="utf-8",
+        )
+        config_path = problem / "probhub.yaml"
+        config = read_yaml(config_path)
+        config["solutions"]["accepted"].append({
+            "file": "code/std2.cpp",
+            "run_on": ["samples"],
+            "expected": {"status": "AC", "groups": ["samples"], "all": True},
+            "independence": {
+                "from": "code/std.cpp",
+                "basis": "key_implementation",
+                "note": "Independent implementation used only for sample-domain review.",
+            },
+        })
+        config["data"]["groups"] = [
+            {"name": "samples", "patterns": ["sample/*"]},
+        ]
+        write_yaml(config_path, config)
+
+        payload = self.load_payload()
+        payload[0]["statement"]["description"] = "Changed while preserving solution metadata."
+        response = self.client.post(
+            "/api/data",
+            json={"subtitle": "Contest", "problems": payload},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        saved = read_yaml(config_path)
+        secondary = saved["solutions"]["accepted"][1]
+        self.assertEqual(secondary["run_on"], ["samples"])
+        self.assertEqual(secondary["expected"]["groups"], ["samples"])
+        self.assertEqual(secondary["independence"]["from"], "code/std.cpp")
+        self.assertEqual(secondary["independence"]["basis"], "key_implementation")
+
     def test_large_schema_save_is_not_limited_by_submission_upload_budget(self):
         payload = self.load_payload()
         description = "Large but valid statement content.\n" * 40000
@@ -219,6 +257,20 @@ class UiWriteBoundaryTests(unittest.TestCase):
         before = self.file_state()
         payload[0]["problem"]["memory_limit"] = 300
         response = self.client.post("/api/data", json={"subtitle": "Contest", "problems": payload})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["code"], "invalid_editor_payload")
+        self.assertEqual(self.file_state(), before)
+
+    def test_boolean_difficulty_is_rejected_without_writing_sources(self):
+        payload = self.load_payload()
+        before = self.file_state()
+        payload[0]["problem"]["difficulty"] = True
+
+        response = self.client.post(
+            "/api/data",
+            json={"subtitle": "Contest", "problems": payload},
+        )
+
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["code"], "invalid_editor_payload")
         self.assertEqual(self.file_state(), before)
