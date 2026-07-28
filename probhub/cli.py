@@ -79,6 +79,8 @@ def _ensure_local_gitignore(root):
         "**/.probhub/judge-evidence.lock",
         "**/.probhub/judge-evidence-v1.json",
         "**/.probhub/judge-evidence-v1.json.*.tmp",
+        "**/.probhub/judge-evidence-v2.json",
+        "**/.probhub/judge-evidence-v2.json.*.tmp",
         "**/.probhub/sandbox-cache-v1.json",
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",

@@ -394,20 +394,33 @@ class ProcessControlTests(unittest.TestCase):
             )
             previous = os.environ.get(CANCEL_FILE_ENV)
             os.environ[CANCEL_FILE_ENV] = str(cancel_file)
-            timer = threading.Timer(0.3, lambda: cancel_file.touch())
-            timer.start()
+            started_pid = []
+
+            def cancel_after_process_start():
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        started_pid.append(int(pid_file.read_text(encoding="utf-8")))
+                        break
+                    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+                        time.sleep(0.02)
+                # Always unblock the managed wait. If startup genuinely failed,
+                # the assertion below still reports that instead of hanging.
+                cancel_file.touch()
+
+            canceller = threading.Thread(target=cancel_after_process_start)
+            canceller.start()
             try:
                 with self.assertRaises(ProcessCancelled):
                     self.run_command(root, code, timeout=10)
             finally:
-                timer.cancel()
-                timer.join()
+                canceller.join()
                 if previous is None:
                     os.environ.pop(CANCEL_FILE_ENV, None)
                 else:
                     os.environ[CANCEL_FILE_ENV] = previous
-            self.assertTrue(pid_file.is_file(), "managed process did not start")
-            self.wait_until_dead(int(pid_file.read_text(encoding="utf-8")))
+            self.assertTrue(started_pid, "managed process did not start")
+            self.wait_until_dead(started_pid[0])
 
     def test_external_force_cancel_kills_detached_descendant(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from probhub.cli import main as cli_main
 from probhub.calibration import SANDBOX_CACHE_SCHEMA_VERSION
-from probhub.io import write_yaml
+from probhub.io import read_yaml, write_yaml
 from probhub.judging import check_sample_answers, judge_problem
 
 
@@ -82,11 +82,31 @@ def _write_problem(
 
 @unittest.skipUnless(shutil.which("g++"), "g++ is required for sample-check integration tests")
 class SampleCheckIntegrationTests(unittest.TestCase):
+    def test_sample_check_rejects_accepted_paths_outside_the_problem_before_compile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = _write_problem(root)
+            outside = root / "outside.cpp"
+            outside.write_text("int main(){return 0;}\n", encoding="utf-8")
+            config_path = problem / "probhub.yaml"
+            config = read_yaml(config_path)
+
+            for program in ("../outside.cpp", outside.as_posix(), "C:/outside/std.cpp"):
+                with self.subTest(program=program):
+                    config["solutions"]["accepted"] = [program]
+                    write_yaml(config_path, config)
+                    result = check_sample_answers(root, problem, use_cache=False)
+                    self.assertFalse(result["ok"], result)
+                    self.assertEqual(result["final"]["code"], "solution_source_invalid")
+                    self.assertFalse(
+                        any(event.get("type") == "compile" for event in result["events"])
+                    )
+
     def test_standard_check_normalizes_newlines_reuses_cache_and_preserves_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             problem = _write_problem(root, answer=b"2\r\n")
-            evidence = problem / ".probhub/judge-evidence-v1.json"
+            evidence = problem / ".probhub/judge-evidence-v2.json"
             evidence.parent.mkdir(parents=True)
             evidence.write_bytes(b'{"previous":true}\n')
             before = evidence.read_bytes()
@@ -272,7 +292,7 @@ class SampleCheckIntegrationTests(unittest.TestCase):
                     """
                 ),
             )
-            evidence = problem / ".probhub/judge-evidence-v1.json"
+            evidence = problem / ".probhub/judge-evidence-v2.json"
             evidence.parent.mkdir(parents=True)
             evidence.write_bytes(b'{"previous":true}\n')
             before = evidence.read_bytes()

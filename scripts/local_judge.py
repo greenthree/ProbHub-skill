@@ -1,4 +1,3 @@
-import fnmatch
 import hashlib
 import json
 import os
@@ -36,6 +35,18 @@ from probhub.process_control import (
     terminate_process as _terminate_process,
     wait_managed,
     windows_assign_job as _windows_assign_job,
+)
+from probhub.solutions import (
+    analyze_solution_verification,
+    case_group_names,
+    normalize_data_groups,
+    normalize_expected,
+    normalize_solution_entries,
+    resolve_solution_source,
+    select_expectation_cases,
+    select_run_cases,
+    select_target_cases,
+    targeted_group_names,
 )
 
 REFERENCES_DIR = os.path.join(PACKAGE_ROOT, "references")
@@ -544,65 +555,27 @@ def binary_path_for_source(source_path):
     return os.path.splitext(source_path)[0] + ".exe"
 
 
-def _expected_defaults(kind):
-    if kind == "std":
-        return {
-            "status": ["AC"],
-            "all": True,
-            "forbid": ["WA", "TLE", "MLE", "OLE", "RE", "FAIL"],
-        }
-    if kind == "brute":
-        return {
-            "status": ["TLE", "MLE", "OLE"],
-            "all": False,
-            "forbid": ["WA", "FAIL"],
-        }
-    return {
-        "status": ["WA", "TLE", "MLE", "OLE", "RE"],
-        "all": False,
-        "forbid": ["FAIL"],
-    }
-
-
-def _status_list(value):
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, (list, tuple, set)):
-        return []
-    return [str(item).upper() for item in value]
-
-
-def _string_list(value):
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, (list, tuple, set)):
-        return []
-    return [str(item) for item in value]
-
-
 def _normalize_expected(kind, entry):
-    expected = _expected_defaults(kind)
-    configured = entry.get("expected") if isinstance(entry, dict) else None
-    if isinstance(configured, dict):
-        expected.update(configured)
-    expected["status"] = _status_list(expected.get("status"))
-    expected["forbid"] = _status_list(expected.get("forbid"))
-    expected["groups"] = _string_list(expected.get("groups"))
-    expected["all"] = bool(expected.get("all"))
-    return expected
+    return normalize_expected(kind, entry)
 
 
 def discover_solution_entries(prob_dir, config=None):
     solutions = {"std": [], "brute": [], "wrong": []}
     if config is not None:
-        configured = config.get("solutions") or {}
-        for config_key, kind in (("accepted", "std"), ("brute", "brute"), ("wrong", "wrong")):
-            for entry in _config_entries(configured.get(config_key)):
-                source_path = resolve_problem_path(prob_dir, entry)
+        for kind, entries in normalize_solution_entries(config).items():
+            for entry in entries:
+                source_path = resolve_problem_path(prob_dir, entry.get("file"))
                 if source_path:
                     solutions[kind].append({
                         "path": source_path,
-                        "expected": _normalize_expected(kind, entry),
+                        "file": entry.get("file"),
+                        "expected": entry.get("expected"),
+                        "run_on": entry.get("run_on"),
+                        "run_on_error": entry.get("run_on_error"),
+                        "expected_groups_configured": entry.get("expected_groups_configured", False),
+                        "run_on_configured": isinstance(entry.get("raw"), dict)
+                        and "run_on" in entry["raw"],
+                        "index": entry.get("index"),
                     })
         return solutions
 
@@ -616,7 +589,13 @@ def discover_solution_entries(prob_dir, config=None):
             if file_name.startswith(kind):
                 solutions[kind].append({
                     "path": os.path.join(search_dir, file_name),
+                    "file": f"code/{file_name}" if os.path.basename(search_dir) == "code" else file_name,
                     "expected": _normalize_expected(kind, None),
+                    "run_on": None,
+                    "run_on_error": None,
+                    "expected_groups_configured": False,
+                    "run_on_configured": False,
+                    "index": len(solutions[kind]),
                 })
                 break
     return solutions
@@ -1513,35 +1492,11 @@ def run_validator(val_bin, in_file, timeout=5.0):
 
 
 def _data_groups(config=None):
-    result = []
-    raw_groups = (((config or {}).get("data") or {}).get("groups") or [])
-    if not isinstance(raw_groups, list):
-        return result
-    for raw in raw_groups:
-        if not isinstance(raw, dict):
-            continue
-        name = str(raw.get("name", "")).strip()
-        if not name:
-            continue
-        patterns = _string_list(raw.get("patterns") or raw.get("cases") or [])
-        targets = [item.replace("\\", "/") for item in _string_list(raw.get("targets") or [])]
-        result.append({
-            "name": name,
-            "role": raw.get("role"),
-            "patterns": patterns,
-            "targets": targets,
-        })
-    return result
+    return normalize_data_groups(config or {})
 
 
 def _testcase_groups(case_name, suite, base_name, groups):
-    matched = []
-    for group in groups:
-        patterns = group["patterns"] or [f"{group['name']}*", f"*/{group['name']}*"]
-        values = (case_name, base_name, f"{suite}/{base_name}")
-        if any(any(fnmatch.fnmatch(value, pattern) for value in values) for pattern in patterns):
-            matched.append(group["name"])
-    return matched
+    return case_group_names(case_name, suite, base_name, groups)
 
 
 def collect_testcases(prob_dir, config=None):
@@ -1567,26 +1522,119 @@ def collect_testcases(prob_dir, config=None):
 
 
 def _targeted_group_names(groups, program_name):
-    program_name = program_name.replace("\\", "/")
-    return [
-        group["name"]
-        for group in groups
-        if program_name in group["targets"]
-    ]
+    return targeted_group_names(groups, program_name)
+
+
+def _select_expectation_cases(kind, entry, testcases, group_definitions):
+    # A full-range accepted remains the correctness baseline even if a legacy
+    # configuration accidentally carries expected.groups. Partial accepted
+    # entries are distinguishable by their explicit run_on domain.
+    if kind == "std" and entry.get("run_on") is None:
+        return list(testcases), []
+    return select_expectation_cases(kind, entry, testcases, group_definitions)
 
 
 def _expectation_cases(kind, testcases, expected, group_definitions, program_name):
-    # Accepted solutions remain responsible for the complete data set. Targeted
-    # groups are intended to express where brute/wrong solutions must be killed.
-    if kind == "std":
-        return list(testcases), []
-    groups = list(expected.get("groups") or [])
-    if not groups:
-        groups = _targeted_group_names(group_definitions, program_name)
-    if groups:
-        selected = [case for case in testcases if set(case.get("groups") or []) & set(groups)]
-        return selected, groups
-    return list(testcases), []
+    return _select_expectation_cases(
+        kind,
+        {"file": program_name, "expected": expected, "run_on": None},
+        testcases,
+        group_definitions,
+    )
+
+
+def _solution_execution_plan(source_groups, testcases, group_definitions):
+    group_names = {group["name"] for group in group_definitions}
+    plans = {"std": [], "brute": [], "wrong": []}
+    errors = []
+    for kind, entries in source_groups.items():
+        for entry in entries:
+            program = str(entry.get("file") or entry.get("path") or "").replace("\\", "/")
+            normalized = {
+                "file": program,
+                "expected": entry.get("expected") or _normalize_expected(kind, None),
+                "run_on": entry.get("run_on"),
+            }
+            run_on = normalized["run_on"]
+            executed, skipped = select_run_cases(normalized, testcases)
+            selected, selected_groups = _select_expectation_cases(
+                kind, normalized, testcases, group_definitions
+            )
+            targeted, target_groups = select_target_cases(
+                normalized, testcases, group_definitions
+            )
+            executed_names = {case["case"] for case in executed}
+            missing = [case["case"] for case in selected if case["case"] not in executed_names]
+            selected_names = {case["case"] for case in selected}
+            missing_targets = [
+                case["case"]
+                for case in targeted
+                if case["case"] not in executed_names
+                and case["case"] not in selected_names
+            ]
+            unknown = sorted(set(run_on or []) - group_names)
+            empty = sorted(
+                name
+                for name in (run_on or [])
+                if not any(name in (case.get("groups") or []) for case in testcases)
+            )
+            reason = None
+            result_code = None
+            if entry.get("run_on_error"):
+                reason = entry["run_on_error"]
+                result_code = "invalid_solution_run_on"
+            elif kind == "std" and entry.get("index") == 0 and run_on is not None:
+                reason = "first accepted solution must run on all cases"
+                result_code = "primary_accepted_run_on_forbidden"
+            elif (
+                kind == "std"
+                and entry.get("index", 0) > 0
+                and run_on is not None
+                and not entry.get("expected_groups_configured")
+            ):
+                reason = "partial accepted solution must explicitly declare expected.groups"
+                result_code = "partial_accepted_expected_groups_required"
+            elif unknown:
+                reason = "run_on references unknown groups: " + ", ".join(unknown)
+                result_code = "solution_run_on_unknown_group"
+            elif empty:
+                reason = "run_on groups match no test cases: " + ", ".join(empty)
+                result_code = "solution_run_on_has_no_cases"
+            elif missing:
+                reason = f"run_on skips {len(missing)} case(s) selected by expectation"
+                result_code = "solution_run_on_expectation_gap"
+            elif missing_targets:
+                reason = (
+                    f"run_on skips {len(missing_targets)} case(s) required by "
+                    "data.groups.targets"
+                )
+                result_code = "solution_run_on_target_gap"
+            plan = {
+                **entry,
+                "program": program,
+                "execution_cases": executed,
+                "skipped_cases": skipped,
+                "expectation_cases": selected,
+                "expectation_groups": selected_groups,
+                "coverage_ok": reason is None,
+                "unexecuted_expected_cases": missing,
+                "unexecuted_target_cases": missing_targets,
+                "target_groups": target_groups,
+            }
+            plans[kind].append(plan)
+            if reason is not None:
+                errors.append({
+                    "kind": kind,
+                    "program": program,
+                    "run_on": list(run_on or []),
+                    "reason": reason,
+                    "result_code": result_code,
+                    "coverage_ok": False,
+                    "unexecuted_expected_cases": missing,
+                    "unexecuted_target_cases": missing_targets,
+                    "target_groups": target_groups,
+                })
+    return plans, errors
 
 
 def _result_snapshot(item):
@@ -1611,10 +1659,32 @@ def _result_snapshot(item):
     return snapshot
 
 
-def evaluate_expectation(kind, program_name, expected, case_results, testcases, group_definitions):
-    selected_cases, groups = _expectation_cases(
-        kind, testcases, expected, group_definitions, program_name
+def evaluate_expectation(
+    kind,
+    program_name,
+    expected,
+    case_results,
+    testcases,
+    group_definitions,
+    run_on=None,
+    execution_cases=None,
+    skipped_cases=None,
+):
+    entry = {"file": program_name, "expected": expected, "run_on": run_on}
+    selected_cases, groups = _select_expectation_cases(
+        kind, entry, testcases, group_definitions
     )
+    if execution_cases is None:
+        execution_cases, inferred_skipped = select_run_cases(entry, testcases)
+        if skipped_cases is None:
+            skipped_cases = inferred_skipped
+    if skipped_cases is None:
+        executed_names = {case["case"] for case in execution_cases}
+        skipped_cases = [case for case in testcases if case["case"] not in executed_names]
+    execution_names = {case["case"] for case in execution_cases}
+    unexecuted_expected = [
+        case["case"] for case in selected_cases if case["case"] not in execution_names
+    ]
     selected_names = {case["case"] for case in selected_cases}
     selected_results = [item for item in case_results if item["case"] in selected_names]
     statuses = set(expected.get("status") or [])
@@ -1634,8 +1704,13 @@ def evaluate_expectation(kind, program_name, expected, case_results, testcases, 
         "expected_statuses": sorted(statuses),
         "forbidden_statuses": sorted(forbidden_statuses),
         "groups": groups,
+        "run_on": list(run_on or []),
+        "executed_cases": [case["case"] for case in execution_cases],
+        "skipped_cases": [case["case"] for case in skipped_cases],
+        "coverage_ok": not unexecuted_expected,
+        "unexecuted_expected_cases": unexecuted_expected,
         "all": all_required,
-        "ok": status_ok and not forbidden,
+        "ok": status_ok and not forbidden and not unexecuted_expected,
         "matched_cases": [item["case"] for item in matched],
         "selected_cases": [item["case"] for item in selected_results],
         "forbidden_cases": [item["case"] for item in forbidden],
@@ -1897,7 +1972,7 @@ def run_sample_check_mode(
     # cache entries remain shared between both commands.
     sample_cache_kind = f"sample-answer-v{SAMPLE_ANSWER_SCHEMA_VERSION}"
 
-    accepted = discover_solution_entries(prob_dir, config).get("std") or []
+    accepted = normalize_solution_entries(config).get("std") or []
     if not accepted:
         finish(
             reporter,
@@ -1909,18 +1984,26 @@ def run_sample_check_mode(
             judge_type=judge_type,
         )
     first = accepted[0]
-    source_path = first["path"]
-    program_name = display_problem_path(prob_dir, source_path)
-    if not os.path.isfile(source_path):
+    program_name = first.get("file") or "<missing file>"
+    source_path, path_state, reason = resolve_solution_source(prob_dir, first.get("file"))
+    if source_path is None:
+        result_code = "accepted_missing" if path_state == "missing" else "solution_source_invalid"
+        message = (
+            f"first accepted source file not found: {program_name}"
+            if path_state == "missing"
+            else f"first accepted source must be a regular non-link file inside the problem directory: "
+            f"{program_name} ({reason})"
+        )
         finish(
             reporter,
             False,
-            f"first accepted source file not found: {program_name}",
+            message,
             1,
-            "accepted_missing",
+            result_code,
             applicable=True,
             judge_type=judge_type,
             program=program_name,
+            reason=reason,
         )
     bin_path = binary_path_for_source(source_path)
     fingerprint = source_fingerprint(source_path, prob_dir, "std")
@@ -2188,6 +2271,69 @@ def main():
         )
         return
 
+    verification = analyze_solution_verification(prob_dir, config)
+    verification_errors = [
+        item
+        for item in (verification.get("diagnostics") or [])
+        if item.get("severity") == "error"
+    ]
+    if verification_errors:
+        first = verification_errors[0]
+        finish(
+            reporter,
+            False,
+            first.get("message") or "solution verification preflight failed",
+            1,
+            first.get("code") or "solution_verification_failed",
+            diagnostic=first,
+        )
+
+    configured_accepted = normalize_solution_entries(config).get("std") or []
+    if not configured_accepted:
+        finish(
+            reporter,
+            False,
+            "accepted solution not configured",
+            1,
+            "accepted_missing",
+        )
+    primary_file = configured_accepted[0].get("file")
+    primary_path = resolve_problem_path(prob_dir, primary_file)
+    if not primary_path or not os.path.isfile(primary_path):
+        finish(
+            reporter,
+            False,
+            f"first accepted source file not found: {primary_file or '<missing file>'}",
+            1,
+            "accepted_missing",
+            program=primary_file,
+        )
+
+    source_groups = discover_solution_entries(prob_dir, config)
+    first_accepted_program = (
+        display_problem_path(prob_dir, source_groups["std"][0]["path"])
+        if source_groups.get("std")
+        else None
+    )
+    group_definitions = _data_groups(config)
+    reporter.event("groups", groups=group_definitions)
+    solution_plans, run_on_errors = _solution_execution_plan(
+        source_groups, testcases, group_definitions
+    )
+    if run_on_errors:
+        first = run_on_errors[0]
+        failure_payload = {
+            key: value for key, value in first.items() if key != "result_code"
+        }
+        finish(
+            reporter,
+            False,
+            f"invalid run_on domain for {first['program']}: {first['reason']}",
+            1,
+            first["result_code"],
+            **failure_payload,
+        )
+
     # 1. Compile and run Validator
     validator_entry = ((config or {}).get("judge") or {}).get("validator") if config is not None else None
     val_cpp = discover_validator_source(prob_dir, config)
@@ -2274,19 +2420,14 @@ def main():
             finish(reporter, False, f"{source_key} failed to compile", 1, f"{source_key}_compile_failed")
 
     # 2. Discover and compile all solutions
-    source_groups = discover_solution_entries(prob_dir, config)
-    first_accepted_program = (
-        display_problem_path(prob_dir, source_groups["std"][0]["path"])
-        if source_groups.get("std")
-        else None
-    )
-    group_definitions = _data_groups(config)
-    reporter.event("groups", groups=group_definitions)
     solutions = {"std": [], "brute": [], "wrong": []}
-    for kind, source_entries in source_groups.items():
+    for kind, source_entries in solution_plans.items():
         for source_entry in source_entries:
             source_path = source_entry["path"]
             expected = source_entry["expected"]
+            run_on = source_entry.get("run_on")
+            execution_cases = source_entry["execution_cases"]
+            skipped_cases = source_entry["skipped_cases"]
             program_name = display_problem_path(prob_dir, source_path)
             if not os.path.isfile(source_path):
                 reporter.event("compile", kind=kind, file=program_name, ok=False, stderr="source file not found")
@@ -2303,7 +2444,15 @@ def main():
                 cache=cache,
                 fingerprint=fingerprint,
             ):
-                solutions[kind].append((program_name, bin_name, fingerprint, expected))
+                solutions[kind].append((
+                    program_name,
+                    bin_name,
+                    fingerprint,
+                    expected,
+                    run_on,
+                    execution_cases,
+                    skipped_cases,
+                ))
 
     if not solutions["std"]:
         finish(reporter, False, "accepted solution not found or failed to compile. Aborting.", 1)
@@ -2320,12 +2469,20 @@ def main():
 
     # 3. Evaluate all solutions
     for kind, progs in solutions.items():
-        for prog_name, bin_path, fingerprint, expected in progs:
+        for (
+            prog_name,
+            bin_path,
+            fingerprint,
+            expected,
+            run_on,
+            execution_cases,
+            skipped_cases,
+        ) in progs:
             reporter.text(f"\nEvaluating: {prog_name}")
             stats = {"AC": 0, "WA": 0, "TLE": 0, "RE": 0, "MLE": 0, "OLE": 0, "FAIL": 0}
             case_results = []
 
-            for testcase in testcases:
+            for testcase in execution_cases:
                 if not os.path.exists(testcase["ans_path"]):
                     finish(reporter, False, f"{testcase['case']}.ans not found", 1)
 
@@ -2472,6 +2629,9 @@ def main():
                 case_results,
                 testcases,
                 group_definitions,
+                run_on=run_on,
+                execution_cases=execution_cases,
+                skipped_cases=skipped_cases,
             )
             selected_names = set(expectation.get("selected_cases") or [])
             selected_results = [
@@ -2554,6 +2714,11 @@ def main():
                 stats=stats,
                 expectation=expectation,
                 calibration=calibration,
+                run_on=expectation["run_on"],
+                executed_cases=expectation["executed_cases"],
+                skipped_cases=expectation["skipped_cases"],
+                coverage_ok=expectation["coverage_ok"],
+                unexecuted_expected_cases=expectation["unexecuted_expected_cases"],
             )
             reporter.event("expectation", **expectation)
             reporter.text(f"  Summary: {stats}")

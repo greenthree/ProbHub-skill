@@ -8,6 +8,7 @@ from unittest.mock import patch
 from probhub.calibration import (
     CALIBRATION_SCHEMA_VERSION,
     CALIBRATION_STRATEGY_VERSION,
+    EVIDENCE_FILENAME,
     MEASUREMENT_NOTE,
     SANDBOX_CACHE_SCHEMA_VERSION,
     build_judge_evidence,
@@ -47,7 +48,21 @@ def _evidence(*, source_hash="source", data_hash="data", headroom=3.0, tle_ratio
             {
                 "kind": "std",
                 "program": "code/std.cpp",
-                "expectation": {"expected_statuses": ["AC"]},
+                "expectation": {
+                    "expected_statuses": ["AC"],
+                    "run_on": [],
+                    "executed_cases": ["sample/1", "secret/max01"],
+                    "skipped_cases": [],
+                    "coverage_ok": True,
+                    "unexecuted_expected_cases": [],
+                },
+                "execution_domain": {
+                    "run_on": [],
+                    "executed_cases": ["sample/1", "secret/max01"],
+                    "skipped_cases": [],
+                    "coverage_ok": True,
+                    "unexecuted_expected_cases": [],
+                },
                 "calibration": {
                     "max_time": 1.0 / headroom,
                     "max_time_case": "secret/max01",
@@ -58,7 +73,21 @@ def _evidence(*, source_hash="source", data_hash="data", headroom=3.0, tle_ratio
             {
                 "kind": "brute",
                 "program": "code/brute.cpp",
-                "expectation": {"expected_statuses": ["TLE"]},
+                "expectation": {
+                    "expected_statuses": ["TLE"],
+                    "run_on": [],
+                    "executed_cases": ["sample/1", "secret/stress01"],
+                    "skipped_cases": [],
+                    "coverage_ok": True,
+                    "unexecuted_expected_cases": [],
+                },
+                "execution_domain": {
+                    "run_on": [],
+                    "executed_cases": ["sample/1", "secret/stress01"],
+                    "skipped_cases": [],
+                    "coverage_ok": True,
+                    "unexecuted_expected_cases": [],
+                },
                 "calibration": {
                     "max_time": 1.0,
                     "resource_kills": [
@@ -77,6 +106,10 @@ def _evidence(*, source_hash="source", data_hash="data", headroom=3.0, tle_ratio
 
 
 class CalibrationPolicyTests(unittest.TestCase):
+    def test_evidence_v2_identity(self):
+        self.assertEqual(CALIBRATION_SCHEMA_VERSION, 2)
+        self.assertEqual(EVIDENCE_FILENAME, "judge-evidence-v2.json")
+
     def test_config_validation(self):
         self.assertEqual(validate_calibration_config({}), [])
         self.assertEqual(
@@ -156,6 +189,109 @@ class CalibrationPolicyTests(unittest.TestCase):
             self.assertEqual(result["state"], "invalid")
             self.assertEqual(result["diagnostics"][0]["code"], "calibration_evidence_invalid")
 
+    def test_strategy_one_evidence_is_invalid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            evidence = _evidence()
+            evidence["strategy_version"] = 1
+            write_calibration_evidence(problem, evidence)
+            result = evaluate_calibration(problem, {}, "source", "data")
+            self.assertEqual(result["state"], "invalid")
+            self.assertIn("strategy changed", result["diagnostics"][0]["message"])
+
+    def test_stale_identity_precedes_strategy_and_structure_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            evidence = _evidence(source_hash="old")
+            evidence["strategy_version"] = 1
+            evidence["solutions"] = []
+            write_calibration_evidence(problem, evidence)
+            result = evaluate_calibration(problem, {}, "source", "data")
+            self.assertEqual(result["state"], "stale")
+            self.assertIn("source/data", result["diagnostics"][0]["message"])
+
+    def test_schema_precedes_source_and_platform_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            evidence = _evidence(source_hash="old")
+            evidence["schema_version"] = 1
+            evidence["measurement"]["platform"] = "DefinitelyNotThisPlatform"
+            write_calibration_evidence(problem, evidence)
+            result = evaluate_calibration(problem, {}, "source", "data")
+            self.assertEqual(result["state"], "stale")
+            self.assertIn("unsupported schema", result["diagnostics"][0]["message"])
+
+    def test_platform_precedes_strategy_and_structure_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            evidence = _evidence()
+            evidence["measurement"]["platform"] = "DefinitelyNotThisPlatform"
+            evidence["strategy_version"] = 1
+            evidence["solutions"] = []
+            write_calibration_evidence(problem, evidence)
+            result = evaluate_calibration(problem, {}, "source", "data")
+            self.assertEqual(result["state"], "stale")
+            self.assertIn("different platform", result["diagnostics"][0]["message"])
+
+    def test_legacy_v1_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            legacy = problem / ".probhub/judge-evidence-v1.json"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("{}\n", encoding="utf-8")
+            self.assertIsNone(read_calibration_evidence(problem))
+            result = evaluate_calibration(problem, {}, "source", "data")
+            self.assertEqual(result["state"], "missing")
+
+    def test_execution_domain_must_match_expectation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            evidence = _evidence()
+            evidence["solutions"][0]["execution_domain"]["executed_cases"] = ["sample/1"]
+            write_calibration_evidence(problem, evidence)
+            result = evaluate_calibration(problem, {}, "source", "data")
+            self.assertEqual(result["state"], "invalid")
+            self.assertIn("execution domain", result["diagnostics"][0]["message"])
+
+    def test_execution_domain_must_match_current_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            (problem / "data/sample").mkdir(parents=True)
+            (problem / "data/secret").mkdir(parents=True)
+            (problem / "data/sample/1.in").write_text("1\n", encoding="utf-8")
+            (problem / "data/secret/max01.in").write_text("1\n", encoding="utf-8")
+            (problem / "data/secret/stress01.in").write_text("1\n", encoding="utf-8")
+            config = {
+                "solutions": {
+                    "accepted": ["code/std.cpp"],
+                    "brute": [{
+                        "file": "code/brute.cpp",
+                        "run_on": ["small"],
+                        "expected": {"status": "TLE", "groups": ["small"]},
+                    }],
+                },
+                "data": {
+                    "sample_dir": "data/sample",
+                    "secret_dir": "data/secret",
+                    "groups": [{"name": "small", "patterns": ["secret/stress*"]}],
+                },
+            }
+            evidence = _evidence()
+            accepted = evidence["solutions"][0]
+            accepted_cases = ["sample/1", "secret/max01", "secret/stress01"]
+            accepted["expectation"]["executed_cases"] = accepted_cases
+            accepted["execution_domain"]["executed_cases"] = accepted_cases
+            brute = evidence["solutions"][1]
+            brute_cases = ["sample/1", "secret/stress01"]
+            brute["expectation"]["executed_cases"] = brute_cases
+            brute["expectation"]["skipped_cases"] = ["secret/max01"]
+            brute["execution_domain"]["executed_cases"] = brute_cases
+            brute["execution_domain"]["skipped_cases"] = ["secret/max01"]
+            write_calibration_evidence(problem, evidence)
+            result = evaluate_calibration(problem, config, "source", "data")
+            self.assertEqual(result["state"], "invalid")
+            self.assertIn("current config", result["diagnostics"][0]["message"])
+
     def test_build_evidence_preserves_measurement_disclaimer(self):
         events = [
             {
@@ -173,7 +309,19 @@ class CalibrationPolicyTests(unittest.TestCase):
                 "kind": "std",
                 "program": "code/std.cpp",
                 "stats": {"AC": 1},
-                "expectation": {"ok": True},
+                "expectation": {
+                    "ok": True,
+                    "run_on": [],
+                    "executed_cases": ["sample/1"],
+                    "skipped_cases": [],
+                    "coverage_ok": True,
+                    "unexecuted_expected_cases": [],
+                },
+                "run_on": [],
+                "executed_cases": ["sample/1"],
+                "skipped_cases": [],
+                "coverage_ok": True,
+                "unexecuted_expected_cases": [],
                 "calibration": {"max_time": 0.1},
             },
         ]
@@ -181,6 +329,10 @@ class CalibrationPolicyTests(unittest.TestCase):
         self.assertFalse(evidence["measurement"]["target_guarantee"])
         self.assertEqual(evidence["measurement"]["note"], MEASUREMENT_NOTE)
         self.assertEqual(evidence["solutions"][0]["calibration"]["max_time"], 0.1)
+        self.assertEqual(
+            evidence["solutions"][0]["execution_domain"]["executed_cases"],
+            ["sample/1"],
+        )
 
 
 class CalibrationLintStatusTests(unittest.TestCase):
@@ -236,12 +388,17 @@ class CalibrationLintStatusTests(unittest.TestCase):
             root = Path(temp)
             problem, config = self.make_problem(root)
             lint = lint_problem(root, {}, {"id": "A", "directory": "A"})
+            evidence = _evidence(
+                source_hash=lint["source_hash"],
+                data_hash=lint["data_hash"],
+            )
+            evidence["solutions"] = evidence["solutions"][:1]
+            domain_cases = ["sample/1", "secret/1"]
+            evidence["solutions"][0]["expectation"]["executed_cases"] = domain_cases
+            evidence["solutions"][0]["execution_domain"]["executed_cases"] = domain_cases
             write_calibration_evidence(
                 problem,
-                _evidence(
-                    source_hash=lint["source_hash"],
-                    data_hash=lint["data_hash"],
-                ),
+                evidence,
             )
             status = problem_status(problem, config)
             self.assertEqual(status["state"], "never-built")
@@ -286,6 +443,8 @@ class CalibrationLintStatusTests(unittest.TestCase):
             self.assertIn("**/.probhub/judge-evidence-v1.json", content)
             self.assertIn("**/.probhub/judge-evidence.lock", content)
             self.assertIn("**/.probhub/judge-evidence-v1.json.*.tmp", content)
+            self.assertIn("**/.probhub/judge-evidence-v2.json", content)
+            self.assertIn("**/.probhub/judge-evidence-v2.json.*.tmp", content)
 
 
 class LocalJudgeCalibrationTests(unittest.TestCase):

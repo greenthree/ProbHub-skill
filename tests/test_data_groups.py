@@ -113,6 +113,34 @@ class DataGroupExpectationUnitTests(unittest.TestCase):
             self.assertEqual(entries["std"][0]["expected"]["status"], ["AC"])
             self.assertTrue(entries["std"][0]["expected"]["all"])
 
+    def test_sample_only_run_on_group_is_valid(self):
+        testcases = [
+            {"suite": "sample", "case": "sample/basic", "groups": ["samples"]},
+            {"suite": "secret", "case": "secret/large", "groups": []},
+        ]
+        groups = [{"name": "samples", "patterns": ["sample/*"], "targets": []}]
+        entries = {
+            "std": [],
+            "brute": [],
+            "wrong": [{
+                "path": "code/reference.cpp",
+                "file": "code/reference.cpp",
+                "expected": JUDGE._normalize_expected(
+                    "wrong", {"expected": {"status": "AC", "groups": ["samples"], "all": True}}
+                ),
+                "run_on": ["samples"],
+                "run_on_error": None,
+                "run_on_configured": True,
+                "index": 0,
+            }],
+        }
+        plans, errors = JUDGE._solution_execution_plan(entries, testcases, groups)
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            [case["case"] for case in plans["wrong"][0]["execution_cases"]],
+            ["sample/basic"],
+        )
+
 
 class DataGroupLintTests(unittest.TestCase):
     def create_workspace(self, root):
@@ -156,14 +184,20 @@ class DataGroupLintTests(unittest.TestCase):
             root, workspace = load_workspace(root)
             errors = lint_workspace(root, workspace)["problems"][0]["errors"]
             self.assertIn("duplicate data group names: duplicate", errors)
-            self.assertIn("unknown expected groups: missing", errors)
+            self.assertIn(
+                "[invalid_solution_expected] unknown expected groups: missing",
+                errors,
+            )
             self.assertIn("data group duplicate has unknown targets: code/missing.cpp", errors)
 
             config = yaml.safe_load((problem / "probhub.yaml").read_text(encoding="utf-8"))
             config["solutions"]["wrong"][0]["expected"]["forbid"] = "BOOM"
             write_yaml(problem / "probhub.yaml", config)
             errors = lint_workspace(root, workspace)["problems"][0]["errors"]
-            self.assertIn("invalid expected forbid for code/wrong.cpp: BOOM", errors)
+            self.assertIn(
+                "[invalid_solution_expected] invalid expected forbid for code/wrong.cpp: BOOM",
+                errors,
+            )
 
 
 class SandboxUiEventTests(unittest.TestCase):
@@ -229,6 +263,10 @@ class DataGroupIntegrationTests(unittest.TestCase):
             #include <iostream>
             int main(){ long long x; std::cin >> x; std::cout << x << '\n'; }
         """), encoding="utf-8")
+        (code / "reference.cpp").write_text(textwrap.dedent(r"""
+            #include <cstdio>
+            int main(){ long long x; if(std::scanf("%lld", &x) != 1) return 1; std::printf("%lld\n", x); }
+        """), encoding="utf-8")
         (code / "wrong.cpp").write_text(textwrap.dedent(r"""
             #include <iostream>
             int main(){ long long x; std::cin >> x; std::cout << (x == 2 ? 0 : x) << '\n'; }
@@ -237,6 +275,8 @@ class DataGroupIntegrationTests(unittest.TestCase):
         (sample / "basic.ans").write_text("1\n", encoding="utf-8")
         (secret / "overflow1.in").write_text("2\n", encoding="utf-8")
         (secret / "overflow1.ans").write_text("2\n", encoding="utf-8")
+        (secret / "ordinary1.in").write_text("3\n", encoding="utf-8")
+        (secret / "ordinary1.ans").write_text("3\n", encoding="utf-8")
         config = {
             "schema_version": 1,
             "id": "A",
@@ -251,7 +291,11 @@ class DataGroupIntegrationTests(unittest.TestCase):
             "data": {
                 "sample_dir": "data/sample",
                 "secret_dir": "data/secret",
-                "groups": [{"name": "overflow", "role": "wrong-solution-killer", "patterns": ["secret/overflow*"], "targets": ["code/wrong.cpp"]}],
+                "groups": [
+                    {"name": "overflow", "role": "wrong-solution-killer", "patterns": ["secret/overflow*"], "targets": ["code/wrong.cpp"]},
+                    {"name": "ordinary", "role": "reference-domain", "patterns": ["secret/ordinary*"], "targets": []},
+                    {"name": "empty", "role": "reference-domain", "patterns": ["secret/never-matches*"], "targets": []},
+                ],
             },
         }
         (problem / "probhub.yaml").write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
@@ -291,6 +335,232 @@ class DataGroupIntegrationTests(unittest.TestCase):
             expectation = next(event for event in events if event.get("type") == "expectation" and event.get("program") == "code/wrong.cpp")
             self.assertFalse(expectation["ok"])
             self.assertEqual(events[-1]["code"], "expectation_not_met")
+
+    def test_run_on_executes_group_union_plus_samples_and_reuses_case_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.create_problem(Path(temp))
+            config_path = problem / "probhub.yaml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["solutions"]["accepted"].append({
+                "file": "code/reference.cpp",
+                "run_on": ["overflow"],
+                "expected": {"status": "AC", "groups": ["overflow"], "all": True},
+            })
+            config_path.write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            first, events = self.run_judge(problem, no_cache=True)
+            self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+            reference_cases = [
+                event for event in events
+                if event.get("type") == "case" and event.get("program") == "code/reference.cpp"
+            ]
+            self.assertEqual(
+                [event["case"] for event in reference_cases],
+                ["sample/basic", "secret/overflow1"],
+            )
+            summary = next(
+                event for event in events
+                if event.get("type") == "summary" and event.get("program") == "code/reference.cpp"
+            )
+            self.assertEqual(summary["stats"]["AC"], 2)
+            self.assertEqual(summary["expectation"]["run_on"], ["overflow"])
+            self.assertEqual(
+                summary["expectation"]["executed_cases"],
+                ["sample/basic", "secret/overflow1"],
+            )
+            self.assertEqual(summary["expectation"]["skipped_cases"], ["secret/ordinary1"])
+            self.assertTrue(summary["expectation"]["coverage_ok"])
+            self.assertEqual(summary["calibration"]["fresh_cases"], 2)
+
+            config["solutions"]["accepted"][1]["run_on"] = ["overflow", "ordinary"]
+            config_path.write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            second, events = self.run_judge(problem)
+            self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+            reference_cases = [
+                event for event in events
+                if event.get("type") == "case" and event.get("program") == "code/reference.cpp"
+            ]
+            by_name = {event["case"]: event for event in reference_cases}
+            self.assertTrue(by_name["sample/basic"]["cached"])
+            self.assertTrue(by_name["secret/overflow1"]["cached"])
+            self.assertFalse(by_name["secret/ordinary1"]["cached"])
+
+    def test_run_on_cannot_skip_a_target_hidden_by_explicit_expectation_groups(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.create_problem(Path(temp))
+            config_path = problem / "probhub.yaml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["data"]["groups"][1]["targets"] = ["code/reference.cpp"]
+            config["solutions"]["accepted"].append({
+                "file": "code/reference.cpp",
+                "run_on": ["overflow"],
+                "expected": {"status": "AC", "groups": ["overflow"], "all": True},
+            })
+            config_path.write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            failed, events = self.run_judge(problem, no_cache=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(events[-1]["code"], "solution_run_on_target_gap")
+            self.assertEqual(events[-1]["diagnostic"]["target_groups"], ["ordinary"])
+            self.assertEqual(events[-1]["diagnostic"]["missing_cases"], ["secret/ordinary1"])
+            self.assertFalse(any(event.get("type") == "compile" for event in events))
+
+            config["solutions"]["accepted"][1]["run_on"] = ["overflow", "ordinary"]
+            config_path.write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            passed, events = self.run_judge(problem, no_cache=True)
+            self.assertEqual(passed.returncode, 0, passed.stderr + passed.stdout)
+            reference_cases = [
+                event["case"]
+                for event in events
+                if event.get("type") == "case"
+                and event.get("program") == "code/reference.cpp"
+            ]
+            self.assertEqual(
+                reference_cases,
+                ["sample/basic", "secret/ordinary1", "secret/overflow1"],
+            )
+
+    def test_run_on_coverage_errors_fail_before_contestant_compile(self):
+        invalid_domains = (
+            (["ordinary"], "solution_run_on_expectation_gap"),
+            (["missing"], "solution_run_on_unknown_group"),
+            ([], "invalid_solution_run_on"),
+            (["empty"], "solution_run_on_has_no_cases"),
+            (["overflow", "empty"], "solution_run_on_has_no_cases"),
+            (["overflow", "overflow"], "invalid_solution_run_on"),
+            ([1], "invalid_solution_run_on"),
+        )
+        for run_on, expected_code in invalid_domains:
+            with self.subTest(run_on=run_on), tempfile.TemporaryDirectory() as temp:
+                problem = self.create_problem(Path(temp))
+                config_path = problem / "probhub.yaml"
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                config["solutions"]["accepted"].append({
+                    "file": "code/reference.cpp",
+                    "run_on": run_on,
+                    "expected": {"status": "AC", "groups": ["overflow"], "all": True},
+                })
+                config_path.write_text(
+                    yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8",
+                )
+                result, events = self.run_judge(problem, no_cache=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(events[-1]["code"], expected_code)
+                contestant_compiles = [
+                    event for event in events
+                    if event.get("type") == "compile"
+                    and event.get("kind") in {"std", "brute", "wrong"}
+                ]
+                self.assertEqual(contestant_compiles, [])
+
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.create_problem(Path(temp))
+            config_path = problem / "probhub.yaml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["solutions"]["accepted"][0] = {
+                "file": "code/std.cpp",
+                "run_on": ["overflow"],
+                "expected": {"status": "AC", "groups": ["overflow"], "all": True},
+            }
+            config_path.write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            result, events = self.run_judge(problem, no_cache=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(events[-1]["code"], "primary_accepted_run_on_forbidden")
+
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.create_problem(Path(temp))
+            config_path = problem / "probhub.yaml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["solutions"]["accepted"].append({
+                "file": "code/reference.cpp",
+                "run_on": ["overflow"],
+                "expected": {"status": "AC", "all": True},
+            })
+            config_path.write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            result, events = self.run_judge(problem, no_cache=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(
+                events[-1]["code"],
+                "partial_accepted_expected_groups_required",
+            )
+
+    def test_solution_verification_errors_fail_before_contestant_compile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.create_problem(Path(temp))
+            config_path = problem / "probhub.yaml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            (problem / "code/reference.cpp").write_bytes(
+                (problem / "code/std.cpp").read_bytes()
+            )
+            config["solutions"]["accepted"].append({
+                "file": "code/reference.cpp",
+                "expected": {"status": "AC", "all": True},
+                "independence": {
+                    "from": "code/std.cpp",
+                    "basis": "algorithm",
+                    "note": "Claims a different algorithm despite identical bytes.",
+                },
+            })
+            config_path.write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+
+            result, events = self.run_judge(problem, no_cache=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(events[-1]["code"], "independent_accepted_identical")
+            self.assertEqual(events[-1]["diagnostic"]["severity"], "error")
+            contestant_compiles = [
+                event for event in events
+                if event.get("type") == "compile"
+                and event.get("kind") in {"std", "brute", "wrong"}
+            ]
+            self.assertEqual(contestant_compiles, [])
+
+    def test_first_configured_accepted_must_have_an_available_file(self):
+        cases = (
+            ({"expected": {"status": "AC", "all": True}}, "solution_file_missing"),
+            ("code/missing.cpp", "accepted_missing"),
+        )
+        for primary, expected_code in cases:
+            with self.subTest(primary=primary), tempfile.TemporaryDirectory() as temp:
+                problem = self.create_problem(Path(temp))
+                config_path = problem / "probhub.yaml"
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                config["solutions"]["accepted"][0] = primary
+                config_path.write_text(
+                    yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8",
+                )
+
+                result, events = self.run_judge(problem, no_cache=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(events[-1]["code"], expected_code)
+                contestant_compiles = [
+                    event for event in events
+                    if event.get("type") == "compile"
+                    and event.get("kind") in {"std", "brute", "wrong"}
+                ]
+                self.assertEqual(contestant_compiles, [])
 
 
 if __name__ == "__main__":

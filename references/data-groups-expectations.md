@@ -11,6 +11,16 @@ solutions:
       expected:
         status: AC
         all: true
+    - file: code/reference_dp.cpp
+      run_on: [reference-small]
+      expected:
+        status: AC
+        groups: [reference-small]
+        all: true
+      independence:
+        from: code/std.cpp
+        basis: algorithm
+        note: 使用独立 DP，而 std.cpp 使用贪心；两者不共享核心实现。
 
   brute:
     - file: code/brute.cpp
@@ -30,6 +40,10 @@ data:
   sample_dir: data/sample
   secret_dir: data/secret
   groups:
+    - name: reference-small
+      role: reference-domain
+      patterns: [sample/*, secret/small*]
+
     - name: overflow
       role: wrong-solution-killer
       patterns: [secret/overflow*]
@@ -62,16 +76,48 @@ solutions:
 
 同一测试点可以属于多个组。
 
+## `run_on` 运行域
+
+结构化 solution 条目可以声明 `run_on: [groups]`，让较慢的参考实现只在可承受的数据组上运行。多个组取并集；所有 sample 无论是否命中这些组都始终隐式执行。未配置 `run_on` 时仍运行全部 sample 与 secret。
+
+运行域只影响本地 `probhub judge`。它不改变 `stress` 选择的 accepted/brute，不改变 DOMjudge 包中的数据或正式评测语义，也不把局部参考解包装成完整标程。
+
+约束如下：
+
+- 配置顺序中的首个 accepted 必须全量运行，禁止声明 `run_on`；它仍负责样例快检、答案生成与完整正确性基线。
+- 第二及后续 accepted 可以声明 `run_on`，但必须同时显式声明 `expected.groups`；这些期望组和由 `data.groups.targets` 隐式选出的目标组都必须落在 `run_on` 内。
+- `run_on` 引用未知组、空组或没有匹配任何测试点的组会使 lint 失败。
+- 同一测试点属于多个 `run_on` 组时只执行一次。
+- `forbid`、expectation 与校准只检查实际执行域。结构化结果会公开 `run_on`、`executed_cases` 与 `skipped_cases`，局部结果不得被解释成全数据覆盖。
+
+样例虽然始终执行，但只有显式属于 `expected.groups` 时才进入该组的目标状态断言；这让“执行域”和“宿命选择域”保持可区分。
+
+## accepted 独立性声明
+
+第二及后续 accepted 可用 `independence` 记录作者声明和人工复核依据：
+
+```yaml
+independence:
+  from: code/std.cpp
+  basis: key_implementation   # algorithm 或 key_implementation
+  note: 独立实现状态转移，不 include 或复用 std.cpp 的核心函数。
+```
+
+- `from` 指向被互证的另一 accepted；`basis` 只能是 `algorithm` 或 `key_implementation`；`note` 必须非空并具体说明差异。
+- Core 不会自动证明两个算法真正独立，这份声明仍需作者或审题人复核。
+- Core 能确定的反证会直接阻断，例如两份源码字节相同、仅重复登记同一路径，或通过 `#include` 直接复用被声明独立实现的源码。
+- `difficulty >= 4` 的题目若只有一个 accepted，且没有额外覆盖完整数据域的 AC 参考实现，会产生结构化 warning。是否“覆盖完整数据域”按实际用例集合判断：`run_on`、`expected.groups` 或 `data.groups.targets` 只要使 expectation 少于全部用例，就不能消除该 warning。
+
 ## expected 字段
 
 - `status`：目标状态或状态列表。
 - `groups`：只在这些数据组内寻找目标状态。
 - `all`：`true` 表示选中用例必须全部属于 `status`；`false` 表示至少一个选中用例属于 `status`。
-- `forbid`：在该程序的全部测试点中禁止出现的状态。命中任意一个即失败。
+- `forbid`：在该程序的实际执行域中禁止出现的状态。命中任意一个即失败。
 
 当 `groups` 未显式配置时：
 
-1. accepted 始终检查全部测试点；
+1. 未声明 `run_on` 的 accepted 检查全部测试点；首个 accepted 强制如此；
 2. brute/wrong 若被某个数据组的 `targets` 明确引用，则自动使用这些目标组；
 3. 否则检查全部测试点；
 4. 没有 `targets` 的普通分组不会自动缩小程序的宿命范围。
@@ -84,15 +130,15 @@ solutions:
 # accepted/std
 status: [AC]
 all: true
-forbid: [WA, TLE, MLE, RE, FAIL]
+forbid: [WA, TLE, MLE, OLE, RE, FAIL]
 
 # brute
-status: [TLE, MLE]
+status: [TLE, MLE, OLE]
 all: false
 forbid: [WA, FAIL]
 
 # wrong
-status: [WA, TLE, MLE, RE]
+status: [WA, TLE, MLE, OLE, RE]
 all: false
 forbid: [FAIL]
 ```
@@ -112,12 +158,13 @@ forbid: [FAIL]
 `expectation` 关键字段包括：
 
 - `selected_cases`、`matched_cases`、`forbidden_cases`；
+- `run_on`、`executed_cases`、`skipped_cases`：配置运行域与实际执行/跳过用例；
 - `first_non_ac`：程序遇到的首个非 AC 用例；
 - `first_expected_match`：首个满足目标状态的用例；
 - `first_forbidden`：首个命中禁止状态的用例；
 - `ok`：宿命是否满足。
 
-宿命配置和数据组配置不参与逐点执行缓存键。仅修改 `expected` 或分组映射时，程序运行结果可以复用，但宿命断言会按新配置重新计算。
+宿命配置和数据组配置不参与逐点执行缓存键。仅修改 `expected`、`run_on` 或分组映射时，已有逐点结果仍可复用；Judge 会按新的运行域选择需要执行/复用的用例，并重新计算宿命断言与 evidence。
 
 校准只在 expectation 选中的用例范围内寻找相应资源状态。组外 TLE/MLE/OLE 不能充当目标组的击杀余量。普通 TLE 事件在 TL 处即被终止，只能证明 `runtime >= TL`；因此 expected-TLE 余量使用额外延长时限探针，不能把普通 case elapsed 冒充为 `1.5 × TL` 实测值。
 

@@ -40,6 +40,8 @@ __pycache__/
 # Local judge calibration evidence
 **/.probhub/judge-evidence-v1.json
 **/.probhub/judge-evidence-v1.json.*.tmp
+**/.probhub/judge-evidence-v2.json
+**/.probhub/judge-evidence-v2.json.*.tmp
 **/.probhub/judge-evidence.lock
 
 # Local WebUI submission workspaces
