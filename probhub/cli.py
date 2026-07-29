@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import __version__
 from .build_lock import workspace_build_lock
-from .building import build_workspace, package_problem
+from .building import build_workspace, package_workspace
 from .doctor import run_doctor
 from .errors import ProbHubError
 from .generations import (
@@ -435,19 +435,31 @@ def command_typeset(args):
 
 def command_package(args):
     root, workspace = workspace_context(args)
-    with workspace_build_lock(root):
-        _, workspace = load_workspace(root)
-        recover_workspace_transactions(root, workspace)
-        results = {}
-        for entry in select_entries(workspace, args.problem):
-            problem_dir, config = load_problem(root, entry)
-            output, verification = package_problem(root, problem_dir, config, require_pdf=not args.allow_missing_pdf)
-            results[entry["id"]] = {"path": str(output), "verification": verification}
-        return {"ok": True, "packages": results}
+    entries = select_entries(workspace, args.problem)
+    return package_workspace(
+        root,
+        workspace,
+        entries,
+        require_pdf=not args.allow_missing_pdf,
+    )
 
 
 def command_verify(args):
-    result = verify_package(args.zip_path, require_pdf=args.require_pdf)
+    verification_args = {}
+    if args.problem:
+        root, workspace = workspace_context(args)
+        entry = select_entries(workspace, [args.problem])[0]
+        problem_dir, config = load_problem(root, entry)
+        verification_args.update(
+            expected_config=config,
+            source_problem_dir=problem_dir,
+            run_validator=True,
+        )
+    result = verify_package(
+        args.zip_path,
+        require_pdf=args.require_pdf,
+        **verification_args,
+    )
     result["path"] = str(Path(args.zip_path).resolve())
     return result
 
@@ -542,6 +554,10 @@ def build_parser():
     verify = sub.add_parser("verify-package")
     verify.add_argument("zip_path")
     verify.add_argument("--require-pdf", action="store_true")
+    verify.add_argument(
+        "--problem",
+        help="deep-verify against this workspace problem and run its input Validator",
+    )
     verify.set_defaults(handler=command_verify)
     return parser
 

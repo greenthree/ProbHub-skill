@@ -21,7 +21,7 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 - **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
 - **WebUI 出题工作台**：提供响应式明暗双主题控制台，支持题目导航与排序、Markdown 和题面图片预览、题面/样例/封面编辑、revision 冲突保护、隔离 PDF 编译预览及临时代码沙箱评测，正式分发统一调用 Core。
 - **可重复构建 Core**：Workspace Schema v1、不可变 checkpoint/generation、sealed revision 正式发布门禁、Manifest v3、过期检测和统一 `probhub` CLI。
-- **DOMjudge 兼容**：从规范源文件生成 `problem.yaml`、`domjudge-problem.ini` 和确定性 `.zip`。
+- **DOMjudge 交付验证**：从规范源生成确定性 `.zip`，以小写 `.in`/`.ans` 和 LF-only 字节流发布测试数据；验包在解析中央目录前限制归档大小和条目数，拒绝路径/大小写冲突、可执行文件与缓存，并可对账题名/限制/Judge 类型、运行输入 Validator 和编译包内 output validator。
 
 示例 PDF：
 [真实赛事 Typst 题面排版示例](https://github.com/greenthree/ProbHub-skill/blob/main/typst-template/%E6%AD%A3%E5%BC%8F%E8%B5%9B/main.pdf)
@@ -148,6 +148,7 @@ probhub package L01
 probhub build L01
 probhub build             # 构建全工作区
 probhub verify-package L01.zip --require-pdf
+probhub --workspace . verify-package L01.zip --require-pdf --problem L01  # 深度复核
 ```
 
 如果 npm bin 不在 PATH，可使用 Skill/工作区中的兼容入口：
@@ -455,10 +456,10 @@ WebUI 的上传任务由后台线程监督独立评测子进程。`CANCELLING` �
 
 ```bash
 python scripts/package_problem.py <problem_dir> <problem_id>.zip --require-pdf
-python scripts/verify_package.py <problem_id>.zip --require-pdf
+python scripts/verify_package.py <problem_id>.zip --require-pdf --problem-dir <problem_dir>
 ```
 
-打包脚本会按稳定顺序和固定时间戳写入 ZIP；验证脚本会检查路径安全、根配置文件、样例/隐藏数据及 `.in`/`.ans` 配对关系。
+打包脚本会按稳定顺序和固定时间戳流式写入 ZIP，并把测试数据规范为 LF-only 字节而不修改源文件。CLI 的多题 `package` 在隔离快照中完成全部深验，再以同一 journal/rollback 事务整批发布；失败不会留下部分题已更新。验证脚本会安全流式解压并限制条目/体积，检查路径、普通文件类型、根配置、样例/隐藏数据和 `.in`/`.ans` 配对；提供题目目录后还会对账规范源并运行输入 Validator。无题目上下文的结果仅为 `verification_scope: structural`。
 
 ---
 
