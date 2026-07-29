@@ -4,11 +4,11 @@
 
 #let md = cmarker-render.with(math: mitex, scope: (image: (source, alt: none, format: auto) => align(center)[#image(source, alt: alt, format: format)]))
 #let fonts = (
-  sans: ("Microsoft YaHei", "simsun"),
-  song: ("New Computer Modern Math", "Simsun"),
-  zsong: ("STZhongSong", "STZhongSong"),
-  kaishu: ("KaiTi",),
-  mono: ("New Computer Modern Mono","New Computer Modern Mono")
+  sans: ("Microsoft YaHei", "simsun", "Noto Sans CJK SC"),
+  song: ("New Computer Modern Math", "Simsun", "Noto Sans CJK SC"),
+  zsong: ("STZhongSong", "Noto Sans CJK SC"),
+  kaishu: ("KaiTi", "Noto Sans CJK SC"),
+  mono: ("New Computer Modern Mono", "DejaVu Sans Mono")
 )
 #set text(font: fonts.song)
 #let maketitle(
@@ -194,7 +194,7 @@
   set text(lang: "zh", font: fonts.song)
   set document(title: title, author: author)
 
-  show strong: it => text(font: "SimSun", stroke: 0.3pt + black, it)
+  show strong: it => text(font: ("SimSun", "Noto Sans CJK SC"), stroke: 0.3pt + black, it)
   show raw: set text(font: fonts.mono, size: 11pt)
 
   // 封面页

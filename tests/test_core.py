@@ -92,6 +92,95 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertEqual(json.loads(output.getvalue())["code"], "build_busy")
 
+    def test_typeset_cli_defaults_to_all_workspace_problems(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root)
+            workspace_path = root / ".probhub/workspace.yaml"
+            workspace = read_yaml(workspace_path)
+            workspace["problems"].append({"id": "B", "directory": "B"})
+            write_yaml(workspace_path, workspace)
+            output = io.StringIO()
+
+            with (
+                patch(
+                    "probhub.cli.typeset_workspace",
+                    return_value={"ok": True, "pdfs": {}},
+                ) as typeset,
+                redirect_stdout(output),
+            ):
+                code = cli_main([
+                    "--workspace",
+                    str(root),
+                    "--json",
+                    "typeset",
+                ])
+
+            self.assertEqual(code, 0, output.getvalue())
+            called_root, called_workspace, called_entries = typeset.call_args.args
+            self.assertEqual(called_root, root.resolve())
+            self.assertEqual(called_workspace["schema_version"], 1)
+            self.assertEqual([entry["id"] for entry in called_entries], ["A", "B"])
+
+    def test_typeset_cli_selects_only_explicit_problem_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root)
+            workspace_path = root / ".probhub/workspace.yaml"
+            workspace = read_yaml(workspace_path)
+            workspace["problems"].append({"id": "B", "directory": "B"})
+            write_yaml(workspace_path, workspace)
+            output = io.StringIO()
+
+            with (
+                patch(
+                    "probhub.cli.typeset_workspace",
+                    return_value={"ok": True, "pdfs": {}},
+                ) as typeset,
+                redirect_stdout(output),
+            ):
+                code = cli_main([
+                    "--workspace",
+                    str(root),
+                    "--json",
+                    "typeset",
+                    "B",
+                ])
+
+            self.assertEqual(code, 0, output.getvalue())
+            called_entries = typeset.call_args.args[2]
+            self.assertEqual([entry["id"] for entry in called_entries], ["B"])
+
+    def test_typeset_cli_emits_structured_probhub_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root)
+            output = io.StringIO()
+
+            with (
+                patch(
+                    "probhub.cli.typeset_workspace",
+                    side_effect=ProbHubError(
+                        "injected Typst failure",
+                        code="typeset_failed",
+                    ),
+                ),
+                redirect_stdout(output),
+            ):
+                code = cli_main([
+                    "--workspace",
+                    str(root),
+                    "--json",
+                    "typeset",
+                    "A",
+                ])
+
+            result = json.loads(output.getvalue())
+            self.assertEqual(code, 1)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "typeset_failed")
+            self.assertEqual(result["error"], "injected Typst failure")
+
     def test_cli_reports_invalid_yaml_without_traceback(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

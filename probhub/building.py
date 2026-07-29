@@ -708,6 +708,27 @@ def _package_publish_entry_specs(plan, snapshot):
     return specs
 
 
+def _typeset_publish_entry_specs(plan, snapshot):
+    live_by_id = {item.config["id"]: item for item in plan.problems}
+    staged_by_id = {item.config["id"]: item for item in snapshot.problems}
+    specs = []
+    for problem_id, live in live_by_id.items():
+        staged = staged_by_id[problem_id]
+        specs.append((staged.problem_dir / "meta.json", live.problem_dir / "meta.json"))
+
+    live_typst = plan.root / plan.typst_relative
+    staged_typst = snapshot.root / plan.typst_relative
+    specs.extend((
+        (staged_typst / "problems.json", live_typst / "problems.json"),
+        (staged_typst / "main.pdf", live_typst / "main.pdf"),
+    ))
+    for staged in snapshot.selected:
+        problem_id = staged.config["id"]
+        live = live_by_id[problem_id]
+        specs.append((staged.problem_dir / "problem.pdf", live.problem_dir / "problem.pdf"))
+    return specs
+
+
 def _journal_target(root, relative):
     return resolve_journal_target(root, relative)
 
@@ -779,7 +800,7 @@ def _recover_build_publish_transactions(root):
             ) from exc
 
 
-def _publish_transaction(root, batch_id, specs):
+def _publish_transaction(root, batch_id, specs, pre_commit=None):
     root = Path(root).resolve()
     transaction = root / ".probhub" / f"build-publish-{batch_id}"
     transaction.mkdir(parents=True, exist_ok=False)
@@ -823,6 +844,8 @@ def _publish_transaction(root, batch_id, specs):
                     f"publish target changed before commit: {entry['target']}",
                     code="publish_failed",
                 )
+        if pre_commit is not None:
+            pre_commit()
         cleanup_transaction = False
         try:
             for index, entry in enumerate(entries):
@@ -901,18 +924,27 @@ def _publish_transaction(root, batch_id, specs):
                 ) from exc
 
 
-def _publish_build_transaction(plan, snapshot):
+def _publish_build_transaction(plan, snapshot, pre_commit=None):
     _publish_transaction(
         plan.root,
         plan.batch_id,
         _publish_entry_specs(plan, snapshot),
+        pre_commit=pre_commit,
     )
 
 
-def publish_build(plan, snapshot, manifests, pdfs, packages, publish_cache):
+def publish_build(
+    plan,
+    snapshot,
+    manifests,
+    pdfs,
+    packages,
+    publish_cache,
+    pre_commit=None,
+):
     _assert_publish_targets_available(plan)
     live_by_id = {item.config["id"]: item for item in plan.problems}
-    _publish_build_transaction(plan, snapshot)
+    _publish_build_transaction(plan, snapshot, pre_commit=pre_commit)
 
     live_typst = plan.root / plan.typst_relative
     live_pdfs = {}
@@ -1210,11 +1242,63 @@ def package_workspace(root, workspace, entries, require_pdf=True):
             assert_package_inputs_unchanged(plan)
             specs = _package_publish_entry_specs(plan, snapshot)
             _assert_publish_paths_available(target for _, target in specs)
-            _publish_transaction(plan.root, plan.batch_id, specs)
+            _publish_transaction(
+                plan.root,
+                plan.batch_id,
+                specs,
+                pre_commit=lambda: assert_package_inputs_unchanged(plan),
+            )
             return {
                 "ok": True,
                 "batch_id": plan.batch_id,
                 "packages": packages,
+            }
+
+
+def typeset_workspace(root, workspace, entries):
+    root = Path(root).resolve()
+    with workspace_build_lock(root):
+        _, live_workspace = load_workspace(root)
+        recover_workspace_transactions(root, live_workspace)
+        selected_ids = [entry["id"] for entry in entries]
+        live_entries = select_entries(live_workspace, selected_ids)
+        plan = create_build_plan(root, live_workspace, live_entries)
+        with create_build_snapshot(plan) as snapshot:
+            _, staged_main_pdf, _ = compile_collection(
+                snapshot.root,
+                snapshot.workspace,
+                snapshot.loaded_problems,
+            )
+            target_ids = {item.config["id"] for item in snapshot.selected}
+            pdfs = extract_problem_pdfs(
+                staged_main_pdf,
+                snapshot.loaded_problems,
+                only_ids=target_ids,
+            )
+
+            assert_build_inputs_unchanged(plan)
+            specs = _typeset_publish_entry_specs(plan, snapshot)
+            _assert_publish_paths_available(target for _, target in specs)
+            _publish_transaction(
+                plan.root,
+                plan.batch_id,
+                specs,
+                pre_commit=lambda: assert_build_inputs_unchanged(plan),
+            )
+
+            live_by_id = {item.config["id"]: item for item in plan.problems}
+            live_pdfs = {}
+            for problem_id, result in pdfs.items():
+                live_pdfs[problem_id] = {
+                    **result,
+                    "path": str(live_by_id[problem_id].problem_dir / "problem.pdf"),
+                }
+            live_typst = plan.root / plan.typst_relative
+            return {
+                "ok": True,
+                "batch_id": plan.batch_id,
+                "main_pdf": str(live_typst / "main.pdf"),
+                "pdfs": live_pdfs,
             }
 
 
@@ -1302,6 +1386,10 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
                 pdfs,
                 packages,
                 publish_cache=run_judge,
+                pre_commit=lambda: (
+                    assert_build_inputs_unchanged(plan),
+                    assert_collection_seals_unchanged(plan, sealed_checkpoints),
+                ),
             )
             return {
                 "ok": True,

@@ -475,6 +475,8 @@ probhub typeset [ID...]
 
 它不会运行沙箱、构建 ZIP 或写 Manifest。
 
+`typeset` 与正式 `build` 共用工作区写锁、全量 collection lint、隔离输入快照、提交前输入栅栏和 journal/rollback 发布。Typst 编译、任一题切页或正式替换失败时，已有 `meta.json`、`problems.json`、全卷 PDF 和单题 PDF 均保持原字节；只发布全题 metadata、全卷产物和所选单题 PDF，不触碰 ZIP、DOMjudge 配置或 Manifest。
+
 ## 12. `package`
 
 ```powershell

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import __version__
 from .build_lock import workspace_build_lock
-from .building import build_workspace, package_workspace
+from .building import build_workspace, package_workspace, typeset_workspace
 from .doctor import run_doctor
 from .errors import ProbHubError
 from .generations import (
@@ -29,7 +29,6 @@ from .package_tools import verify_package
 from .reporting import build_workspace_report, render_workspace_report
 from .scaffold import JUDGE_TYPES, scaffold_config, scaffold_files
 from .stressing import stress_problem
-from .typesetting import compile_collection, extract_problem_pdfs
 from .transactions import ensure_no_pending_transactions, recover_workspace_transactions
 from .workspace import (
     WORKSPACE_FILE,
@@ -423,14 +422,8 @@ def command_generation_status(args):
 
 def command_typeset(args):
     root, workspace = workspace_context(args)
-    with workspace_build_lock(root):
-        _, workspace = load_workspace(root)
-        recover_workspace_transactions(root, workspace)
-        all_loaded = [load_problem(root, entry) for entry in problem_entries(workspace)]
-        _, main_pdf, _ = compile_collection(root, workspace, all_loaded)
-        ids = {entry["id"] for entry in select_entries(workspace, args.problem)} if args.problem else None
-        pdfs = extract_problem_pdfs(main_pdf, all_loaded, only_ids=ids)
-        return {"ok": True, "main_pdf": str(main_pdf), "pdfs": pdfs}
+    entries = select_entries(workspace, args.problem)
+    return typeset_workspace(root, workspace, entries)
 
 
 def command_package(args):

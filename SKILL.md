@@ -98,189 +98,148 @@ probhub build
 | `assemble` | 使用各题最新 checkpoint 生成隔离的完整试卷 generation |
 | `generation-status` | 校验并报告当前预览 generation |
 | `typeset [ID...]` | 编译全卷并提取指定单题 PDF |
-| `package [ID...]` | …55960 tokens truncated… root / problem_id
-            paths.extend((
-                problem_dir / "meta.json",
-                problem_dir / "problem.pdf",
-                problem_dir / "problem.yaml",
-                problem_dir / "domjudge-problem.ini",
-                problem_dir / ".probhub/build-manifest.json",
-                root / f"{problem_id}.zip",
-            ))
-        before = {}
-        for index, path in enumerate(paths):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            payload = f"old-{index}-{path.name}".encode("utf-8")
-            path.write_bytes(payload)
-            before[path] = payload
-        return before
+| `package [ID...]` | 从当前产物构建并验证指定 ZIP |
+| `build [ID...]` | lint → judge → 全卷排版 → 单题 PDF → ZIP → Manifest |
+| `verify-package <zip>` | 流式验证 DOMjudge ZIP 结构；配合 `--problem <ID>` 深度对账规范源并运行输入 Validator |
 
-    def fake_compile(self, root, workspace, loaded):
-        for problem_dir, config in loaded:
-            (problem_dir / "meta.json").write_text(
-                f'{{"id":"{config["id"]}"}}\n',
-                encoding="utf-8",
-            )
-        typst_dir = root / "typst/contest"
-        (typst_dir / "problems.json").write_text("[]\n", encoding="utf-8")
-        main_pdf = typst_dir / "main.pdf"
-        main_pdf.write_bytes(b"new main pdf")
-        return typst_dir, main_pdf, []
+`typeset <ID>` 和 `build <ID>` 为保证正式题号与页码正确，仍会编译整个 Typst 集合；`typeset` 只提取并更新所选单题 PDF，`build` 还会打包并更新所选题目。
 
-    def fake_extract(self, main_pdf, loaded, only_ids=None):
-        outputs = {}
-        for problem_dir, config in loaded:
-            problem_id = config["id"]
-            if only_ids and problem_id not in only_ids:
-                continue
-            output = problem_dir / "problem.pdf"
-            output.write_bytes(b"new problem pdf-" + problem_id.encode("ascii"))
-            outputs[problem_id] = {"path": str(output), "pages": 1}
-        return outputs
+`typeset` 也在隔离快照中完成全卷编译和全部所选题目的切页，所有步骤成功且 live 输入未变化后才通过 journal 一次发布 metadata、全卷 PDF 与所选单题 PDF；失败不会覆盖最后一份正确排版产物，也不会触碰 ZIP 或 Manifest。
 
-    def assert_artifacts_equal(self, before):
-        for path, payload in before.items():
-            self.assertEqual(path.read_bytes(), payload, path)
+批量出题时不要求题目任务等待统一协调者。每个任务在开发中定期发布 checkpoint，完成自动验证后执行 seal：
 
-    def test_compile_failure_leaves_live_artifacts_unchanged(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            workspace = self.create_workspace(root)
-            before = self.seed_artifacts(root)
+```powershell
+probhub checkpoint L01
+probhub seal L01 --no-cache --seed 12345
+```
 
-            def failing_compile(snapshot_root, snapshot_workspace, loaded):
-                self.fake_compile(snapshot_root, snapshot_workspace, loaded)
-                raise ProbHubError("injected Typst failure", code="typeset_failed")
+`seal` 会生成一份隔离的完整试卷 generation：本题使用 sealed revision，其他题使用最后发布的 checkpoint，没有 checkpoint 时使用占位页。组装不读取其他 Agent 正在编辑的文件，不覆盖正式 PDF、ZIP、metadata 或 Manifest。完整协议见 `references/generations.md`。
 
-            with patch("probhub.building.compile_collection", side_effect=failing_compile):
-                with self.assertRaises(ProbHubError) as raised:
-                    typeset_workspace(root, workspace, problem_entries(workspace))
+所有题目 sealed 后，任意任务或本地 worker 再执行一次正式多题构建：
 
-            self.assertEqual(raised.exception.code, "typeset_failed")
-            self.assert_artifacts_equal(before)
-            self.assertEqual(list((root / ".probhub").glob("build-publish-*")), [])
-            self.assertEqual(list(root.parent.glob(f".{root.name}-probhub-*")), [])
+```powershell
+probhub build L01 L02 L03 --no-cache
+```
 
-    def test_extraction_failure_does_not_publish_earlier_problem(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            workspace = self.create_workspace(root)
-            before = self.seed_artifacts(root)
+一次多题 `build` 只编译一次完整 Typst 集合，再分别提取、打包和更新所选题目。Core 会持有跨平台 OS 写锁，先统一恢复 build/gen/fixate 的 pending transaction，再要求整场所有题目的最新 sealed revision 与 live source/data 一致，并在临时快照中完成全部准备和 ZIP 验证；缺失或过期 seal 返回 `sealed_revision_required`，发布前 revision 变化返回 `sealed_revision_changed`，输入变化返回 `inputs_changed`，并发 writer 返回 `build_busy`。只读命令在事务待恢复时返回 `recovery_required`。Manifest v3 为所有所选题目记录同一 `batch_id` 和各自 `sealed_revision_id`。不要让多个 Agent 依次运行单题正式 `build`。
 
-            def failing_extract(main_pdf, loaded, only_ids=None):
-                first_dir, _ = loaded[0]
-                (first_dir / "problem.pdf").write_bytes(b"staged first PDF")
-                raise ProbHubError("injected second problem extraction failure")
+沙箱默认复用内容寻址缓存。需要忽略旧结果、完整重跑并刷新缓存时使用：
 
-            with (
-                patch("probhub.building.compile_collection", side_effect=self.fake_compile),
-                patch("probhub.building.extract_problem_pdfs", side_effect=failing_extract),
-            ):
-                with self.assertRaisesRegex(ProbHubError, "second problem"):
-                    typeset_workspace(root, workspace, problem_entries(workspace))
+```powershell
+probhub judge L01 --no-cache
+probhub build L01 --no-cache
+```
 
-            self.assert_artifacts_equal(before)
+仅在已经完成可信沙箱后，才可为排版或打包迭代使用：
 
-    def test_publish_failure_rolls_back_all_typeset_artifacts(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            workspace = self.create_workspace(root)
-            before = self.seed_artifacts(root)
-            replacements = 0
+```powershell
+probhub build L01 --skip-judge
+```
 
-            def failing_replace(source, target):
-                nonlocal replacements
-                replacements += 1
-                if replacements == 4:
-                    raise OSError("injected typeset publish failure")
-                Path(target).parent.mkdir(parents=True, exist_ok=True)
-                os.replace(source, target)
+完整语法、产物、退出码和故障处理见 `references/cli.md`。配置或执行差分测试前读取 `references/stress.md`；修改资源限制、解释 OLE 或排查残留进程时读取 `references/process-control.md`。
 
-            with (
-                patch("probhub.building.compile_collection", side_effect=self.fake_compile),
-                patch("probhub.building.extract_problem_pdfs", side_effect=self.fake_extract),
-                patch("probhub.building._replace_publish_path", side_effect=failing_replace),
-            ):
-                with self.assertRaises(ProbHubError) as raised:
-                    typeset_workspace(root, workspace, problem_entries(workspace))
+# 4. Schema v1 标准执行闭环
 
-            self.assertEqual(raised.exception.code, "publish_failed")
-            self.assert_artifacts_equal(before)
-            self.assertEqual(list((root / ".probhub").glob("build-publish-*")), [])
+1. 读取 `.probhub/workspace.yaml`，确认稳定 ID、目录和正式题序。
+2. 读取所选题目的 `probhub.yaml`、`problem.md`、`code/` 与 `data/`。
+3. 只修改规范源文件；不要修改生成物来“修复”结果。
+4. 修改后执行：
 
-    def test_input_change_during_publish_staging_aborts_before_commit(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            workspace = self.create_workspace(root)
-            before = self.seed_artifacts(root)
-            statement = root / "A/problem.md"
-            real_copyfile = __import__("shutil").copyfile
-            changed = False
+   ```powershell
+   probhub lint <ID>
+   ```
 
-            def copy_and_change_live_input(source, target, *args, **kwargs):
-                nonlocal changed
-                result = real_copyfile(source, target, *args, **kwargs)
-                target_path = Path(target)
-                if not changed and any(
-                    part.name.startswith("build-publish-")
-                    for part in target_path.parents
-                ):
-                    statement.write_text(
-                        statement.read_text(encoding="utf-8")
-                        + "\nChanged while staging the publish transaction.\n",
-                        encoding="utf-8",
-                    )
-                    changed = True
-                return result
+5. 开发代码或数据时执行：
 
-            with (
-                patch("probhub.building.compile_collection", side_effect=self.fake_compile),
-                patch("probhub.building.extract_problem_pdfs", side_effect=self.fake_extract),
-                patch("probhub.building.shutil.copyfile", side_effect=copy_and_change_live_input),
-                patch(
-                    "probhub.building._replace_publish_path",
-                    side_effect=AssertionError("commit must not begin"),
-                ),
-            ):
-                with self.assertRaises(ProbHubError) as raised:
-                    typeset_workspace(root, workspace, problem_entries(workspace))
+   ```powershell
+   probhub sample-check <ID>
+   probhub judge <ID>
+   ```
 
-            self.assertTrue(changed)
-            self.assertEqual(raised.exception.code, "inputs_changed")
-            self.assertIn("A.source_hash", str(raised.exception))
-            self.assert_artifacts_equal(before)
-            self.assertEqual(list((root / ".probhub").glob("build-publish-*")), [])
+   若题目配置了 `stress`，在 brute 能处理的小数据范围继续执行：
 
-    def test_success_publishes_only_typeset_artifacts(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            workspace = self.create_workspace(root)
-            before = self.seed_artifacts(root)
-            entries = [problem_entries(workspace)[0]]
+   ```powershell
+   probhub stress <ID> --rounds 10000 --seed 12345
+   ```
 
-            with (
-                patch("probhub.building.compile_collection", side_effect=self.fake_compile),
-                patch("probhub.building.extract_problem_pdfs", side_effect=self.fake_extract),
-            ):
-                result = typeset_workspace(root, workspace, entries)
+   发现反例后先用输出的 `replay_command` 固定复现，再修复并重跑；完整协议见 `references/stress.md`。
 
-            self.assertTrue(result["ok"])
-            self.assertEqual(set(result["pdfs"]), {"A"})
-            self.assertEqual(Path(result["main_pdf"]), root / "typst/contest/main.pdf")
-            self.assertEqual((root / "typst/contest/main.pdf").read_bytes(), b"new main pdf")
-            self.assertEqual((root / "A/problem.pdf").read_bytes(), b"new problem pdf-A")
-            self.assertEqual((root / "B/problem.pdf").read_bytes(), before[root / "B/problem.pdf"])
-            for problem_id in ("A", "B"):
-                for relative in (
-                    "problem.yaml",
-                    "domjudge-problem.ini",
-                    ".probhub/build-manifest.json",
-                ):
-                    path = root / problem_id / relative
-                    self.assertEqual(path.read_bytes(), before[path], path)
-                package = root / f"{problem_id}.zip"
-                self.assertEqual(package.read_bytes(), before[package], package)
+6. 完成后执行：
 
+   ```powershell
+   probhub build <ID>
+   probhub status <ID>
+   ```
 
-if __name__ == "__main__":
-    unittest.main()
+7. 高风险正式交付前，最后一次涉及代码、数据、答案或限制的修改后，至少执行一次：
+
+   ```powershell
+   probhub build <ID> --no-cache
+   ```
+
+8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 深度验证成功且 `status` 为 `current` 时才可交付。独立复核正式包时使用 `probhub --workspace <工作区> verify-package <ID>.zip --require-pdf --problem <ID>`；不带 `--problem` 的 `verification_scope: structural` 不能替代题名、限制、数据和输入 Validator 对账。Manifest 的 `collection_hash` 会跟踪整场排版输入；其他题题面、题面媒体、样例、题序或模板变化后，受影响题目也必须重新构建。
+9. 查看 judge summary 与 lint/status 的 `calibration`、`diagnostics`：默认 accepted 应满足 `max_time × 3 <= TL`，期望 TLE 的目标用例应有至少 `1.5 × TL` 的延长探针证据。缺失或低余量 warning 必须在交付前人工处理或在题目 `calibration` 中有意识地调整阈值。
+
+本地 `max_time`、内存和输出余量不是正式评测承诺。Windows 与 Linux/DOMjudge 的启动、链接、调度、计时和内存口径不同；正式 TL/ML/OL 必须在目标 Linux 评测环境重新校准，结构化结果中的 `target_guarantee` 固定为 `false`。
+
+# 5. 出题内容要求
+
+- 现有题面来源不得擅自改意，只修正格式；Idea 题应自行完成约束、算法与简洁题面。
+- 输入格式中的数据范围使用中文括号，紧跟变量第一次出现处，例如：`输入一个整数 $T$（$1\le T\le 100$）。`
+- 题面写法守则：
+  - 任务目标必须在题目描述阶段即可读懂，不得推迟到输入输出格式甚至样例才首次出现；关键定义、对象、操作在就近位置解释。
+  - 数据范围必须覆盖输入中每个量的完整前提：下界、字符集、互异性、是否保证有解、是否保证成树/连通等；浮点输出题写明误差判定标准，而不是只写"保留若干位小数"。
+  - 样例应有强度：多操作题覆盖不同操作，多答案类型题覆盖不同输出类型。样例解释不得泄露关键结论、核心公式或标准做法；读者可通过画图、手算或代入定义自行看懂时可不写。
+- 在 `code/` 中维护：
+  - `std.cpp`：最优正确解。
+  - `validator.cpp`：基于 testlib.h，严格验证范围与格式。
+  - `brute.cpp`：朴素但绝对正确，允许 TLE/MLE/OLE，不允许 WA。
+  - `wrong*.cpp`：针对典型错误，必须被数据击杀。编写前先按 `references/mistake-taxonomy.md` 做三层（思路/复杂度/实现）题目特定枚举，每层至少一个错解或说明不适用；与正解等价的错解不得保留；不得只枚举 WA 型错法。
+  - `inmaker.cpp` 或生成脚本：覆盖样例、随机、边界、极限和定向卡错解数据。数量与配比遵循 `references/mistake-taxonomy.md` 的数据强度纪律：单测试文件 ≥30、多组测试 ≥20，边界/定向/近上界大数据占明显比例，纯随机只作补充，数据预算主动打满。
+- 普通唯一答案题使用 `judge.type: standard`：忽略整个输出首尾空白和每行末尾空格/Tab，但行内空格与内部换行仍需一致。需要 Token 级宽松比较时改用 Checker。
+- 非唯一答案和浮点题使用 `judge.type: custom` 与 `code/checker.cpp`；交互题使用 `judge.type: interactive` 与 `code/interactor.cpp`。实现前读取 `references/checker-interactor.md`。
+- Checker/Interactor 必须使用附带的 DOMjudge/testlib 协议；交互题按需设置 `judge.interactive.idle_limit` 和 `transcript_limit`。Core 负责本地编译以及生成 `output_validators/validate/`，不得手工维护该生成目录。
+- 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
+- 样例 `.ans` 必须由配置顺序中的首个 accepted 精确复现；只归一 CRLF/CR 为 LF，尾空格、缺少尾换行和其他字节差异仍失败。Custom Checker 的非唯一输出语义不能替代这条样例不变量；交互题明确不适用。
+- 题面只能有一个 H1，必需 H2 依次为题目描述、输入格式、输出格式且内容非空；提示位于输出之后，样例输入/输出只来自 `data/sample`。lint 的约束对账始终是 `analysis_state: partial` 的人工复核报告，启发式 mismatch 只能 warning，不能作为自动正确性证明。
+- secret 数据优先通过 `data.recipes` 配方生成（`probhub gen`）：生成器 + 精确 args 可复现同一字节，手工数据显式 `manual: true`；没有配方的测试点 lint 会给 warning。配方格式见 `references/workspace-schema-v1.md`。
+- 为定向卡错解和复杂度数据配置 `data.groups` 与结构化 `solutions.*[].expected`；实现或审查时读取 `references/data-groups-expectations.md`。要求错解必须 WA 时显式写 `status: WA`，不得用偶然 RE/TLE 代替。
+- 慢参考解可在第二及后续 accepted 上配置 `run_on: [groups]`；多个组取并集，sample 始终执行。首个 accepted 禁止缩域；局部 accepted 必须显式写 `expected.groups`，且期望和 target 覆盖不得超出运行域。该字段只影响本地 Judge，不影响 stress 或 DOMjudge 包。
+- 第二及后续 accepted 用 `independence: {from, basis, note}` 记录独立思路或关键实现及人工复核说明；`basis` 只能是 `algorithm` / `key_implementation`。不得用变量重命名、I/O 改写、同字节源码或直接 include 主实现冒充独立解。Core 只能检查确定反证，不能自动证明算法独立。
+- `difficulty >= 4` 且只有一个 accepted、没有额外全域 AC 参考实现时，lint 会给结构化 warning；局部 `run_on` 参考解不能替代全域互证。
+- `limits.time` 使用正数秒；`limits.memory` 至少为 `256MB` 且为 2 的幂；`limits.output` 使用正整数 MiB，默认 `64`；`limits.processes` 使用正整数，默认 `32`。
+- 复杂生成器读取 `references/cyaron.md`；简单 C++ 生成器读取 `references/fast.md`。用于差分测试的 Generator 必须把单个测试点写到 stdout，并只由 `{seed}` / `{round}` 参数控制随机性；读取 `references/stress.md`。
+
+# 6. 沙箱宿命与修复
+
+- Validator 失败：修复生成器或数据格式并重新生成。
+- accepted 非全 AC：修复标程、答案或 Checker/Interactor。
+- Checker/Interactor 返回 `FAIL`：这是题目基础设施错误，不得当作错解被击杀；检查官方答案、协议和评测程序。
+- brute 出现 WA：修复 brute、标程或答案；不得忽略。
+- brute 没有任何 TLE/MLE/OLE：检查复杂度与数据强度。
+- wrong 全 AC：用 `probhub stress <ID> --against <该错解> --fixate <case>` 找刀并一步固化；`not_separated` 时加强生成器分布或修正错解模型（见 `references/stress.md` 第 8 节）。
+- 出现 `OLE`：先检查程序是否无限输出，再判断 `limits.output` 是否确实过小；不得用放宽上限掩盖错误程序。
+- 出现 `process limit exceeded`：检查递归创建进程或未回收子进程；官方 Validator、Checker、Interactor、Generator 或编译器触发限制时按基础设施错误处理。
+- 评测结束后仍有后代进程、Windows Job 建立失败或资源控制异常：视为沙箱基础设施错误，不得继续无保护运行；读取 `references/process-control.md`。
+- stress 发现 `counterexample`：保留 `.probhub/stress/` 中的输入，用 `--replay latest` 或输出的重放命令复现；修复后把有价值的输入固化为隐藏数据。
+- stress 报 `infrastructure`：先修复 Generator、Validator 或 Checker；不得把基础设施失败当作算法反例。交互题当前不支持 stress。
+- 怀疑随机性、环境波动或缓存异常：普通沙箱使用 `--no-cache` 完整重跑并刷新缓存；stress 不使用沙箱缓存，应固定 `--seed` 或 replay。
+
+不得根据自然语言提示判断成功：普通沙箱同时检查退出码和最后一个 JSONL `final` 事件；stress 同时检查退出码和单个结果中的 `ok`、`status`、`reason`。
+
+# 7. WebUI 与交付限制
+
+- Schema v1 WebUI 导航和 PDF 翻页必须只读；题面保存只允许修改 `workspace.yaml` 题序、`probhub.yaml`、`problem.md` 和样例规范源，封面保存只修改 `workspace.yaml` 的 `contest` / `typst.cover`。不得让保存或导航隐式重写 PDF、ZIP、metadata 或 Manifest。
+- WebUI “编译”使用隔离快照和临时 PDF 预览；只有显式“分发”可调用 Core 正式 build。保存冲突以 `source_conflict` 返回，不得静默覆盖其他会话或 Agent 的修改。
+- Schema v1 WebUI 的临时提交评测只接受 UTF-8 `.cpp`，源码必须进入 `.probhub/submissions/<task-id>/` 独立目录；评测结束后清理，不得覆盖或修改题目原有 `code/`、数据、配置、答案和构建产物。
+- WebUI 上传提交时直接使用“沙箱评测”页；以编译事件、逐测试点事件和最终 verdict 为准，不得把上传代码加入 `solutions.accepted` 或写回 `probhub.yaml`。
+- 需要停止排队中或运行中的上传任务时使用页面“取消”按钮，并等待状态从 `CANCELLING` 进入 `CANCELLED`；不要手工删除仍在运行的任务目录。Core 会协作取消并在必要时强杀完整进程树。
+- WebUI 启动和接受新提交时会清理超过 24 小时且名称合法的遗留任务目录；陌生目录、符号链接和活动任务不得自动删除。
+- Legacy 工作区仍保留原编辑兼容路径；不得把 Legacy 生成物编辑语义带入 Schema v1。
+- 不得手工增量修改旧 ZIP；必须由 Core 完整重建并验证。
+- 不得提交 `.exe`、沙箱缓存、临时输出或 Typst/WebUI 预览缓存。
+- 遇到错误必须自行定位、修复并重跑相应验证。
+
+# 8. Legacy 工作区
+
+仅当 `.probhub/workspace.yaml` 不存在时，读取 `references/legacy-workflow.md` 并按其中阶段执行。Legacy 工作区允许使用 `meta.json`、Typst `problems.json` 和手工 DOMjudge 配置；Schema v1 不允许。
