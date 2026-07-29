@@ -212,7 +212,10 @@ class TypesetTransactionTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(set(result["pdfs"]), {"A"})
-            self.assertEqual(Path(result["main_pdf"]), root / "typst/contest/main.pdf")
+            self.assertEqual(
+                Path(result["main_pdf"]).resolve(),
+                (root / "typst/contest/main.pdf").resolve(),
+            )
             self.assertEqual((root / "typst/contest/main.pdf").read_bytes(), b"new main pdf")
             self.assertEqual((root / "A/problem.pdf").read_bytes(), b"new problem pdf-A")
             self.assertEqual((root / "B/problem.pdf").read_bytes(), before[root / "B/problem.pdf"])
