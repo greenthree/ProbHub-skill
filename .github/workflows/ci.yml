@@ -11,6 +11,12 @@ concurrency:
 
 env:
   TYPST_VERSION: v0.14.2
+  TYPST_LINUX_SHA256: a6044cbad2a954deb921167e257e120ac0a16b20339ec01121194ff9d394996d
+  TYPST_WINDOWS_SHA256: 51353994ac83218c3497052e89b2c432c53b9d4439cdc1b361e2ea4798ebfc13
+  CJK_FONT_COMMIT: 165c01b46ea533872e002e0785ff17e44f6d97d8
+  CJK_FONT_SHA256: 2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b
+  TYPST_IGNORE_SYSTEM_FONTS: "true"
+  PROBHUB_RUN_TYPST_E2E: "1"
 
 jobs:
   quality:
@@ -35,23 +41,74 @@ jobs:
       - name: Install pinned Typst (Linux)
         if: runner.os == 'Linux'
         run: |
-          curl -sSL -o "$RUNNER_TEMP/typst.tar.xz" "https://github.com/typst/typst/releases/download/$TYPST_VERSION/typst-x86_64-unknown-linux-musl.tar.xz"
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
+            -o "$RUNNER_TEMP/typst.tar.xz" \
+            "https://github.com/typst/typst/releases/download/$TYPST_VERSION/typst-x86_64-unknown-linux-musl.tar.xz"
+          echo "$TYPST_LINUX_SHA256  $RUNNER_TEMP/typst.tar.xz" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: Install pinned Typst (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://github.com/typst/typst/releases/download/$env:TYPST_VERSION/typst-x86_64-pc-windows-msvc.zip" -OutFile "$env:RUNNER_TEMP\typst.zip"
-          Expand-Archive -Path "$env:RUNNER_TEMP\typst.zip" -DestinationPath "$env:RUNNER_TEMP"
+          $ProgressPreference = 'SilentlyContinue'
+          $archive = Join-Path $env:RUNNER_TEMP 'typst.zip'
+          $url = "https://github.com/typst/typst/releases/download/$env:TYPST_VERSION/typst-x86_64-pc-windows-msvc.zip"
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $archive
+              break
+            } catch {
+              if ($attempt -eq 3) { throw }
+              Start-Sleep -Seconds (2 * $attempt)
+            }
+          }
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $env:TYPST_WINDOWS_SHA256) {
+            throw "Typst archive checksum mismatch: $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath "$env:RUNNER_TEMP"
           Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\typst-x86_64-pc-windows-msvc"
-      - name: Typst smoke compile
-        shell: bash
+      - name: Install pinned CJK font
+        shell: pwsh
         run: |
-          typst --version
-          printf 'Typst toolchain smoke test.\n' > "$RUNNER_TEMP/smoke.typ"
-          typst compile "$RUNNER_TEMP/smoke.typ" "$RUNNER_TEMP/smoke.pdf"
-          test -s "$RUNNER_TEMP/smoke.pdf"
+          $ProgressPreference = 'SilentlyContinue'
+          $fontDir = Join-Path $env:RUNNER_TEMP 'probhub-fonts'
+          New-Item -ItemType Directory -Force -Path $fontDir | Out-Null
+          $font = Join-Path $fontDir 'NotoSansCJKsc-Regular.otf'
+          $url = "https://raw.githubusercontent.com/notofonts/noto-cjk/$env:CJK_FONT_COMMIT/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $font
+              break
+            } catch {
+              if ($attempt -eq 3) { throw }
+              Start-Sleep -Seconds (2 * $attempt)
+            }
+          }
+          $actual = (Get-FileHash -Algorithm SHA256 $font).Hash.ToLowerInvariant()
+          if ($actual -ne $env:CJK_FONT_SHA256) {
+            throw "CJK font checksum mismatch: $actual"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "TYPST_FONT_PATHS=$fontDir"
+      - name: Typst smoke compile
+        shell: pwsh
+        run: |
+          $expected = "typst $($env:TYPST_VERSION.Substring(1))"
+          $actual = (& typst --version).Trim()
+          if (-not $actual.StartsWith($expected)) {
+            throw "Unexpected Typst version: $actual"
+          }
+          if (@(& typst fonts) -notcontains 'Noto Sans CJK SC') {
+            throw 'Pinned Noto Sans CJK SC font was not discovered'
+          }
+          $source = Join-Path $env:RUNNER_TEMP 'smoke.typ'
+          $output = Join-Path $env:RUNNER_TEMP 'smoke.pdf'
+          Set-Content -LiteralPath $source -Encoding utf8NoBOM -Value "#set text(font: `"Noto Sans CJK SC`")`nProbHub 固定字体。"
+          & typst compile $source $output
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $output) -or (Get-Item $output).Length -eq 0) {
+            throw 'Typst smoke compilation failed'
+          }
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements.txt
       - run: npm ci
