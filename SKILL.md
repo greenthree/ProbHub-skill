@@ -102,7 +102,9 @@ probhub build
 | `build [ID...]` | lint → judge → 全卷排版 → 单题 PDF → ZIP → Manifest |
 | `verify-package <zip>` | 流式验证 DOMjudge ZIP 结构；配合 `--problem <ID>` 深度对账规范源并运行输入 Validator |
 
-`typeset <ID>` 和 `build <ID>` 为保证正式题号与页码正确，仍会编译整个 Typst 集合，但只提取、打包和更新所选题目。
+`typeset <ID>` 和 `build <ID>` 为保证正式题号与页码正确，仍会编译整个 Typst 集合；`typeset` 只提取并更新所选单题 PDF，`build` 还会打包并更新所选题目。
+
+`typeset` 也在隔离快照中完成全卷编译和全部所选题目的切页，所有步骤成功且 live 输入未变化后才通过 journal 一次发布 metadata、全卷 PDF 与所选单题 PDF；失败不会覆盖最后一份正确排版产物，也不会触碰 ZIP 或 Manifest。
 
 批量出题时不要求题目任务等待统一协调者。每个任务在开发中定期发布 checkpoint，完成自动验证后执行 seal：
 

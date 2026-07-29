@@ -244,6 +244,26 @@ class BatchBuildTests(unittest.TestCase):
             self.assertEqual((root / "A.zip").read_bytes(), b"zip-A")
             self.assertEqual((root / "B.zip").read_bytes(), b"zip-B")
 
+    def test_package_rechecks_inputs_after_publish_payload_staging(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            self.seed_live_package_artifacts(root, workspace)
+
+            with (
+                patch(
+                    "probhub.building.package_problem",
+                    side_effect=self.write_package_fixture,
+                ),
+                patch(
+                    "probhub.building.assert_package_inputs_unchanged",
+                ) as input_fence,
+            ):
+                result = package_workspace(root, workspace, entries)
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(input_fence.call_count, 2)
+
     def test_package_rejects_pdf_change_before_publish(self):
         with tempfile.TemporaryDirectory() as temp:
             root, workspace = self.create_workspace(Path(temp))
@@ -349,6 +369,49 @@ class BatchBuildTests(unittest.TestCase):
                         problem_status(problem_dir, config, root, workspace)["state"],
                         "current",
                     )
+
+    def test_build_rechecks_inputs_and_seals_after_publish_payload_staging(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+
+            def fake_extract(main_pdf, loaded, only_ids=None):
+                outputs = {}
+                for problem_dir, config in loaded:
+                    if only_ids and config["id"] not in only_ids:
+                        continue
+                    output = problem_dir / "problem.pdf"
+                    output.write_bytes(b"%PDF-1.4\n" + config["id"].encode("ascii"))
+                    outputs[config["id"]] = {"path": str(output), "pages": 1}
+                return outputs
+
+            with (
+                patch(
+                    "probhub.building.compile_collection",
+                    side_effect=lambda snapshot_root, snapshot_workspace, loaded: (
+                        self.write_compiled_fixture(snapshot_root, loaded)
+                    ),
+                ),
+                patch(
+                    "probhub.building.extract_problem_pdfs",
+                    side_effect=fake_extract,
+                ),
+                patch(
+                    "probhub.building.package_problem",
+                    side_effect=self.write_package_fixture,
+                ),
+                patch(
+                    "probhub.building.assert_build_inputs_unchanged",
+                ) as input_fence,
+                patch(
+                    "probhub.building.assert_collection_seals_unchanged",
+                ) as seal_fence,
+            ):
+                result = build_workspace(root, workspace, entries, run_judge=False)
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(input_fence.call_count, 2)
+            self.assertEqual(seal_fence.call_count, 2)
 
     def test_multi_problem_build_rejects_unsealed_batch_before_staging(self):
         with tempfile.TemporaryDirectory() as temp:
