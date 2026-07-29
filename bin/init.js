@@ -3,7 +3,11 @@ const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process');
 const packageInfo = require('../package.json');
-const { pythonModuleArgs, resolvePython } = require('./python.js');
+const {
+    pythonEnvironment,
+    pythonModuleArgs,
+    resolvePython,
+} = require('./python.js');
 
 const isLocal = process.argv.includes('--local');
 const skipPythonDeps = process.argv.includes('--skip-python-deps')
@@ -11,7 +15,7 @@ const skipPythonDeps = process.argv.includes('--skip-python-deps')
 const sourceDir = path.resolve(__dirname, '..');
 
 function runPythonModule(python, moduleName, args, timeout, failureLabel) {
-    const env = { ...process.env };
+    const env = pythonEnvironment(process.env);
     const result = spawnSync(
         python.command,
         [...python.prefixArgs, ...pythonModuleArgs(sourceDir, moduleName, args)],

@@ -51,7 +51,10 @@ class ScaffoldTests(unittest.TestCase):
             code, forced = run_cli(["--json", "init", str(root), "--title", "Changed", "--force"])
             self.assertEqual(code, 0)
             self.assertEqual(main_typ.read_text(encoding="utf-8"), "// custom\n")
-            self.assertIn(str(main_typ), forced["typst"]["preserved"])
+            self.assertIn(
+                main_typ.resolve(),
+                [Path(value).resolve() for value in forced["typst"]["preserved"]],
+            )
 
     def test_init_rejects_path_like_subtitle_before_writing_workspace(self):
         with tempfile.TemporaryDirectory() as temp:

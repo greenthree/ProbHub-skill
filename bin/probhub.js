@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { pythonModuleArgs, resolvePython } = require('./python.js');
+const {
+    pythonEnvironment,
+    pythonModuleArgs,
+    resolvePython,
+} = require('./python.js');
 
 const sourceDir = path.join(__dirname, '..');
-const env = { ...process.env };
+const env = pythonEnvironment(process.env);
 const python = resolvePython(env);
 if (!python) {
     console.error('[ProbHub] Python >= 3.10 was not found. Set PYTHON to the desired interpreter.');

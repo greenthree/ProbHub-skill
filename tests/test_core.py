@@ -582,6 +582,34 @@ class CoreWorkspaceTests(unittest.TestCase):
         self.assertFalse(report["tools"]["typst"]["font_ok"])
         self.assertEqual(report["tools"]["typst"]["requirement"], "0.14.2")
 
+    def test_doctor_runs_resolved_npm_javascript_entry_through_node(self):
+        from probhub.doctor import _npm_version
+
+        with tempfile.TemporaryDirectory() as temp:
+            npm_cli = Path(temp) / "npm-cli.js"
+            npm_cli.write_text("", encoding="utf-8")
+            probe = {
+                "ok": True,
+                "path": "/fake/node",
+                "lines": ["10.9.0"],
+                "diagnostic": None,
+            }
+            with (
+                patch("probhub.doctor.shutil.which", return_value=str(npm_cli)),
+                patch("probhub.doctor._command_probe", return_value=probe) as command_probe,
+            ):
+                result = _npm_version({"ok": True, "path": "/fake/node"})
+
+        self.assertEqual(result, {
+            "ok": True,
+            "path": str(npm_cli),
+            "version": "10.9.0",
+        })
+        command_probe.assert_called_once_with(
+            "/fake/node",
+            (str(npm_cli.resolve()), "--version"),
+        )
+
     def test_publish_output_validators_stages_before_removing_old(self):
         from probhub.building import _publish_output_validators
 

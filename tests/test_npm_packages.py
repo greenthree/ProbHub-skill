@@ -148,7 +148,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_node_entrypoints_cannot_be_shadowed_by_workspace_module(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(prefix="ProbHub 中文路径 ") as temp:
             project = Path(temp)
             sentinel = project / "shadow-executed"
             shadow_payload = (

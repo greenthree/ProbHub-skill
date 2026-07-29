@@ -49,6 +49,25 @@ def _command_version(command, args=("--version",)):
     return {"ok": probe["ok"], "path": probe["path"], "version": version}
 
 
+def _npm_version(node):
+    npm_path = shutil.which("npm")
+    if not npm_path:
+        return {"ok": False, "path": None, "version": None}
+    try:
+        resolved = Path(npm_path).resolve()
+    except OSError:
+        resolved = Path(npm_path)
+    if node.get("ok") and resolved.suffix.lower() in {".js", ".cjs", ".mjs"}:
+        probe = _command_probe(node["path"], (str(resolved), "--version"))
+        version = (
+            probe["lines"][0]
+            if probe["lines"]
+            else (probe["diagnostic"] or "unknown")
+        )
+        return {"ok": probe["ok"], "path": npm_path, "version": version}
+    return _command_version("npm")
+
+
 def _version_tuple(text, *, prefix=""):
     match = re.search(rf"(?:^|\s){re.escape(prefix)}(\d+)\.(\d+)\.(\d+)(?:\s|$)", text or "")
     return tuple(map(int, match.groups())) if match else None
@@ -96,7 +115,7 @@ def run_doctor():
         "g++": _command_version("g++"),
         "typst": typst,
         "node": node,
-        "npm": _command_version("npm"),
+        "npm": _npm_version(node),
     }
     modules = {
         name: importlib.util.find_spec(name) is not None

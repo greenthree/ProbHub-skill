@@ -42,8 +42,21 @@ function resolvePython(env = process.env) {
     return null;
 }
 
+function pythonEnvironment(env = process.env) {
+    return {
+        ...env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+    };
+}
+
 function pythonModuleArgs(sourceDir, moduleName, args = []) {
     return ['-I', '-c', MODULE_BOOTSTRAP, sourceDir, moduleName, ...args];
 }
 
-module.exports = { pythonCandidates, pythonModuleArgs, resolvePython };
+module.exports = {
+    pythonCandidates,
+    pythonEnvironment,
+    pythonModuleArgs,
+    resolvePython,
+};

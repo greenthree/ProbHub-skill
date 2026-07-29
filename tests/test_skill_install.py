@@ -34,6 +34,7 @@ class SkillInstallTests(unittest.TestCase):
         return package
 
     def targets(self, base):
+        base = Path(base).resolve()
         return tuple(base.joinpath(*target.split("/")) for target in TARGETS)
 
     def seed_old_installs(self, base):
