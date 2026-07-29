@@ -81,6 +81,30 @@ def _npm_javascript_entry(npm_path):
     return None
 
 
+def _npm_wrapper_probe(npm_path, node):
+    try:
+        with Path(npm_path).open("rb") as wrapper:
+            first_line = wrapper.readline(512)
+    except OSError:
+        return None
+    if not first_line.startswith(b"#!"):
+        return None
+    try:
+        words = first_line[2:].decode("utf-8", errors="replace").strip().split()
+    except (AttributeError, UnicodeError):
+        return None
+    if not words:
+        return None
+    interpreter = Path(words[0]).name.lower()
+    if interpreter == "env" and len(words) >= 2:
+        interpreter = Path(words[1]).name.lower()
+    if interpreter in {"node", "nodejs"} and node.get("ok"):
+        return _command_probe(node["path"], (npm_path, "--version"))
+    if interpreter in {"sh", "bash", "dash"}:
+        return _command_probe("sh", (npm_path, "--version"))
+    return None
+
+
 def _npm_version(node):
     npm_path = shutil.which("npm")
     if not npm_path:
@@ -94,6 +118,18 @@ def _npm_version(node):
             else (probe["diagnostic"] or "unknown")
         )
         return {"ok": probe["ok"], "path": npm_path, "version": version}
+    wrapper_probe = _npm_wrapper_probe(npm_path, node)
+    if wrapper_probe is not None:
+        version = (
+            wrapper_probe["lines"][0]
+            if wrapper_probe["lines"]
+            else (wrapper_probe["diagnostic"] or "unknown")
+        )
+        return {
+            "ok": wrapper_probe["ok"],
+            "path": npm_path,
+            "version": version,
+        }
     return _command_version("npm")
 
 

@@ -648,6 +648,40 @@ class CoreWorkspaceTests(unittest.TestCase):
                     (str(npm_cli.resolve()), "--version"),
                 )
 
+    def test_doctor_runs_known_npm_shebang_wrappers_explicitly(self):
+        from probhub.doctor import _npm_version
+
+        wrappers = (
+            ("#!/bin/sh\n", "sh"),
+            ("#!/usr/bin/env node\n", "/fake/node"),
+        )
+        for first_line, interpreter in wrappers:
+            with self.subTest(first_line=first_line), tempfile.TemporaryDirectory() as temp:
+                wrapper = Path(temp) / "npm"
+                wrapper.write_text(first_line + "exit 0\n", encoding="utf-8")
+                probe = {
+                    "ok": True,
+                    "path": interpreter,
+                    "lines": ["10.9.0"],
+                    "diagnostic": None,
+                }
+                with (
+                    patch("probhub.doctor.shutil.which", return_value=str(wrapper)),
+                    patch("probhub.doctor._npm_javascript_entry", return_value=None),
+                    patch("probhub.doctor._command_probe", return_value=probe) as command_probe,
+                ):
+                    result = _npm_version({"ok": True, "path": "/fake/node"})
+
+                self.assertEqual(result, {
+                    "ok": True,
+                    "path": str(wrapper),
+                    "version": "10.9.0",
+                })
+                command_probe.assert_called_once_with(
+                    interpreter,
+                    (str(wrapper), "--version"),
+                )
+
     def test_publish_output_validators_stages_before_removing_old(self):
         from probhub.building import _publish_output_validators
 
