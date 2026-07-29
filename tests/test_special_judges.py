@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import textwrap
 import unittest
@@ -14,6 +15,12 @@ from pathlib import Path
 from unittest import mock
 
 import yaml
+
+from probhub.process_control import (
+    process_alive,
+    terminate_process,
+    windows_assign_job,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_JUDGE = ROOT / "scripts" / "local_judge.py"
@@ -24,6 +31,101 @@ SPEC.loader.exec_module(JUDGE_MODULE)
 
 
 class InteractiveJudgeUnitTests(unittest.TestCase):
+    class _ChunkedSource:
+        def __init__(self, chunks):
+            self.chunks = list(chunks)
+
+        def read(self, _size):
+            return self.chunks.pop(0) if self.chunks else b""
+
+        def close(self):
+            pass
+
+    class _NonClosingBytesIO(io.BytesIO):
+        def close(self):
+            pass
+
+    def test_interactive_transcript_decodes_utf8_across_chunks(self):
+        lock = threading.RLock()
+        transcript = {
+            "entries": [],
+            "bytes": 0,
+            "limit": 32,
+            "truncated": False,
+            "_lock": lock,
+        }
+        activity = {"last": 0.0}
+        traffic = {"limit": 1024, "_lock": lock}
+        destination = self._NonClosingBytesIO()
+
+        JUDGE_MODULE._pump_interactive_stream(
+            self._ChunkedSource([b"\xe4\xbd", b"\xa0\n"]),
+            destination,
+            "interactor_to_solution",
+            transcript,
+            activity,
+            traffic,
+        )
+
+        recorded = "".join(entry["data"] for entry in transcript["entries"])
+        self.assertEqual(recorded, "你\n")
+        self.assertNotIn("\ufffd", recorded)
+        self.assertEqual(destination.getvalue(), "你\n".encode("utf-8"))
+
+    def test_interactive_transcript_budget_is_shared_atomically(self):
+        class RacingTranscript(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._barriers = [
+                    threading.Barrier(2),
+                    threading.Barrier(2),
+                ]
+                self._reads = {}
+
+            def __getitem__(self, key):
+                if key == "bytes":
+                    thread_id = threading.get_ident()
+                    count = self._reads.get(thread_id, 0)
+                    self._reads[thread_id] = count + 1
+                    if count < len(self._barriers):
+                        try:
+                            self._barriers[count].wait(timeout=0.1)
+                        except threading.BrokenBarrierError:
+                            pass
+                return super().__getitem__(key)
+
+        lock = threading.RLock()
+        transcript = RacingTranscript(
+            entries=[], bytes=0, limit=8, truncated=False, _lock=lock
+        )
+        activity = {"last": 0.0}
+        traffic = {"limit": 1024, "_lock": lock}
+        destinations = [self._NonClosingBytesIO(), self._NonClosingBytesIO()]
+        threads = [
+            threading.Thread(
+                target=JUDGE_MODULE._pump_interactive_stream,
+                args=(
+                    self._ChunkedSource([b"abcdefgh"]),
+                    destinations[index],
+                    direction,
+                    transcript,
+                    activity,
+                    traffic,
+                ),
+            )
+            for index, direction in enumerate(
+                ("solution_to_interactor", "interactor_to_solution")
+            )
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(transcript["bytes"], transcript["limit"])
+        self.assertTrue(transcript["truncated"])
+
     def test_interactor_spawn_uses_memory_limit_and_containment_failure_is_fail(self):
         class FakeManaged:
             memory_enforced = True
@@ -627,9 +729,9 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
             self.assertEqual(events[-1].get("status"), "cancelled", events[-1])
             for pid in (solution_pid, interactor_pid):
                 deadline = time.time() + 5
-                while JUDGE_MODULE._process_alive(pid) and time.time() < deadline:
+                while process_alive(pid) and time.time() < deadline:
                     time.sleep(0.05)
-                self.assertFalse(JUDGE_MODULE._process_alive(pid), f"interactive process {pid} survived cancellation")
+                self.assertFalse(process_alive(pid), f"interactive process {pid} survived cancellation")
 
     def test_process_tree_termination_kills_spawned_descendant(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -650,7 +752,7 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
             kwargs = {}
             if os.name == "nt":
                 proc = subprocess.Popen([sys.executable, str(parent_script)])
-                job = JUDGE_MODULE._windows_assign_job(proc)
+                job = windows_assign_job(proc)
             else:
                 kwargs["start_new_session"] = True
                 proc = subprocess.Popen([sys.executable, str(parent_script)], **kwargs)
@@ -660,12 +762,12 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertTrue(pid_file.exists(), "child process did not start")
             child_pid = int(pid_file.read_text(encoding="utf-8"))
-            self.assertTrue(JUDGE_MODULE._process_alive(child_pid))
-            JUDGE_MODULE._terminate_process(proc, job)
+            self.assertTrue(process_alive(child_pid))
+            terminate_process(proc, job)
             deadline = time.time() + 5
-            while JUDGE_MODULE._process_alive(child_pid) and time.time() < deadline:
+            while process_alive(child_pid) and time.time() < deadline:
                 time.sleep(0.05)
-            self.assertFalse(JUDGE_MODULE._process_alive(child_pid), f"child process {child_pid} survived")
+            self.assertFalse(process_alive(child_pid), f"child process {child_pid} survived")
 
 
 if __name__ == "__main__":

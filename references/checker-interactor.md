@@ -91,7 +91,7 @@ judge:
     transcript_limit: 65536 # 每个测试点最多保存的 Transcript 字节数
 ```
 
-`idle_limit` 默认取 `min(limits.time, 2s)`，最小为 `0.1s`。`transcript_limit` 默认 `65536`；设为 `0` 可关闭 Transcript 内容记录。修改这些选项会使交互测试点缓存自动失效。
+`idle_limit` 默认取 `min(limits.time, 2s)`，最小为 `0.1s`。`transcript_limit` 默认 `65536`；它是两个通信方向共享的原始字节预算，不是每个方向各自的额度，设为 `0` 可关闭 Transcript 内容记录。Core 会原子预留这份共享额度，并分别对两个方向做 UTF-8 增量解码，因此字符跨底层读取块时不会产生伪乱码；若额度本身截断了一个多字节字符，结果会标记 `truncated`，末尾可能出现替换字符。修改这些选项会使交互测试点缓存自动失效。
 
 ProbHub 将选手程序与 Interactor 双向连接：
 
@@ -134,7 +134,7 @@ int main(int argc, char* argv[]) {
 - `_fail` 用于题目或 Interactor 自身错误，不能用于表示普通选手错误。
 - 沙箱同时执行总时间限制和双向通信空闲超时。
 - 沙箱终止超时进程，并捕获双方 stderr。
-- JSONL 会输出 `transcript` 事件，条目方向为 `interactor_to_solution` 或 `solution_to_interactor`；超过上限时标记 `truncated`。
+- JSONL 会输出 `transcript` 事件，条目方向为 `interactor_to_solution` 或 `solution_to_interactor`；两个方向共同消耗 `transcript_limit` 原始字节额度，超过上限时标记 `truncated`。
 
 ## 3. DOMjudge 打包
 

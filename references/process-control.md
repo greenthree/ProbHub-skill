@@ -63,7 +63,7 @@ limits:
 
 进程可能在一次轮询间隔内多写少量内容，因此判定依据是“观测到超限”，而最终保存文件会被截断。快速大量输出并立即退出也会在结束后的最终检查中被识别，不能绕过 OLE。
 
-交互题同时限制选手到 Interactor 的通信流量以及 stderr；选手超限为 `OLE`，Interactor 自身输出洪泛为 `FAIL`。Transcript 仍受 `judge.interactive.transcript_limit` 单独限制，Transcript 截断不等于 OLE。
+交互题同时限制选手到 Interactor 的通信流量以及 stderr；选手超限为 `OLE`，Interactor 自身输出洪泛为 `FAIL`。Transcript 仍受 `judge.interactive.transcript_limit` 单独限制，两个通信方向原子共享这份原始字节预算，并分别使用 UTF-8 增量解码保留跨读取块字符；Transcript 截断不等于 OLE。
 
 编译器、Validator、Checker 和其他官方工具使用内部诊断输出上限，避免错误工具耗尽内存或磁盘；内部上限不改变 DOMjudge 正式题目限制。
 

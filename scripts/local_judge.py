@@ -1,14 +1,15 @@
+import codecs
 import hashlib
 import json
 import os
 import platform
 import re
-import signal
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
-import sys
 import time
 
 import yaml
@@ -24,17 +25,13 @@ from probhub.calibration import (
     SANDBOX_CACHE_SCHEMA_VERSION,
     calibration_policy,
 )
-from probhub.output_compare import compare_standard_output, normalize_standard_output
+from probhub.output_compare import compare_standard_output
 from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
     ProcessCancelled,
     cancellation_requested,
-    process_alive as _process_alive,
     run_managed_to_files,
     spawn_managed,
-    terminate_process as _terminate_process,
-    wait_managed,
-    windows_assign_job as _windows_assign_job,
 )
 from probhub.solutions import (
     analyze_solution_verification,
@@ -46,7 +43,6 @@ from probhub.solutions import (
     select_expectation_cases,
     select_run_cases,
     select_target_cases,
-    targeted_group_names,
 )
 
 REFERENCES_DIR = os.path.join(PACKAGE_ROOT, "references")
@@ -529,12 +525,6 @@ def _entry_file(entry):
     if isinstance(entry, dict):
         return entry.get("file")
     return entry
-
-
-def _config_entries(value):
-    if value is None:
-        return []
-    return value if isinstance(value, list) else [value]
 
 
 def resolve_problem_path(prob_dir, entry):
@@ -1033,35 +1023,47 @@ def run_custom_testcase(
         _remove_file_with_retries(output_file)
         shutil.rmtree(feedback_dir, ignore_errors=True)
 
+
+def _record_interactive_transcript(transcript, direction, payload, decoder, *, final=False):
+    """Reserve the shared byte budget and decode one direction incrementally."""
+    with transcript["_lock"]:
+        remaining = max(transcript["limit"] - transcript["bytes"], 0)
+        saved = payload[:remaining]
+        transcript["bytes"] += len(saved)
+        if len(saved) < len(payload):
+            transcript["truncated"] = True
+        text = decoder.decode(saved, final=final)
+        if text:
+            transcript["entries"].append({
+                "direction": direction,
+                "data": text,
+            })
+
+
 def _pump_interactive_stream(source, destination, direction, transcript, activity, traffic):
     """Forward bytes while recording a bounded transcript and last activity time."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     try:
         while True:
             chunk = source.read(4096)
             if not chunk:
                 break
-            activity["last"] = time.monotonic()
-            traffic[direction] = traffic.get(direction, 0) + len(chunk)
-            if traffic[direction] > traffic["limit"]:
-                traffic["exceeded"] = direction
+            now = time.monotonic()
+            with transcript["_lock"]:
+                activity["last"] = max(activity["last"], now)
+                traffic[direction] = traffic.get(direction, 0) + len(chunk)
+                limit_exceeded = traffic[direction] > traffic["limit"]
+            if limit_exceeded:
                 break
-            if transcript["bytes"] < transcript["limit"]:
-                remaining = transcript["limit"] - transcript["bytes"]
-                saved = chunk[:remaining]
-                transcript["entries"].append({
-                    "direction": direction,
-                    "data": saved.decode("utf-8", errors="replace"),
-                })
-                transcript["bytes"] += len(saved)
-                if len(saved) < len(chunk):
-                    transcript["truncated"] = True
-            else:
-                transcript["truncated"] = True
+            _record_interactive_transcript(transcript, direction, chunk, decoder)
             destination.write(chunk)
             destination.flush()
     except (BrokenPipeError, OSError, ValueError):
         pass
     finally:
+        _record_interactive_transcript(
+            transcript, direction, b"", decoder, final=True
+        )
         try:
             destination.close()
         except (OSError, ValueError):
@@ -1077,7 +1079,13 @@ def _interactive_solution_output_bytes(traffic, solution_stderr):
         stderr_size = os.path.getsize(solution_stderr)
     except OSError:
         stderr_size = 0
-    return int(traffic.get("solution_to_interactor", 0) + stderr_size)
+    lock = traffic.get("_lock")
+    if lock is None:
+        protocol_bytes = traffic.get("solution_to_interactor", 0)
+    else:
+        with lock:
+            protocol_bytes = traffic.get("solution_to_interactor", 0)
+    return int(protocol_bytes + stderr_size)
 
 
 def _interactive_result(
@@ -1092,9 +1100,17 @@ def _interactive_result(
     solution_stderr=None,
     termination_reason=None,
 ):
+    lock = transcript.get("_lock")
+    if lock is None:
+        entries = [dict(entry) for entry in transcript["entries"]]
+        transcript_truncated = transcript["truncated"]
+    else:
+        with lock:
+            entries = [dict(entry) for entry in transcript["entries"]]
+            transcript_truncated = transcript["truncated"]
     details = {
-        "transcript": transcript["entries"],
-        "transcript_truncated": transcript["truncated"],
+        "transcript": entries,
+        "transcript_truncated": transcript_truncated,
     }
     if traffic is not None and solution_stderr is not None:
         details["output_bytes"] = _interactive_solution_output_bytes(
@@ -1109,17 +1125,27 @@ def _interactive_result(
 
 def _interactive_output_status(traffic, solution_stderr, interactor_stderr):
     """Classify combined protocol/stderr output after every lifecycle edge."""
-    solution_stderr_size = _interactive_solution_output_bytes(
-        traffic, solution_stderr
-    ) - traffic.get("solution_to_interactor", 0)
+    try:
+        solution_stderr_size = os.path.getsize(solution_stderr)
+    except OSError:
+        solution_stderr_size = 0
     try:
         interactor_stderr_size = os.path.getsize(interactor_stderr)
     except OSError:
         interactor_stderr_size = 0
 
-    limit = int(traffic["limit"])
-    interactor_bytes = traffic.get("interactor_to_solution", 0) + interactor_stderr_size
-    solution_bytes = traffic.get("solution_to_interactor", 0) + solution_stderr_size
+    lock = traffic.get("_lock")
+    if lock is None:
+        limit = int(traffic["limit"])
+        interactor_protocol_bytes = traffic.get("interactor_to_solution", 0)
+        solution_protocol_bytes = traffic.get("solution_to_interactor", 0)
+    else:
+        with lock:
+            limit = int(traffic["limit"])
+            interactor_protocol_bytes = traffic.get("interactor_to_solution", 0)
+            solution_protocol_bytes = traffic.get("solution_to_interactor", 0)
+    interactor_bytes = interactor_protocol_bytes + interactor_stderr_size
+    solution_bytes = solution_protocol_bytes + solution_stderr_size
     if interactor_bytes > limit:
         return "FAIL", "interactor output limit exceeded"
     if solution_bytes > limit:
@@ -1159,9 +1185,16 @@ def run_interactive_testcase(
     start = time.time()
     monotonic_start = time.monotonic()
     idle_limit = max(float(idle_limit if idle_limit is not None else min(time_limit, 2.0)), 0.1)
-    transcript = {"entries": [], "bytes": 0, "limit": max(int(transcript_limit), 0), "truncated": False}
+    state_lock = threading.RLock()
+    transcript = {
+        "entries": [],
+        "bytes": 0,
+        "limit": max(int(transcript_limit), 0),
+        "truncated": False,
+        "_lock": state_lock,
+    }
     activity = {"last": monotonic_start}
-    traffic = {"limit": int(output_limit * 1024 * 1024), "exceeded": None}
+    traffic = {"limit": int(output_limit * 1024 * 1024), "_lock": state_lock}
     last_resource_sample = monotonic_start
     solution_managed = None
     interactor_managed = None
@@ -1225,8 +1258,6 @@ def run_interactive_testcase(
                 if cancellation_requested():
                     raise ProcessCancelled("execution cancelled")
                 now = time.monotonic()
-                resource_status = None
-                resource_message = ""
                 resource_status, resource_message = _interactive_output_status(
                     traffic, solution_stderr, interactor_stderr
                 )
@@ -1275,8 +1306,11 @@ def run_interactive_testcase(
                 timeout_kind = None
                 if now >= deadline:
                     timeout_kind = "total"
-                elif now - activity["last"] >= idle_limit:
-                    timeout_kind = "idle"
+                else:
+                    with state_lock:
+                        idle_elapsed = now - activity["last"]
+                    if idle_elapsed >= idle_limit:
+                        timeout_kind = "idle"
                 if timeout_kind:
                     solution_managed.sample()
                     peak_memory_mb = solution_managed.peak_memory_mb
@@ -1521,10 +1555,6 @@ def collect_testcases(prob_dir, config=None):
     return testcases
 
 
-def _targeted_group_names(groups, program_name):
-    return targeted_group_names(groups, program_name)
-
-
 def _select_expectation_cases(kind, entry, testcases, group_definitions):
     # A full-range accepted remains the correctness baseline even if a legacy
     # configuration accidentally carries expected.groups. Partial accepted
@@ -1535,6 +1565,7 @@ def _select_expectation_cases(kind, entry, testcases, group_definitions):
 
 
 def _expectation_cases(kind, testcases, expected, group_definitions, program_name):
+    """Compatibility adapter for callers that still pass a split expectation."""
     return _select_expectation_cases(
         kind,
         {"file": program_name, "expected": expected, "run_on": None},
