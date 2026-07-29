@@ -49,16 +49,45 @@ def _command_version(command, args=("--version",)):
     return {"ok": probe["ok"], "path": probe["path"], "version": version}
 
 
+def _npm_javascript_entry(npm_path):
+    raw = Path(npm_path)
+    try:
+        resolved = raw.resolve()
+    except OSError:
+        resolved = raw
+
+    candidates = []
+    for executable in (resolved, raw):
+        if executable.suffix.lower() in {".js", ".cjs", ".mjs"}:
+            candidates.append(executable)
+        parent = executable.parent
+        candidates.extend((
+            parent / "node_modules/npm/bin/npm-cli.js",
+            parent.parent / "lib/node_modules/npm/bin/npm-cli.js",
+            parent.parent / "node_modules/npm/bin/npm-cli.js",
+        ))
+
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
 def _npm_version(node):
     npm_path = shutil.which("npm")
     if not npm_path:
         return {"ok": False, "path": None, "version": None}
-    try:
-        resolved = Path(npm_path).resolve()
-    except OSError:
-        resolved = Path(npm_path)
-    if node.get("ok") and resolved.suffix.lower() in {".js", ".cjs", ".mjs"}:
-        probe = _command_probe(node["path"], (str(resolved), "--version"))
+    npm_cli = _npm_javascript_entry(npm_path) if node.get("ok") else None
+    if npm_cli is not None:
+        probe = _command_probe(node["path"], (str(npm_cli), "--version"))
         version = (
             probe["lines"][0]
             if probe["lines"]

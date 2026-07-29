@@ -610,6 +610,44 @@ class CoreWorkspaceTests(unittest.TestCase):
             (str(npm_cli.resolve()), "--version"),
         )
 
+    def test_doctor_finds_npm_javascript_entry_behind_wrapper(self):
+        from probhub.doctor import _npm_version
+
+        layouts = (
+            ("bin/npm", "lib/node_modules/npm/bin/npm-cli.js"),
+            ("npm.CMD", "node_modules/npm/bin/npm-cli.js"),
+        )
+        for wrapper_relative, cli_relative in layouts:
+            with self.subTest(wrapper=wrapper_relative), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                wrapper = root / wrapper_relative
+                npm_cli = root / cli_relative
+                wrapper.parent.mkdir(parents=True, exist_ok=True)
+                npm_cli.parent.mkdir(parents=True, exist_ok=True)
+                wrapper.write_text("wrapper\n", encoding="utf-8")
+                npm_cli.write_text("", encoding="utf-8")
+                probe = {
+                    "ok": True,
+                    "path": "/fake/node",
+                    "lines": ["10.9.0"],
+                    "diagnostic": None,
+                }
+                with (
+                    patch("probhub.doctor.shutil.which", return_value=str(wrapper)),
+                    patch("probhub.doctor._command_probe", return_value=probe) as command_probe,
+                ):
+                    result = _npm_version({"ok": True, "path": "/fake/node"})
+
+                self.assertEqual(result, {
+                    "ok": True,
+                    "path": str(wrapper),
+                    "version": "10.9.0",
+                })
+                command_probe.assert_called_once_with(
+                    "/fake/node",
+                    (str(npm_cli.resolve()), "--version"),
+                )
+
     def test_publish_output_validators_stages_before_removing_old(self):
         from probhub.building import _publish_output_validators
 

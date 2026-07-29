@@ -4,6 +4,10 @@ const MODULE_BOOTSTRAP = [
     'import runpy, sys',
     'root = sys.argv.pop(1)',
     'module = sys.argv.pop(1)',
+    "stdout = getattr(sys, 'stdout', None)",
+    "stderr = getattr(sys, 'stderr', None)",
+    "getattr(stdout, 'reconfigure', lambda **kwargs: None)(encoding='utf-8', errors='backslashreplace')",
+    "getattr(stderr, 'reconfigure', lambda **kwargs: None)(encoding='utf-8', errors='backslashreplace')",
     "sys.path[:] = [root] + [entry for entry in sys.path if entry not in ('', root)]",
     "runpy.run_module(module, run_name='__main__', alter_sys=True)",
 ].join('; ');
