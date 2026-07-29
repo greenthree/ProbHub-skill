@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from probhub.package_tools import build_package, build_verified_package
+from probhub.io import read_yaml
 
 
 def main():
@@ -21,10 +22,20 @@ def main():
     if not problem_dir.is_dir():
         parser.error(f"problem directory not found: {problem_dir}")
     output = Path(args.output).resolve() if args.output else problem_dir.with_suffix(".zip")
+    verification_args = {}
+    config_path = problem_dir / "probhub.yaml"
+    if config_path.is_file():
+        config = read_yaml(config_path)
+        verification_args.update(
+            expected_config=config,
+            source_problem_dir=problem_dir,
+            run_validator=True,
+        )
     files, result = build_verified_package(
         problem_dir,
         output,
         require_pdf=args.require_pdf,
+        **verification_args,
     )
     if not result["ok"]:
         for error in result["errors"]:

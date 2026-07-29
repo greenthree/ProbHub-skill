@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- DOMjudge ZIP 改为流式确定性写入，包内精确小写 `.in`/`.ans` 统一为 LF-only；`verify-package` 在打开 ZIP 前核对归档大小与中央目录条目数，并增加受限流式解压、路径/大小写/文件类型/体积栅栏、无重复/未知键的严格配置解析、包内 output validator 编译，以及带 `--problem` 的题名/限制/Judge/源数据对账和输入 Validator 全点复核；多题 `package` 改为 selected-only 快照和整批 journal/rollback 发布。
+
 ## [0.5.0] - 2026-07-28
 
 校准与题面体检版本。

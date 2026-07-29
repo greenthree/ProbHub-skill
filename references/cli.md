@@ -484,13 +484,16 @@ probhub package L01 --allow-missing-pdf
 
 执行：
 
-1. 从 `probhub.yaml` 生成 DOMjudge `problem.yaml` 与 `domjudge-problem.ini`。
-2. 在同卷临时路径构建 `<ID>.zip`。
-3. 验证路径、配置、样例、隐藏数据、配对关系与 PDF；只有验证成功才替换根目录正式 ZIP。
+1. 取得工作区写锁，只 lint 所选题目，并把所选规范源及现有 `problem.pdf` 复制到隔离快照；不要求整场 seal。
+2. 在快照中从 `probhub.yaml` 生成 DOMjudge `problem.yaml` 与 `domjudge-problem.ini`。
+3. 将配置的 sample/secret 目录映射到标准 `data/sample`、`data/secret`，并把精确小写扩展名的 `.in`/`.ans` 以 LF-only 字节流写入同卷临时 `<ID>.zip`；规范源文件保持不变。
+4. 打开 ZIP 前先按文件大小和中央目录逐项计数执行上限检查，再流式安全解压；限制单条目、总解压体积与压缩方式，拒绝路径逃逸、非小写数据扩展名、大小写冲突、符号链接、可执行文件、缓存和未知路径。
+5. 严格解析并对账题名、TL、ML 与 Judge 类型；`domjudge-problem.ini` 拒绝重复、未知或畸形键；逐字节核对规范源数据，编译包内 output validator，并用题目输入 Validator 检查全部包内 `.in`。
+6. 全部所选题目验证成功且 live 输入未变化后，通过同一 journal/rollback 事务一次发布配置、output validator 与 ZIP；任一题准备或提交失败时整批保持原字节。
 
 默认要求已有 `problem.pdf`。`--allow-missing-pdf` 只用于尚未排版的中间状态，不用于正式交付。
 
-`package` 不自动执行 lint、judge 或 typeset。正式流程优先使用 `build`。
+`package` 不执行 judge 或 typeset，也不写 meta、PDF、Manifest；它只 lint/打包所选题目。正式流程优先使用 `build`。
 
 ## 13. `build`
 
@@ -531,15 +534,18 @@ probhub build L01 --skip-judge   # 跳过沙箱，仅用于已有可信评测的
 ```powershell
 probhub verify-package L01.zip
 probhub verify-package L01.zip --require-pdf
+probhub --workspace <工作区> verify-package L01.zip --require-pdf --problem L01
 ```
 
 检查：
 
-- ZIP 路径安全与重复路径。
-- 根配置文件。
-- `data/sample`、`data/secret`。
-- `.in`/`.ans` 配对。
+- 所有成员的路径、大小写/Unicode 规范冲突、普通文件类型、可执行/缓存条目和压缩方式。
+- 在构造 `ZipFile` 前限制归档字节数并流式核对中央目录条目数；随后复核单条目、总解压体积和实际流式解压结果，不使用无界 `archive.read()` 或 `extractall()`。
+- 根配置、题名、正数 TL/ML、standard/custom/interactive 映射、严格且无重复键的 `domjudge-problem.ini`，以及包内 output validator 可编译性。
+- `data/sample`、`data/secret`、精确小写 `.in`/`.ans` 配对及 LF-only 文本。
 - 必需 PDF。
+
+不提供 `--problem` 时，结果的 `verification_scope` 为 `structural`，只证明 ZIP 自身的结构与安全边界。提供工作区题目上下文后为 `deep`：额外把题名、限制、Judge 类型和测试数据与 `probhub.yaml`/规范源对账，并编译运行该题输入 Validator 检查所有包内输入。结构化结果通过 `diagnostics[].code`、`entry` 和大小/换行证据报告失败原因。
 
 正式题目包使用 `--require-pdf`。
 

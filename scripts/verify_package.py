@@ -10,15 +10,29 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from probhub.package_tools import verify_package
+from probhub.io import read_yaml
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("zip_path")
     parser.add_argument("--require-pdf", action="store_true")
+    parser.add_argument("--problem-dir")
     parser.add_argument("--json", action="store_true", dest="json_output")
     args = parser.parse_args()
-    result = verify_package(args.zip_path, require_pdf=args.require_pdf)
+    verification_args = {}
+    if args.problem_dir:
+        problem_dir = Path(args.problem_dir).resolve()
+        verification_args.update(
+            expected_config=read_yaml(problem_dir / "probhub.yaml"),
+            source_problem_dir=problem_dir,
+            run_validator=True,
+        )
+    result = verify_package(
+        args.zip_path,
+        require_pdf=args.require_pdf,
+        **verification_args,
+    )
     if args.json_output:
         print(json.dumps(result, ensure_ascii=False))
     else:

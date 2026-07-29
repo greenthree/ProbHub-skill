@@ -83,6 +83,31 @@ class BuildSnapshot:
         return tuple((item.problem_dir, item.config) for item in self.problems)
 
 
+@dataclass(frozen=True)
+class PackageProblem:
+    entry: dict
+    problem_dir: Path
+    config: dict
+    source_hash: str
+    data_hash: str
+    pdf_hash: str | None
+
+
+@dataclass(frozen=True)
+class PackagePlan:
+    root: Path
+    workspace: dict
+    selected: tuple
+    batch_id: str
+
+
+@dataclass(frozen=True)
+class PackageSnapshot:
+    temporary_root: Path
+    root: Path
+    selected: tuple
+
+
 def _raise_lint_errors(lint):
     messages = []
     for result in lint["problems"]:
@@ -581,12 +606,12 @@ def _publish_targets(plan):
     return targets
 
 
-def _assert_publish_targets_available(plan, platform_name=None):
+def _assert_publish_paths_available(targets, platform_name=None):
     if (platform_name or os.name) != "nt":
         return
 
     locked = []
-    for target in _publish_targets(plan):
+    for target in targets:
         candidates = target.rglob("*") if target.is_dir() else (target,)
         for candidate in candidates:
             if not candidate.is_file():
@@ -616,6 +641,13 @@ def _assert_publish_targets_available(plan, platform_name=None):
             f"{shown}{suffix}. Close the PDF/ZIP viewer and retry.",
             code="artifact_busy",
         )
+
+
+def _assert_publish_targets_available(plan, platform_name=None):
+    _assert_publish_paths_available(
+        _publish_targets(plan),
+        platform_name=platform_name,
+    )
 
 
 def _replace_publish_path(source, target):
@@ -657,6 +689,22 @@ def _publish_entry_specs(plan, snapshot):
             staged.problem_dir / ".probhub/build-manifest.json",
             live.problem_dir / ".probhub/build-manifest.json",
         ))
+    return specs
+
+
+def _package_publish_entry_specs(plan, snapshot):
+    live_by_id = {item.config["id"]: item for item in plan.selected}
+    specs = []
+    for staged in snapshot.selected:
+        problem_id = staged.config["id"]
+        live = live_by_id[problem_id]
+        for name in (
+            "problem.yaml",
+            "domjudge-problem.ini",
+            "output_validators",
+        ):
+            specs.append((staged.problem_dir / name, live.problem_dir / name))
+        specs.append((snapshot.root / f"{problem_id}.zip", plan.root / f"{problem_id}.zip"))
     return specs
 
 
@@ -731,17 +779,18 @@ def _recover_build_publish_transactions(root):
             ) from exc
 
 
-def _publish_build_transaction(plan, snapshot):
-    transaction = plan.root / ".probhub" / f"build-publish-{plan.batch_id}"
+def _publish_transaction(root, batch_id, specs):
+    root = Path(root).resolve()
+    transaction = root / ".probhub" / f"build-publish-{batch_id}"
     transaction.mkdir(parents=True, exist_ok=False)
     cleanup_transaction = True
     cleanup_context = "staging"
     entries = []
     try:
-        for index, (source, target) in enumerate(_publish_entry_specs(plan, snapshot)):
+        for index, (source, target) in enumerate(specs):
             source = Path(source)
             target = Path(target)
-            relative = target.absolute().relative_to(plan.root.absolute()).as_posix()
+            relative = target.absolute().relative_to(root.absolute()).as_posix()
             staged = transaction / f"payload-{index}"
             source_kind = "missing"
             if source.is_dir():
@@ -767,7 +816,7 @@ def _publish_build_transaction(plan, snapshot):
             "entries": entries,
         })
         for entry in entries:
-            target = _journal_target(plan.root, entry["target"])
+            target = _journal_target(root, entry["target"])
             exists = target.exists() or target.is_symlink()
             if exists != entry["existed"]:
                 raise ProbHubError(
@@ -777,7 +826,7 @@ def _publish_build_transaction(plan, snapshot):
         cleanup_transaction = False
         try:
             for index, entry in enumerate(entries):
-                target = _journal_target(plan.root, entry["target"])
+                target = _journal_target(root, entry["target"])
                 backup_name = entry.get("backup")
                 backup = (
                     transaction_child(
@@ -806,10 +855,10 @@ def _publish_build_transaction(plan, snapshot):
                     )
                     _replace_publish_path(payload, target)
         except BaseException as exc:
-            errors = _rollback_publish_transaction(plan.root, transaction, entries)
+            errors = _rollback_publish_transaction(root, transaction, entries)
             if errors:
                 raise ProbHubError(
-                    "build publish failed and rollback was incomplete; recovery files remain "
+                    "artifact publish failed and rollback was incomplete; recovery files remain "
                     f"in {transaction}: {'; '.join(errors)}",
                     code="publish_rollback_failed",
                 ) from exc
@@ -818,7 +867,7 @@ def _publish_build_transaction(plan, snapshot):
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             raise ProbHubError(
-                f"failed to publish build transaction: {exc}",
+                f"failed to publish artifact transaction: {exc}",
                 code="publish_failed",
             ) from exc
         write_json(transaction / "journal.json", {
@@ -832,7 +881,7 @@ def _publish_build_transaction(plan, snapshot):
         raise
     except Exception as exc:
         raise ProbHubError(
-            f"failed to stage build publish transaction: {exc}",
+            f"failed to stage artifact publish transaction: {exc}",
             code="publish_failed",
         ) from exc
     finally:
@@ -850,6 +899,14 @@ def _publish_build_transaction(plan, snapshot):
                     f"the next writer will retry cleanup: {transaction}: {exc}",
                     code="publish_cleanup_failed",
                 ) from exc
+
+
+def _publish_build_transaction(plan, snapshot):
+    _publish_transaction(
+        plan.root,
+        plan.batch_id,
+        _publish_entry_specs(plan, snapshot),
+    )
 
 
 def publish_build(plan, snapshot, manifests, pdfs, packages, publish_cache):
@@ -936,10 +993,229 @@ def package_problem(root, problem_dir, config, require_pdf=True):
         problem_dir,
         output,
         require_pdf=require_pdf,
+        expected_config=config,
+        source_problem_dir=problem_dir,
+        run_validator=True,
     )
     if not verification["ok"]:
         raise ProbHubError(f"package verification failed for {config['id']}: {'; '.join(verification['errors'])}")
     return output, verification
+
+
+def _package_pdf_hash(problem_dir):
+    path = Path(problem_dir) / "problem.pdf"
+    if path.is_symlink():
+        raise ProbHubError(
+            f"package PDF must not be a symlink: {path}",
+            code="unsafe_package_source",
+        )
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise ProbHubError(
+            f"package PDF must be a regular file: {path}",
+            code="unsafe_package_source",
+        )
+    return hash_file(path)
+
+
+def create_package_plan(root, workspace, entries):
+    root = Path(root).resolve()
+    workspace = copy.deepcopy(workspace)
+    lint = lint_workspace(root, workspace, entries)
+    if not lint["ok"]:
+        _raise_lint_errors(lint)
+    selected = []
+    for entry in entries:
+        problem_dir, config = load_problem(root, entry)
+        problem_dir = problem_dir.resolve()
+        canonical_entry = copy.deepcopy(entry)
+        canonical_entry["directory"] = problem_dir.relative_to(root).as_posix()
+        selected.append(
+            PackageProblem(
+                entry=canonical_entry,
+                problem_dir=problem_dir,
+                config=copy.deepcopy(config),
+                source_hash=compute_source_hash(problem_dir, config),
+                data_hash=compute_data_hash(problem_dir, config),
+                pdf_hash=_package_pdf_hash(problem_dir),
+            )
+        )
+    return PackagePlan(
+        root=root,
+        workspace=workspace,
+        selected=tuple(selected),
+        batch_id=uuid.uuid4().hex,
+    )
+
+
+def _package_snapshot_ignore(source_root):
+    source_root = Path(source_root)
+    ignored_directories = {
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".preview",
+        ".probhub",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".svn",
+        "__pycache__",
+        "node_modules",
+    }
+    generated_at_root = {
+        "domjudge-problem.ini",
+        "meta.json",
+        "output_validators",
+        "problem.yaml",
+    }
+
+    def ignore(directory, names):
+        directory = Path(directory)
+        result = [name for name in names if name in ignored_directories]
+        if directory == source_root:
+            result.extend(name for name in names if name in generated_at_root)
+        return result
+
+    return ignore
+
+
+@contextmanager
+def create_package_snapshot(plan):
+    temporary_root = None
+    try:
+        try:
+            temporary_root = Path(tempfile.mkdtemp(
+                prefix=f".{plan.root.name}-probhub-package-{plan.batch_id[:8]}-",
+                dir=plan.root.parent,
+            ))
+            snapshot_root = temporary_root / "workspace"
+            snapshot_root.mkdir()
+            selected = []
+            for item in plan.selected:
+                relative = Path(item.entry.get("directory", item.entry["id"]))
+                target = snapshot_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(
+                    item.problem_dir,
+                    target,
+                    ignore=_package_snapshot_ignore(item.problem_dir),
+                    symlinks=True,
+                )
+                problem_dir, config = load_problem(snapshot_root, item.entry)
+                snapshot_item = PackageProblem(
+                    entry=copy.deepcopy(item.entry),
+                    problem_dir=problem_dir.resolve(),
+                    config=copy.deepcopy(config),
+                    source_hash=compute_source_hash(problem_dir, config),
+                    data_hash=compute_data_hash(problem_dir, config),
+                    pdf_hash=_package_pdf_hash(problem_dir),
+                )
+                changed = []
+                if snapshot_item.source_hash != item.source_hash:
+                    changed.append("source_hash")
+                if snapshot_item.data_hash != item.data_hash:
+                    changed.append("data_hash")
+                if snapshot_item.pdf_hash != item.pdf_hash:
+                    changed.append("problem.pdf")
+                if changed:
+                    raise ProbHubError(
+                        f"package inputs changed while creating the snapshot: "
+                        f"{item.config['id']}: {', '.join(changed)}",
+                        code="inputs_changed",
+                    )
+                selected.append(snapshot_item)
+            yield PackageSnapshot(
+                temporary_root=temporary_root,
+                root=snapshot_root,
+                selected=tuple(selected),
+            )
+        except ProbHubError:
+            raise
+        except Exception as exc:
+            raise ProbHubError(
+                f"failed to create package snapshot: {exc}",
+                code="snapshot_failed",
+            ) from exc
+    finally:
+        if temporary_root is not None:
+            shutil.rmtree(temporary_root, ignore_errors=True)
+
+
+def assert_package_inputs_unchanged(plan):
+    try:
+        _, workspace = load_workspace(plan.root)
+        current_entries = {
+            entry["id"]: entry
+            for entry in select_entries(
+                workspace,
+                [item.config["id"] for item in plan.selected],
+            )
+        }
+        changed = []
+        for item in plan.selected:
+            problem_id = item.config["id"]
+            entry = current_entries[problem_id]
+            problem_dir, config = load_problem(plan.root, entry)
+            if problem_dir.resolve() != item.problem_dir:
+                changed.append(f"{problem_id}.workspace_entry")
+                continue
+            if compute_source_hash(problem_dir, config) != item.source_hash:
+                changed.append(f"{problem_id}.source_hash")
+            if compute_data_hash(problem_dir, config) != item.data_hash:
+                changed.append(f"{problem_id}.data_hash")
+            if _package_pdf_hash(problem_dir) != item.pdf_hash:
+                changed.append(f"{problem_id}.problem.pdf")
+    except ProbHubError as exc:
+        if exc.code == "inputs_changed":
+            raise
+        raise ProbHubError(
+            f"package inputs changed while validating the live workspace: {exc}",
+            code="inputs_changed",
+        ) from exc
+    except Exception as exc:
+        raise ProbHubError(
+            f"package inputs changed while validating the live workspace: {exc}",
+            code="inputs_changed",
+        ) from exc
+    if changed:
+        raise ProbHubError(
+            "package inputs changed during the run: " + ", ".join(changed),
+            code="inputs_changed",
+        )
+
+
+def package_workspace(root, workspace, entries, require_pdf=True):
+    root = Path(root).resolve()
+    with workspace_build_lock(root):
+        _, live_workspace = load_workspace(root)
+        recover_workspace_transactions(root, live_workspace)
+        selected_ids = [entry["id"] for entry in entries]
+        live_entries = select_entries(live_workspace, selected_ids)
+        plan = create_package_plan(root, live_workspace, live_entries)
+        with create_package_snapshot(plan) as snapshot:
+            packages = {}
+            for item in snapshot.selected:
+                package_path, verification = package_problem(
+                    snapshot.root,
+                    item.problem_dir,
+                    item.config,
+                    require_pdf=require_pdf,
+                )
+                packages[item.config["id"]] = {
+                    "path": str(plan.root / f"{item.config['id']}.zip"),
+                    "verification": verification,
+                }
+
+            assert_package_inputs_unchanged(plan)
+            specs = _package_publish_entry_specs(plan, snapshot)
+            _assert_publish_paths_available(target for _, target in specs)
+            _publish_transaction(plan.root, plan.batch_id, specs)
+            return {
+                "ok": True,
+                "batch_id": plan.batch_id,
+                "packages": packages,
+            }
 
 
 def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=True):
