@@ -5,8 +5,9 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
-from probhub.build_lock import workspace_build_lock
+from probhub.build_lock import workspace_build_lock, workspace_file_lock
 from probhub.cli import main as cli_main
 from probhub.judging import judge_problem
 from probhub.linting import lint_workspace
@@ -24,8 +25,114 @@ def run_cli(arguments):
 
 class ScaffoldTests(unittest.TestCase):
     def init_workspace(self, root):
-        code, _ = run_cli(["--json", "init", str(root), "--title", "Fixture"])
+        code, result = run_cli(["--json", "init", str(root), "--title", "Fixture"])
         self.assertEqual(code, 0)
+        return result
+
+    def test_init_installs_reproducible_typst_template_without_overwriting_existing_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = self.init_workspace(root)
+            expected = {
+                "typst-statement/lib.typ": "references/lib.typ",
+                "typst-statement/usts.png": "references/usts.png",
+                "typst-statement/正式赛/main.typ": "references/main.typ",
+                "typst-statement/正式赛/problems.typ": "references/problems.typ",
+            }
+            package_root = Path(__file__).resolve().parents[1]
+            for target, source in expected.items():
+                self.assertEqual((root / target).read_bytes(), (package_root / source).read_bytes())
+            _, workspace = load_workspace(root, allow_empty=True)
+            self.assertEqual(workspace["typst"]["creation_timestamp"], 0)
+            self.assertEqual(len(result["typst"]["created"]), 4)
+
+            main_typ = root / "typst-statement/正式赛/main.typ"
+            main_typ.write_text("// custom\n", encoding="utf-8")
+            code, forced = run_cli(["--json", "init", str(root), "--title", "Changed", "--force"])
+            self.assertEqual(code, 0)
+            self.assertEqual(main_typ.read_text(encoding="utf-8"), "// custom\n")
+            self.assertIn(str(main_typ), forced["typst"]["preserved"])
+
+    def test_init_rejects_path_like_subtitle_before_writing_workspace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            code, result = run_cli(["--json", "init", str(root), "--subtitle", "../escape"])
+            self.assertEqual(code, 1)
+            self.assertEqual(result["code"], "invalid_subtitle")
+            self.assertFalse((root / ".probhub/workspace.yaml").exists())
+            self.assertFalse((root / "typst-statement").exists())
+
+    def test_init_rejects_control_characters_and_linked_template_directories(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            for subtitle in ("bad\x01name", "bad\x7fname"):
+                code, result = run_cli(["--json", "init", str(root), "--subtitle", subtitle])
+                self.assertEqual(code, 1)
+                self.assertEqual(result["code"], "invalid_subtitle")
+                self.assertFalse((root / ".probhub/workspace.yaml").exists())
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            outside = Path(temp) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            try:
+                (root / "typst-statement").symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            code, result = run_cli(["--json", "init", str(root)])
+            self.assertEqual(code, 1)
+            self.assertEqual(result["code"], "init_path_link")
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_init_rolls_back_templates_workspace_and_gitignore_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "new-workspace"
+            with patch("probhub.cli.write_yaml", side_effect=OSError("fixture write failure")):
+                code, result = run_cli(["--json", "init", str(root)])
+            self.assertEqual(code, 1)
+            self.assertEqual(result["code"], "init_write_failed")
+            self.assertFalse((root / ".probhub/workspace.yaml").exists())
+            self.assertFalse((root / ".gitignore").exists())
+            self.assertFalse((root / "typst-statement").exists())
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.init_workspace(root)
+            workspace_path = root / ".probhub/workspace.yaml"
+            gitignore_path = root / ".gitignore"
+            workspace_before = workspace_path.read_bytes()
+            gitignore_before = gitignore_path.read_bytes()
+            templates_before = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in (root / "typst-statement").rglob("*")
+                if path.is_file()
+            }
+            with patch("probhub.cli._ensure_local_gitignore", side_effect=OSError("fixture gitignore failure")):
+                code, result = run_cli([
+                    "--json", "init", str(root), "--force", "--title", "Changed",
+                ])
+            self.assertEqual(code, 1)
+            self.assertEqual(result["code"], "init_write_failed")
+            self.assertEqual(workspace_path.read_bytes(), workspace_before)
+            self.assertEqual(gitignore_path.read_bytes(), gitignore_before)
+            self.assertEqual(
+                {
+                    path.relative_to(root).as_posix(): path.read_bytes()
+                    for path in (root / "typst-statement").rglob("*")
+                    if path.is_file()
+                },
+                templates_before,
+            )
+
+    def test_init_fails_fast_when_workspace_writer_lock_is_busy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with workspace_file_lock(root, ".probhub/build.lock"):
+                code, result = run_cli(["--json", "init", str(root)])
+            self.assertEqual(code, 1)
+            self.assertEqual(result["code"], "build_busy")
+            self.assertFalse((root / ".probhub/workspace.yaml").exists())
 
     def test_scaffold_lints_clean_and_creates_all_files_for_every_judge_type(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -78,6 +185,16 @@ class ScaffoldTests(unittest.TestCase):
                     ["code/wrong.cpp", "code/wrong2.cpp"],
                 )
                 self.assertEqual(config["data"]["groups"][0]["name"], "overflow")
+                expected_random_recipe = (
+                    {"case": "random01", "manual": True}
+                    if judge_type == "interactive"
+                    else {
+                        "case": "random01",
+                        "generator": "code/inmaker.cpp",
+                        "args": ["random", "1"],
+                    }
+                )
+                self.assertEqual(config["data"]["recipes"][0], expected_random_recipe)
 
             _, workspace = load_workspace(root)
             lint = lint_workspace(root, workspace)

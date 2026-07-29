@@ -1,6 +1,6 @@
 {
   "name": "probhub-skill",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Lightweight ProbHub command package that delegates to the complete probhub package.",
   "main": "bin/init.js",
   "bin": {
@@ -8,7 +8,8 @@
     "probhub": "bin/probhub.js"
   },
   "scripts": {
-    "check": "node --check bin/init.js && node --check bin/probhub.js"
+    "check": "node --check bin/init.js && node --check bin/probhub.js",
+    "prepublishOnly": "npm run check && python ../../scripts/check_release.py --pack --require-head-tag --require-clean"
   },
   "repository": {
     "type": "git",
@@ -27,8 +28,11 @@
     "url": "https://github.com/greenthree/ProbHub-skill/issues"
   },
   "homepage": "https://github.com/greenthree/ProbHub-skill#readme",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "probhub": "0.5.0"
+    "probhub": "0.6.0"
   },
   "files": [
     "bin/*.js",

@@ -173,15 +173,25 @@ def compiler_identity():
     if _COMPILER_IDENTITY is not None:
         return _COMPILER_IDENTITY
     try:
-        result = subprocess.run(
-            ["g++", "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-        )
-        first_line = (result.stdout or result.stderr).splitlines()[0]
+        with tempfile.TemporaryDirectory(prefix="probhub-compiler-version-") as temp:
+            stdout_path = os.path.join(temp, "stdout")
+            stderr_path = os.path.join(temp, "stderr")
+            result = run_managed_to_files(
+                ["g++", "--version"],
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=10,
+                memory_limit_mb=512,
+                output_limit_bytes=1024 * 1024,
+                process_limit=8,
+            )
+            with open(stdout_path, "r", encoding="utf-8", errors="replace") as stream:
+                stdout = stream.read()
+            with open(stderr_path, "r", encoding="utf-8", errors="replace") as stream:
+                stderr = stream.read()
+        if result["reason"] != "completed" or result["returncode"] != 0:
+            raise RuntimeError(result.get("message") or result["reason"])
+        first_line = (stdout or stderr).splitlines()[0]
         _COMPILER_IDENTITY = first_line.strip()
     except Exception as exc:
         _COMPILER_IDENTITY = f"g++-unknown:{exc}"
@@ -199,7 +209,8 @@ def source_fingerprint(src_file, prob_dir, kind=None):
     except OSError:
         pass
 
-    for root, _, files in os.walk(prob_dir):
+    for root, directories, files in os.walk(prob_dir):
+        directories[:] = [name for name in directories if name != ".probhub"]
         for name in files:
             if name.endswith((".h", ".hpp")):
                 dependencies.append(os.path.join(root, name))
@@ -427,15 +438,36 @@ def compile_cpp(
             cache.delete("compile", cache_key)
 
     reporter.text(f"[*] Compiling {file_name}...")
-    flags = ["g++", src_file, "-o", out_bin, "-O2", "-std=c++17", "-I", REFERENCES_DIR]
-    if platform.system() == "Windows":
-        flags.insert(4, "-static")
-        if kind == "validator":
-            # DOMjudge validators run on Linux and accept LF line endings. Emulate
-            # that behavior so Git-normalized test data is validated consistently.
-            flags.append("-DFOR_LINUX")
+    source_dir = os.path.dirname(os.path.abspath(src_file))
+    compile_root = os.path.join(source_dir, ".probhub", "compile")
     try:
-        with tempfile.TemporaryDirectory(prefix="probhub-compile-") as temp:
+        os.makedirs(compile_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="run-", dir=compile_root) as temp:
+            # MinGW's narrow argv handling cannot reliably open absolute paths
+            # containing non-ASCII characters. The process cwd is established
+            # through the wide Windows API, so compiler path arguments remain
+            # ASCII and relative. Python publishes the binary after success.
+            staged_binary = os.path.join(
+                temp,
+                "program.exe" if platform.system() == "Windows" else "program",
+            )
+            shutil.copyfile(
+                os.path.join(REFERENCES_DIR, "testlib.h"),
+                os.path.join(temp, "testlib.h"),
+            )
+            source_arg = os.path.relpath(os.path.abspath(src_file), source_dir)
+            output_arg = os.path.relpath(staged_binary, source_dir)
+            include_arg = os.path.relpath(temp, source_dir)
+            flags = [
+                "g++", source_arg, "-o", output_arg,
+                "-O2", "-std=c++17", "-I", include_arg,
+            ]
+            if platform.system() == "Windows":
+                flags.insert(4, "-static")
+                if kind == "validator":
+                    # DOMjudge validators run on Linux and accept LF line endings. Emulate
+                    # that behavior so Git-normalized test data is validated consistently.
+                    flags.append("-DFOR_LINUX")
             stdout_path = os.path.join(temp, "compiler.out")
             stderr_path = os.path.join(temp, "compiler.stderr")
             ret = run_managed_to_files(
@@ -446,12 +478,16 @@ def compile_cpp(
                 memory_limit_mb=2048,
                 output_limit_bytes=8 * 1024 * 1024,
                 process_limit=DEFAULT_PROCESS_LIMIT,
+                cwd=source_dir,
             )
             try:
-                stderr = open(stderr_path, "r", encoding="utf-8", errors="replace").read()
+                with open(stderr_path, "r", encoding="utf-8", errors="replace") as stream:
+                    stderr = stream.read()
             except OSError:
                 stderr = ""
-        ok = ret["reason"] == "completed" and ret["returncode"] == 0
+            ok = ret["reason"] == "completed" and ret["returncode"] == 0
+            if ok:
+                os.replace(staged_binary, out_bin)
         if ret["reason"] != "completed":
             stderr = (stderr + "\n" + (ret["message"] or ret["reason"])).strip()
         reporter.event(
@@ -465,10 +501,6 @@ def compile_cpp(
         if not ok:
             if cache:
                 cache.delete("compile", cache_key)
-            try:
-                os.remove(out_bin)
-            except FileNotFoundError:
-                pass
             reporter.text(f"[-] Compile failed:\n{stderr}")
             return False
         if cache:

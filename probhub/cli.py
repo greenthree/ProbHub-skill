@@ -1,11 +1,12 @@
 import argparse
 import json
 import re
+import stat
 import sys
 from pathlib import Path
 
 from . import __version__
-from .build_lock import workspace_build_lock
+from .build_lock import workspace_build_lock, workspace_file_lock
 from .building import build_workspace, package_workspace, typeset_workspace
 from .doctor import run_doctor
 from .errors import ProbHubError
@@ -14,7 +15,7 @@ from .generations import (
     create_problem_checkpoint,
     generation_status,
 )
-from .io import atomic_write_text, write_yaml
+from .io import atomic_write_bytes, atomic_write_text, write_yaml
 from .judging import check_sample_answers, judge_problem
 from .linting import (
     compute_collection_hash,
@@ -85,6 +86,7 @@ def _ensure_local_gitignore(root):
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",
         "**/.probhub/gen-manifest.json",
+        "**/.probhub/compile/",
         "**/.probhub-fixate-*/",
         "**/.probhub-gen-publish-*/",
         "**/.probhub-*.typ",
@@ -102,21 +104,218 @@ def _ensure_local_gitignore(root):
     atomic_write_text(path, content)
 
 
+def _path_is_link_like(path):
+    path = Path(path)
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            return True
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        return bool(reparse and attributes & reparse)
+    except OSError:
+        return False
+
+
+def _validate_init_target(root, target, label):
+    root = Path(root).resolve()
+    target = Path(target).absolute()
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise ProbHubError(
+            f"{label} must stay inside the workspace: {target}",
+            code="init_path_escape",
+        ) from exc
+    cursor = root
+    for part in relative.parts:
+        cursor /= part
+        if _path_is_link_like(cursor):
+            raise ProbHubError(
+                f"{label} must not traverse a symlink or junction: {cursor}",
+                code="init_path_link",
+            )
+    try:
+        target.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        raise ProbHubError(
+            f"{label} resolves outside the workspace: {target}",
+            code="init_path_escape",
+        ) from exc
+    return target
+
+
+def _validate_init_subtitle(subtitle):
+    subtitle = str(subtitle or "正式赛").strip()
+    windows_stem = subtitle.split(".", 1)[0].upper()
+    if (
+        not subtitle
+        or subtitle in {".", ".."}
+        or "/" in subtitle
+        or "\\" in subtitle
+        or "\x00" in subtitle
+        or any(ord(character) < 32 or ord(character) == 127 for character in subtitle)
+        or re.search(r'[<>:"|?*]', subtitle)
+        or subtitle.endswith((" ", "."))
+        or windows_stem in {"CON", "PRN", "AUX", "NUL"}
+        or re.fullmatch(r"(?:COM|LPT)[1-9]", windows_stem)
+    ):
+        raise ProbHubError(
+            "subtitle must be a cross-platform safe single directory name",
+            code="invalid_subtitle",
+        )
+    return subtitle
+
+
+def _remove_created_init_files(root, paths):
+    root = Path(root).resolve()
+    parents = set()
+    for value in reversed(list(paths)):
+        path = Path(value)
+        path.unlink(missing_ok=True)
+        parent = path.parent
+        while parent != root:
+            parents.add(parent)
+            parent = parent.parent
+    for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+
+def _restore_init_file(path, previous):
+    path = Path(path)
+    if previous is None:
+        path.unlink(missing_ok=True)
+    else:
+        atomic_write_bytes(path, previous)
+
+
+def _init_typst_templates(root, subtitle):
+    root = Path(root).resolve()
+
+    package_root = Path(__file__).resolve().parents[1]
+    references = package_root / "references"
+    typst_root = root / "typst-statement"
+    typst_dir = typst_root / subtitle
+    sources = {
+        typst_root / "lib.typ": references / "lib.typ",
+        typst_root / "usts.png": references / "usts.png",
+        typst_dir / "main.typ": references / "main.typ",
+        typst_dir / "problems.typ": references / "problems.typ",
+    }
+    payloads = {}
+    for target, source in sources.items():
+        _validate_init_target(root, target, "Typst template target")
+        if not source.is_file():
+            raise ProbHubError(
+                f"installed ProbHub template is missing: {source}",
+                code="init_template_missing",
+            )
+        payloads[target] = source.read_bytes()
+
+    to_create = []
+    preserved = []
+    for target, payload in payloads.items():
+        if target.exists():
+            if not target.is_file():
+                raise ProbHubError(
+                    f"Typst template target is not a file: {target}",
+                    code="init_template_conflict",
+                )
+            preserved.append(str(target))
+            continue
+        to_create.append((target, payload))
+
+    created = []
+    try:
+        for target, payload in to_create:
+            atomic_write_bytes(target, payload)
+            created.append(str(target))
+    except BaseException as exc:
+        _remove_created_init_files(root, created)
+        if isinstance(exc, (OSError, UnicodeError)):
+            raise ProbHubError(
+                f"failed to install Typst templates: {exc}",
+                code="init_template_write_failed",
+            ) from exc
+        raise
+    return {
+        "directory": str(typst_dir),
+        "created": created,
+        "preserved": preserved,
+    }
+
+
 def command_init(args):
     root = Path(args.directory or Path.cwd()).resolve()
+    subtitle = _validate_init_subtitle(args.subtitle)
     path = root / WORKSPACE_FILE
-    if path.exists() and not args.force:
-        raise ProbHubError(f"workspace already exists: {path}")
-    data = {
-        "schema_version": 1,
-        "contest": {"title": args.title or root.name, "subtitle": args.subtitle or "正式赛", "author": args.author or ""},
-        "typst": {"directory": f"typst-statement/{args.subtitle or '正式赛'}"},
-        "problems": [],
-        "lint": {"forbidden_patterns": ["TODO", "FIXME", "114514", "待补充"]},
-    }
-    write_yaml(path, data)
-    _ensure_local_gitignore(root)
-    return {"ok": True, "workspace": str(path)}
+    gitignore = root / ".gitignore"
+    _validate_init_target(root, root / ".probhub/build.lock", "workspace init lock")
+    with workspace_file_lock(
+        root,
+        ".probhub/build.lock",
+        busy_code="build_busy",
+        busy_message="another ProbHub writer is already running",
+    ):
+        _validate_init_target(root, path, "workspace configuration")
+        _validate_init_target(root, gitignore, "workspace gitignore")
+        if path.exists() and not args.force:
+            raise ProbHubError(f"workspace already exists: {path}")
+        if path.exists() and not path.is_file():
+            raise ProbHubError(
+                f"workspace configuration is not a regular file: {path}",
+                code="init_path_conflict",
+            )
+        if gitignore.exists() and not gitignore.is_file():
+            raise ProbHubError(
+                f"workspace gitignore is not a regular file: {gitignore}",
+                code="init_path_conflict",
+            )
+
+        workspace_before = path.read_bytes() if path.is_file() else None
+        gitignore_before = gitignore.read_bytes() if gitignore.is_file() else None
+        templates = _init_typst_templates(root, subtitle)
+        data = {
+            "schema_version": 1,
+            "contest": {"title": args.title or root.name, "subtitle": subtitle, "author": args.author or ""},
+            "typst": {"directory": f"typst-statement/{subtitle}", "creation_timestamp": 0},
+            "problems": [],
+            "lint": {"forbidden_patterns": ["TODO", "FIXME", "114514", "待补充"]},
+        }
+        try:
+            write_yaml(path, data)
+            _ensure_local_gitignore(root)
+        except BaseException as exc:
+            rollback_errors = []
+            try:
+                _remove_created_init_files(root, templates["created"])
+            except OSError as rollback_exc:
+                rollback_errors.append(f"templates: {rollback_exc}")
+            for label, target, previous in (
+                ("workspace", path, workspace_before),
+                ("gitignore", gitignore, gitignore_before),
+            ):
+                try:
+                    _restore_init_file(target, previous)
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"{label}: {rollback_exc}")
+            if rollback_errors:
+                raise ProbHubError(
+                    "init failed and rollback was incomplete: " + "; ".join(rollback_errors),
+                    code="init_rollback_failed",
+                ) from exc
+            if isinstance(exc, (OSError, UnicodeError)):
+                raise ProbHubError(
+                    f"failed to initialize workspace: {exc}",
+                    code="init_write_failed",
+                ) from exc
+            raise
+        return {"ok": True, "workspace": str(path), "typst": templates}
 
 
 _SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")

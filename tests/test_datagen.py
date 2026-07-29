@@ -239,14 +239,18 @@ class DatagenWorkspaceTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "gen_unsupported")
 
     def test_gen_handles_all_manual_scaffold_without_compiling(self):
-        # A fresh scaffold declares manual recipes for both secret cases, so a
-        # plain plan run needs no toolchain at all — deterministically enforced
-        # by making any compile attempt fail loudly.
+        # All-manual recipe sets need no toolchain at all — deterministically
+        # enforced by making any compile attempt fail loudly. The production
+        # scaffold itself now includes one real generated recipe.
         from unittest import mock
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             problem = self.make_workspace(root)
+            set_recipes(problem, [
+                {"case": "random01", "manual": True},
+                {"case": "overflow01", "manual": True},
+            ])
             _, config = load_problem(root, {"id": "A", "directory": "A"})
             with mock.patch(
                 "probhub.datagen._prepare_program",
@@ -285,13 +289,13 @@ class DatagenWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             problem = self.make_workspace(root)
-            (problem / "data/secret/random01.in").unlink()
-            (problem / "data/secret/random01.ans").unlink()
+            (problem / "data/secret/overflow01.in").unlink()
+            (problem / "data/secret/overflow01.ans").unlink()
             _, workspace = load_workspace(root)
             result = lint_workspace(root, workspace)
             self.assertTrue(result["ok"], result["problems"][0]["errors"])
             self.assertTrue(any(
-                "manual recipe(s) have no data files yet: random01" in warning
+                "manual recipe(s) have no data files yet: overflow01" in warning
                 for warning in result["problems"][0]["warnings"]
             ))
 

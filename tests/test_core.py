@@ -534,20 +534,53 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "sample_not_utf8")
 
     def test_doctor_reports_hung_tool_instead_of_crashing(self):
-        import subprocess
-
         from probhub.doctor import run_doctor
 
         with (
             patch("probhub.doctor.shutil.which", return_value="/fake/tool"),
             patch(
-                "probhub.doctor.subprocess.run",
-                side_effect=subprocess.TimeoutExpired(cmd=["tool"], timeout=10),
+                "probhub.doctor.run_managed_to_files",
+                return_value={
+                    "reason": "time_limit",
+                    "message": "time limit exceeded",
+                    "returncode": -1,
+                },
             ),
         ):
             report = run_doctor()
         self.assertFalse(report["ok"])
         self.assertEqual(report["tools"]["g++"]["version"], "timed out after 10s")
+
+    def test_doctor_rejects_old_node_and_missing_pinned_cjk_font(self):
+        from probhub.doctor import run_doctor
+
+        def command_version(command, args=("--version",)):
+            versions = {
+                "node": "v16.20.2",
+                "typst": "typst 0.14.2",
+                "g++": "g++ 13.2.0",
+                "npm": "10.9.0",
+            }
+            return {"ok": True, "path": f"/fake/{command}", "version": versions[command]}
+
+        with (
+            patch("probhub.doctor._command_version", side_effect=command_version),
+            patch(
+                "probhub.doctor._command_probe",
+                return_value={
+                    "ok": True,
+                    "path": "/fake/typst",
+                    "lines": ["DejaVu Sans Mono"],
+                    "diagnostic": None,
+                },
+            ),
+        ):
+            report = run_doctor()
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["tools"]["node"]["version_ok"])
+        self.assertEqual(report["tools"]["node"]["requirement"], ">=18")
+        self.assertFalse(report["tools"]["typst"]["font_ok"])
+        self.assertEqual(report["tools"]["typst"]["requirement"], "0.14.2")
 
     def test_publish_output_validators_stages_before_removing_old(self):
         from probhub.building import _publish_output_validators

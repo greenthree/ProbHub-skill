@@ -1,6 +1,8 @@
 import importlib.util
+import shutil
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from probhub.io import write_yaml
@@ -12,6 +14,44 @@ SPEC.loader.exec_module(MODULE)
 
 
 class LocalJudgeLayoutTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("g++"), "g++ is required")
+    def test_compile_cpp_supports_space_and_unicode_problem_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            code = Path(temp) / "含 空格的题目" / "code"
+            code.mkdir(parents=True)
+            source = code / "std.cpp"
+            output = code / ("std.exe" if MODULE.platform.system() == "Windows" else "std")
+            source.write_text(
+                '#include "testlib.h"\nint main() { return 0; }\n',
+                encoding="utf-8",
+            )
+            self.assertTrue(MODULE.compile_cpp(str(source), str(output), kind="std"))
+            self.assertTrue(output.is_file())
+            self.assertEqual(list((code / ".probhub/compile").iterdir()), [])
+
+    @unittest.skipUnless(shutil.which("g++"), "g++ is required")
+    def test_compile_cpp_isolates_concurrent_runs_and_preserves_last_binary_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            code = Path(temp) / "并发 编译" / "code"
+            code.mkdir(parents=True)
+            source = code / "std.cpp"
+            source.write_text("int main() { return 0; }\n", encoding="utf-8")
+            suffix = ".exe" if MODULE.platform.system() == "Windows" else ""
+            outputs = [code / f"std-{index}{suffix}" for index in range(4)]
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(executor.map(
+                    lambda output: MODULE.compile_cpp(str(source), str(output), kind="std"),
+                    outputs,
+                ))
+            self.assertEqual(results, [True] * len(outputs))
+            self.assertTrue(all(output.is_file() for output in outputs))
+            self.assertEqual(list((code / ".probhub/compile").iterdir()), [])
+
+            previous = outputs[0].read_bytes()
+            source.write_text("int main( {\n", encoding="utf-8")
+            self.assertFalse(MODULE.compile_cpp(str(source), str(outputs[0]), kind="std"))
+            self.assertEqual(outputs[0].read_bytes(), previous)
+
     def test_schema_paths_resolve_inside_code_directory(self):
         with tempfile.TemporaryDirectory() as temp:
             problem = Path(temp) / "A"

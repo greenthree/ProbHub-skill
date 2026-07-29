@@ -3,9 +3,13 @@
 `probhub-skill` 是 ProbHub 的轻量 npm 入口包：
 
 ```bash
+python3 -m venv ~/.probhub/venv
+source ~/.probhub/venv/bin/activate
 npx probhub-skill
 npx probhub-skill --local
 ```
+
+Windows PowerShell 使用 `py -3 -m venv "$HOME\.probhub\venv"`，然后运行 `& "$HOME\.probhub\venv\Scripts\Activate.ps1"`。后续也可把 `PYTHON` 指向该虚拟环境解释器；只有明确接受修改当前系统 Python 时才设置 `PROBHUB_ALLOW_SYSTEM_PYTHON=1`。
 
 完整实现由同版本的 [`probhub`](https://www.npmjs.com/package/probhub) 主包提供。本包只保留 `probhub-skill` 与 `probhub` 两个命令转发入口，不复制 Python Core、WebUI、Skill 或 references。
 

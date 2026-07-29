@@ -1,79 +1,95 @@
 #!/usr/bin/env node
-const fs = require('fs-extra');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const packageInfo = require('../package.json');
+const { pythonModuleArgs, resolvePython } = require('./python.js');
 
-// 支持参数 --local，如果带了参数就装在当前目录，否则装在全局
 const isLocal = process.argv.includes('--local');
-const skillName = 'probhub';
+const skipPythonDeps = process.argv.includes('--skip-python-deps')
+    || process.env.PROBHUB_SKIP_PYTHON_DEPS === '1';
+const sourceDir = path.resolve(__dirname, '..');
 
-const sourceDir = path.join(__dirname, '..');
-
-// 安全拦截：防止在源码目录安装（本地安装时适用）
-if (isLocal && sourceDir === process.cwd()) {
-    console.error('\n[!] 拦截提示：不能在源码目录初始化它本身。');
-    process.exit(1);
+function runPythonModule(python, moduleName, args, timeout, failureLabel) {
+    const env = { ...process.env };
+    const result = spawnSync(
+        python.command,
+        [...python.prefixArgs, ...pythonModuleArgs(sourceDir, moduleName, args)],
+        { cwd: process.cwd(), env, stdio: 'inherit', timeout },
+    );
+    if (result.error || result.status !== 0) {
+        const detail = result.error ? `: ${result.error.message}` : ` (exit ${result.status})`;
+        throw new Error(`${failureLabel}${detail}`);
+    }
 }
 
-const baseDir = isLocal ? process.cwd() : os.homedir();
-const targetDirs = [
-    path.join(baseDir, '.claude', 'skills', skillName),
-    path.join(baseDir, '.agents', 'skills', skillName),
-];
+function installPythonDependencies() {
+    if (skipPythonDeps) {
+        console.log('  [=] 已按请求跳过 Python 依赖安装');
+        return;
+    }
+    const python = resolvePython(process.env);
+    if (!python) {
+        throw new Error('Python >= 3.10 was not found; set PYTHON to the desired interpreter');
+    }
+    runPythonModule(
+        python,
+        'probhub.install_deps',
+        [],
+        660000,
+        'Python dependency installation failed',
+    );
+    console.log('  [+] 已使用 ProbHub CLI 的同一 Python 和受控进程安装 requirements.txt');
+    return python;
+}
 
-console.log('\n🚀 正在将 ProbHub 注入到 ' + (isLocal ? '本地项目' : '全局系统') + '的 Agent Skill 库...');
-targetDirs.forEach(dir => console.log('📂 目标路径: ' + dir));
-
-const filesToCopy = ['SKILL.md', 'references', 'scripts', 'probhub'];
-const shouldCopy = (srcPath) => {
-    const parts = srcPath.split(path.sep);
-    return !parts.includes('__pycache__') && !srcPath.endsWith('.pyc');
-};
-
-try {
-    targetDirs.forEach(targetDir => {
-        // Replace the managed Skill directory atomically enough to avoid stale files.
-        fs.removeSync(targetDir);
-        fs.ensureDirSync(targetDir);
-
-        filesToCopy.forEach(item => {
-            const srcPath = path.join(sourceDir, item);
-            const destPath = path.join(targetDir, item);
-
-            if (fs.existsSync(srcPath)) {
-                fs.copySync(srcPath, destPath, { filter: shouldCopy });
-                console.log('  [+] 成功注入到 ' + targetDir + ': ' + item);
-            }
-        });
-
-        fs.writeJsonSync(path.join(targetDir, '.probhub-version.json'), {
-            version: packageInfo.version,
-            installedAt: new Date().toISOString(),
-        }, { spaces: 2 });
-    });
-
-    console.log('\n📦 检查 Python 运行环境...');
-    try {
-        execSync('pip install cyaron pypdf flask pyyaml', { stdio: 'ignore' });
-        console.log('  [+] 依赖安装完成 (cyaron, pypdf, flask, pyyaml)');
-    } catch (e) {
-        console.log('  [-] 依赖安装跳过，请确认本地已有 cyaron、pypdf、flask 和 pyyaml');
+function main() {
+    const currentDir = path.resolve(process.cwd());
+    const relativeToSource = path.relative(sourceDir, currentDir);
+    if (isLocal && (relativeToSource === '' || (!relativeToSource.startsWith('..') && !path.isAbsolute(relativeToSource)))) {
+        throw new Error('不能在源码目录或其子目录初始化它本身');
     }
 
+    const baseDir = isLocal ? path.resolve(process.cwd()) : os.homedir();
+    const targetDirs = [
+        path.join(baseDir, '.claude', 'skills', 'probhub'),
+        path.join(baseDir, '.agents', 'skills', 'probhub'),
+    ];
+
+    console.log(`\n🚀 正在将 ProbHub 注入到${isLocal ? '本地项目' : '全局系统'}的 Agent Skill 库...`);
+    targetDirs.forEach(dir => console.log(`📂 目标路径: ${dir}`));
+    console.log('\n📦 检查 Python 运行环境...');
+    let python = resolvePython(process.env);
+    if (!python) {
+        throw new Error('Python >= 3.10 was not found; set PYTHON to the desired interpreter');
+    }
+    if (!skipPythonDeps) {
+        python = installPythonDependencies();
+    } else {
+        console.log('  [=] 已按请求跳过 Python 依赖安装');
+    }
+    runPythonModule(
+        python,
+        'probhub.install_skill',
+        ['--base', baseDir, '--version', packageInfo.version],
+        120000,
+        'ProbHub Skill publication failed',
+    );
+
+    targetDirs.forEach(targetDir => console.log(`  [+] 已完整注入到 ${targetDir}`));
     console.log('\n=======================================');
     console.log('🎉 ProbHub Skill 安装完成！');
     console.log('=======================================');
     console.log('👉 下一步操作：');
     console.log('  1. 启动 Claude Code 或兼容的 Agent 工具。');
-    console.log('  2. 你可以直接使用斜杠命令强制调用（无需唤醒词）:');
-    console.log('     > /probhub');
-    console.log('  3. 或者直接跟它说你想出一道什么题。');
-    console.log('  4. 注意：Skill 注入不会永久注册 probhub CLI。需要命令行入口时执行:');
-    console.log('     npm install -g probhub');
+    console.log('  2. 使用 /probhub，或直接描述你想创作的题目。');
+    console.log('  3. Skill 注入不会永久注册 probhub CLI；需要命令行入口时执行 npm install -g probhub。');
     console.log('=======================================\n');
+}
 
-} catch (err) {
-    console.error('初始化失败:', err);
+try {
+    main();
+} catch (error) {
+    console.error(`初始化失败: ${error.message || error}`);
+    process.exitCode = 1;
 }
