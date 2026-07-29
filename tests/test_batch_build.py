@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from probhub.building import (
     _assert_publish_targets_available,
     _recover_build_publish_transactions,
     build_workspace,
+    package_workspace,
     publish_build,
 )
 from probhub.cli import command_status
@@ -110,6 +112,164 @@ class BatchBuildTests(unittest.TestCase):
             for entry in problem_entries(workspace):
                 self.seal_problem(loaded_root, workspace, entry)
         return loaded
+
+    def seed_live_package_artifacts(self, root, workspace):
+        tracked = []
+        for entry in problem_entries(workspace):
+            problem_dir, _ = load_problem(root, entry)
+            (problem_dir / "problem.pdf").write_bytes(
+                b"%PDF-live-" + entry["id"].encode("ascii")
+            )
+            for name, payload in (
+                ("problem.yaml", b"old yaml"),
+                ("domjudge-problem.ini", b"old ini"),
+            ):
+                path = problem_dir / name
+                path.write_bytes(payload + b"-" + entry["id"].encode("ascii"))
+                tracked.append(path)
+            validator = problem_dir / "output_validators/validate/old.txt"
+            validator.parent.mkdir(parents=True)
+            validator.write_bytes(b"old validator-" + entry["id"].encode("ascii"))
+            tracked.append(validator)
+            package = root / f"{entry['id']}.zip"
+            package.write_bytes(b"old zip-" + entry["id"].encode("ascii"))
+            tracked.append(package)
+        return {path: path.read_bytes() for path in tracked}
+
+    def test_multi_problem_package_preparation_failure_changes_nothing_live(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            before = self.seed_live_package_artifacts(root, workspace)
+
+            def fake_package(snapshot_root, problem_dir, config, require_pdf=True):
+                if config["id"] == "B":
+                    (problem_dir / "problem.yaml").write_bytes(b"broken staged yaml")
+                    raise ProbHubError("injected package verification failure")
+                return self.write_package_fixture(
+                    snapshot_root,
+                    problem_dir,
+                    config,
+                    require_pdf=require_pdf,
+                )
+
+            with patch("probhub.building.package_problem", side_effect=fake_package):
+                with self.assertRaisesRegex(ProbHubError, "injected package"):
+                    package_workspace(root, workspace, entries)
+
+            for path, payload in before.items():
+                self.assertEqual(path.read_bytes(), payload, path)
+            self.assertEqual(list((root / ".probhub").glob("build-publish-*")), [])
+            self.assertEqual(
+                list(root.parent.glob(f".{root.name}-probhub-package-*")),
+                [],
+            )
+
+    def test_multi_problem_package_publish_failure_rolls_back_batch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            before = self.seed_live_package_artifacts(root, workspace)
+            replacements = 0
+
+            def fake_package(snapshot_root, problem_dir, config, require_pdf=True):
+                return self.write_package_fixture(
+                    snapshot_root,
+                    problem_dir,
+                    config,
+                    require_pdf=require_pdf,
+                )
+
+            def failing_replace(source, target):
+                nonlocal replacements
+                replacements += 1
+                if replacements == 6:
+                    raise OSError("injected package publish failure")
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+                os.replace(source, target)
+
+            with (
+                patch("probhub.building.package_problem", side_effect=fake_package),
+                patch(
+                    "probhub.building._replace_publish_path",
+                    side_effect=failing_replace,
+                ),
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    package_workspace(root, workspace, entries)
+            self.assertEqual(raised.exception.code, "publish_failed")
+            for path, payload in before.items():
+                self.assertEqual(path.read_bytes(), payload, path)
+            self.assertEqual(list((root / ".probhub").glob("build-publish-*")), [])
+
+    def test_multi_problem_package_success_does_not_publish_build_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            self.seed_live_package_artifacts(root, workspace)
+            untouched = {}
+            main_pdf = root / "typst/contest/main.pdf"
+            main_pdf.write_bytes(b"old main pdf")
+            untouched[main_pdf] = main_pdf.read_bytes()
+            for entry in entries:
+                problem_dir, _ = load_problem(root, entry)
+                for name, payload in (
+                    ("problem.pdf", b"old problem pdf-" + entry["id"].encode("ascii")),
+                    ("meta.json", b"old meta-" + entry["id"].encode("ascii")),
+                    (".probhub/build-manifest.json", b"old manifest-" + entry["id"].encode("ascii")),
+                ):
+                    path = problem_dir / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(payload)
+                    untouched[path] = payload
+
+            with (
+                patch(
+                    "probhub.building.package_problem",
+                    side_effect=self.write_package_fixture,
+                ),
+                patch("probhub.building.judge_problem") as judge,
+                patch("probhub.building.compile_collection") as compile_collection,
+                patch("probhub.building.write_manifest") as manifest,
+            ):
+                result = package_workspace(root, workspace, entries)
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(set(result["packages"]), {"A", "B"})
+            judge.assert_not_called()
+            compile_collection.assert_not_called()
+            manifest.assert_not_called()
+            for path, payload in untouched.items():
+                self.assertEqual(path.read_bytes(), payload, path)
+            self.assertEqual((root / "A.zip").read_bytes(), b"zip-A")
+            self.assertEqual((root / "B.zip").read_bytes(), b"zip-B")
+
+    def test_package_rejects_pdf_change_before_publish(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            before = self.seed_live_package_artifacts(root, workspace)
+
+            def changing_package(snapshot_root, problem_dir, config, require_pdf=True):
+                result = self.write_package_fixture(
+                    snapshot_root,
+                    problem_dir,
+                    config,
+                    require_pdf=require_pdf,
+                )
+                if config["id"] == "A":
+                    (root / "A/problem.pdf").write_bytes(b"concurrent PDF change")
+                return result
+
+            with patch(
+                "probhub.building.package_problem",
+                side_effect=changing_package,
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    package_workspace(root, workspace, entries)
+            self.assertEqual(raised.exception.code, "inputs_changed")
+            for path, payload in before.items():
+                self.assertEqual(path.read_bytes(), payload, path)
 
     def test_multi_problem_build_compiles_collection_once(self):
         with tempfile.TemporaryDirectory() as temp:

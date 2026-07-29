@@ -155,6 +155,38 @@ class CoreWorkspaceTests(unittest.TestCase):
         self.assertTrue(parser.parse_args(["sample-check", "A", "--no-cache"]).no_cache)
         self.assertTrue(parser.parse_args(["build", "A", "--no-cache"]).no_cache)
 
+    def test_verify_package_can_use_workspace_problem_context(self):
+        from probhub.package_tools import build_package, generate_domjudge_config
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            _, config = load_problem(root, {"id": "A", "directory": "A"})
+            (problem / "problem.pdf").write_bytes(b"%PDF-1.4\n")
+            generate_domjudge_config(problem, config)
+            package = root / "A.zip"
+            build_package(problem, package, config=config)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = cli_main([
+                    "--workspace",
+                    str(root),
+                    "--json",
+                    "verify-package",
+                    str(package),
+                    "--require-pdf",
+                    "--problem",
+                    "A",
+                ])
+
+            result = json.loads(output.getvalue())
+            self.assertEqual(code, 0, result)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["verification_scope"], "deep")
+            self.assertTrue(result["checks"]["source_consistency"])
+            self.assertTrue(result["checks"]["input_validator"])
+            self.assertEqual(result["stats"]["validator_cases"], 2)
+
     def test_lint_metadata_and_stale_detection(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

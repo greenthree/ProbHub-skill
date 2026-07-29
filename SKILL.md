@@ -100,7 +100,7 @@ probhub build
 | `typeset [ID...]` | 编译全卷并提取指定单题 PDF |
 | `package [ID...]` | 从当前产物构建并验证指定 ZIP |
 | `build [ID...]` | lint → judge → 全卷排版 → 单题 PDF → ZIP → Manifest |
-| `verify-package <zip>` | 独立验证 DOMjudge ZIP |
+| `verify-package <zip>` | 流式验证 DOMjudge ZIP 结构；配合 `--problem <ID>` 深度对账规范源并运行输入 Validator |
 
 `typeset <ID>` 和 `build <ID>` 为保证正式题号与页码正确，仍会编译整个 Typst 集合，但只提取、打包和更新所选题目。
 
@@ -175,7 +175,7 @@ probhub build L01 --skip-judge
    probhub build <ID> --no-cache
    ```
 
-8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 验证成功且 `status` 为 `current` 时才可交付。Manifest 的 `collection_hash` 会跟踪整场排版输入；其他题题面、题面媒体、样例、题序或模板变化后，受影响题目也必须重新构建。
+8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 深度验证成功且 `status` 为 `current` 时才可交付。独立复核正式包时使用 `probhub --workspace <工作区> verify-package <ID>.zip --require-pdf --problem <ID>`；不带 `--problem` 的 `verification_scope: structural` 不能替代题名、限制、数据和输入 Validator 对账。Manifest 的 `collection_hash` 会跟踪整场排版输入；其他题题面、题面媒体、样例、题序或模板变化后，受影响题目也必须重新构建。
 9. 查看 judge summary 与 lint/status 的 `calibration`、`diagnostics`：默认 accepted 应满足 `max_time × 3 <= TL`，期望 TLE 的目标用例应有至少 `1.5 × TL` 的延长探针证据。缺失或低余量 warning 必须在交付前人工处理或在题目 `calibration` 中有意识地调整阈值。
 
 本地 `max_time`、内存和输出余量不是正式评测承诺。Windows 与 Linux/DOMjudge 的启动、链接、调度、计时和内存口径不同；正式 TL/ML/OL 必须在目标 Linux 评测环境重新校准，结构化结果中的 `target_guarantee` 固定为 `false`。
