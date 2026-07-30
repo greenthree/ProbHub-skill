@@ -185,6 +185,7 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "requirements.txt", "bin/init.js", "bin/probhub.js", "bin/python.js",
         "probhub/__init__.py", "probhub/cli.py", "probhub/install_deps.py",
         "probhub/install_skill.py", "probhub/process_control.py",
+        "probhub/webui_runtime.py",
         "scripts/probhub.py", "scripts/local_judge.py", "scripts/ui.py",
         "references/cli.md", "references/lib.typ", "references/main.typ",
         "references/problems.typ", "references/usts.png", "references/testlib.h",

@@ -38,7 +38,20 @@ def main(argv=None):
     if doctor_result is not None:
         return doctor_result
 
-    from .cli import main as cli_main
+    try:
+        from .cli import main as cli_main
+    except ModuleNotFoundError as exc:
+        result = {
+            "ok": False,
+            "code": "runtime_dependency_missing",
+            "error": f"ProbHub runtime dependency is missing: {exc.name}",
+            "module": exc.name,
+        }
+        if "--json" in argv:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(result["error"], file=sys.stderr)
+        return 1
 
     return cli_main(argv)
 

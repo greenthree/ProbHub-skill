@@ -157,6 +157,24 @@ probhub doctor
 
 用于确认 Python >=3.10、Node >=18、npm、固定 Typst 0.14.2、`Noto Sans CJK SC`、g++ 和 Flask/PyYAML/pypdf，并报告 Python 包实际版本。`python -m probhub doctor` 与 npm `probhub doctor` 在这些业务模块尚未安装时也会输出结构化缺失报告，而不是在参数解析前 traceback。首次安装、换机器或 CI 失败时优先运行。
 
+## 6.1 `ui`
+
+从 Workspace Schema v1 根目录启动当前安装包中的 WebUI：
+
+```powershell
+probhub ui
+probhub ui --no-browser
+probhub ui --port 33934
+```
+
+服务只监听 `127.0.0.1`。`--no-browser` 不自动打开浏览器，`--port` 只改变本机监听端口。CI 或安装诊断使用：
+
+```powershell
+probhub --json ui --check
+```
+
+`--check` 会定位 workspace、从当前安装包绝对路径导入 WebUI 和 Core，然后立即退出；不会启动服务器或写入赛事规范源与正式产物。缺少打包文件、Python 依赖或入口契约不兼容时，分别返回稳定的 `webui_runtime_missing`、`webui_dependency_missing` 或 `webui_runtime_incompatible`。赛事仓库可以保留调用该命令的薄入口，但不得复制整套 Core/WebUI 后静默回退。
+
 ## 7. `lint`
 
 ```powershell

@@ -409,10 +409,10 @@ python scripts/extract_new_problem.py typst-statement/<subtitle> <problem_dir>
 
 ## WebUI 控制台
 
-Agent 完成底层排版后，会把 `ui.py` 和 `launch_ui.py` 放到工作区根目录。推荐用户自己前台启动，方便随时退出：
+WebUI 由当前安装的 `probhub` 主包提供。进入 Workspace Schema v1 工作区后前台启动，方便随时退出：
 
 ```powershell
-python ui.py
+probhub ui
 ```
 
 浏览器会打开：
@@ -421,11 +421,13 @@ python ui.py
 http://127.0.0.1:33933
 ```
 
-需要后台运行时，可以手动执行：
+不需要自动打开浏览器时使用：
 
 ```powershell
-python launch_ui.py
+probhub ui --no-browser
 ```
+
+CI 或排查安装问题可执行 `probhub --json ui --check`，只验证 workspace 与打包 WebUI 可导入，不启动服务。赛事仓库无需复制 `probhub/`、`scripts/ui.py`、`scripts/local_judge.py` 或 references；需要兼容旧命令时，只保留调用已安装 CLI 的薄入口。
 
 控制台支持：
 
@@ -609,10 +611,10 @@ typst --version
 pip install -r requirements.txt
 ```
 
-然后在包含 `typst-statement/` 的工作区根目录运行：
+然后在包含 `.probhub/workspace.yaml` 的工作区根目录运行：
 
 ```bash
-python ui.py
+probhub ui
 ```
 
 浏览器打开 `http://127.0.0.1:33933` 后即可使用控制台。
