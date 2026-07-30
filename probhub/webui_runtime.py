@@ -7,6 +7,26 @@ from . import __version__
 from .errors import ProbHubError
 
 
+WEBUI_ASSET_NAMES = (
+    "index.html",
+    "app.css",
+    "app.js",
+    "mathjax-config.js",
+    "tailwind-config.js",
+    "theme.js",
+)
+
+
+def _require_webui_assets(script):
+    asset_root = script.parent / "webui"
+    missing = [name for name in WEBUI_ASSET_NAMES if not (asset_root / name).is_file()]
+    if missing:
+        raise ProbHubError(
+            f"installed ProbHub WebUI assets are missing: {', '.join(missing)}",
+            code="webui_runtime_missing",
+        )
+
+
 def _webui_script():
     script = Path(__file__).resolve().parents[1] / "scripts" / "ui.py"
     if not script.is_file():
@@ -14,6 +34,7 @@ def _webui_script():
             f"installed ProbHub WebUI is missing: {script}",
             code="webui_runtime_missing",
         )
+    _require_webui_assets(script)
     return script
 
 

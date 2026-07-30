@@ -72,6 +72,17 @@ class WebUiRuntimeTests(unittest.TestCase):
                 webui_runtime._webui_script()
         self.assertEqual(raised.exception.code, "webui_runtime_missing")
 
+    def test_missing_packaged_webui_asset_is_a_stable_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "scripts/ui.py"
+            script.parent.mkdir()
+            script.write_text("", encoding="utf-8")
+            (script.parent / "webui").mkdir()
+            with self.assertRaises(ProbHubError) as raised:
+                webui_runtime._require_webui_assets(script)
+        self.assertEqual(raised.exception.code, "webui_runtime_missing")
+        self.assertIn("index.html", str(raised.exception))
+
     def test_webui_dependency_failure_is_a_stable_error(self):
         loader = mock.Mock()
         loader.exec_module.side_effect = ModuleNotFoundError("missing", name="flask")

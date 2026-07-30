@@ -9,7 +9,7 @@
   },
   "scripts": {
     "test": "python -m unittest discover -s tests -v",
-    "check": "python -m compileall -q probhub scripts tests && python -m probhub --version && node --check bin/init.js && node --check bin/probhub.js && node --check bin/python.js && npm --prefix compat/probhub-skill run check && npm run release:check && npm test",
+    "check": "python -m compileall -q probhub scripts tests && python -m probhub --version && node --check bin/init.js && node --check bin/probhub.js && node --check bin/python.js && node --check scripts/webui/theme.js && node --check scripts/webui/tailwind-config.js && node --check scripts/webui/mathjax-config.js && node --check scripts/webui/app.js && npm --prefix compat/probhub-skill run check && npm run release:check && npm test",
     "release:check": "python scripts/check_release.py",
     "pack:check": "python scripts/check_release.py --pack",
     "prepublishOnly": "python scripts/check_release.py --pack --require-head-tag --require-clean"
@@ -43,6 +43,7 @@
     "SKILL.md",
     "references/**",
     "scripts/*.py",
+    "scripts/webui/**",
     "!scripts/check_clean_install.py",
     "!scripts/check_release.py",
     "probhub/**/*.py"

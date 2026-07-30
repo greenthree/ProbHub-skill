@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="probhub-csrf-token" content="{{ csrf_token }}">
+    <title>ProbHub · 题目排版控制台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="/webui/assets/theme.js"></script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script src="/webui/assets/tailwind-config.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/webui/assets/mathjax-config.js"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+
+    <link rel="stylesheet" href="/webui/assets/app.css">
+</head>
+<body class="min-h-screen bg-ink-bg text-cream antialiased relative">
+    <div x-data="probhub()" x-init="initApp()" @input="autoSave()" class="max-w-[1500px] mx-auto px-3 sm:px-5 lg:px-8 py-4 lg:py-6 relative z-10" x-cloak>
+
+        <div class="ink-card app-header rounded-2xl p-4 lg:p-5 mb-5 flex flex-wrap justify-between items-center gap-4">
+            <div class="flex items-center gap-5">
+                <svg class="brand-logo h-11 lg:h-12 w-auto select-none shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 324 90">
+                    <rect class="logo-shell" width="324" height="90" rx="16" />
+                    <text x="22" y="64" class="logo-text" fill="#E53935">p</text>
+                    <text x="58" y="64" class="logo-text" fill="#E53935">r</text>
+                    <text x="94" y="64" class="logo-text" fill="#E53935">o</text>
+                    <text x="130" y="64" class="logo-text" fill="#1E88E5">b</text>
+                    <rect x="182" y="14" width="130" height="62" rx="10" fill="#FFA31A" />
+                    <text x="192" y="64" class="logo-text logo-hub-text">h</text>
+                    <text x="228" y="64" class="logo-text logo-hub-text">u</text>
+                    <text x="264" y="64" class="logo-text logo-hub-text">b</text>
+                </svg>
+                <div class="flex flex-col gap-1">
+                    <span class="text-[11px] tracking-[0.2em] uppercase text-cream-muted font-medium">Typesetting Console</span>
+                    <div class="flex items-center gap-3 flex-wrap">
+                        <span class="text-sm text-cream-subtle">当前排版集</span>
+                        <div class="relative flex items-center" x-show="subtitles.length > 0">
+                            <select x-model="currentSubtitle" @input.stop @change.stop="switchSubtitle()"
+                                    class="bg-ink-input text-gold font-mono text-[13px] border border-white/[0.02] rounded-md pl-2.5 pr-8 py-1 outline-none focus:border-gold/40 cursor-pointer appearance-none transition-colors shadow-sm">
+                                <template x-for="sub in subtitles" :key="sub">
+                                    <option :value="sub" x-text="sub"></option>
+                                </template>
+                            </select>
+                            <svg class="w-3.5 h-3.5 text-gold/60 absolute right-2.5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                        </div>
+                        <span x-show="subtitles.length === 0" class="text-[13px] text-danger font-mono bg-danger/10 px-2 py-0.5 rounded border border-danger/20">未检测到排版集</span>
+                        <div class="inline-flex items-center gap-1 p-1 rounded-lg bg-ink-input/70 border border-white/[0.02]">
+                            <button @click="activePage = 'layout'"
+                                    class="px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors"
+                                    :class="activePage === 'layout' ? 'bg-gold/12 text-gold-light' : 'text-cream-subtle hover:text-cream'">
+                                组卷排版
+                            </button>
+                            <button @click="activePage = 'sandbox'; refreshSandboxInfo()"
+                                    class="px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors"
+                                    :class="activePage === 'sandbox' ? 'bg-gold/12 text-gold-light' : 'text-cream-subtle hover:text-cream'">
+                                沙箱评测
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="header-actions flex flex-wrap items-center gap-2.5">
+                <button @click="selectedIdx = null" x-show="selectedIdx !== null"
+                        class="flex items-center gap-1.5 text-[12px] text-cream-subtle hover:text-cream transition-colors duration-200 group">
+                    <svg class="w-3.5 h-3.5 transition-transform duration-200 group-hover:-translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                    <span class="font-medium">概览</span>
+                </button>
+                <span class="text-[12px] font-medium flex items-center gap-1.5 transition-colors duration-300 select-none min-w-[80px]"
+                      :class="saveStatus === 'saved' ? 'text-success' : (saveStatus === 'error' ? 'text-danger' : (saveStatus === 'saving' ? 'text-cream-subtle' : 'text-cream-subtle/60'))">
+                    <template x-if="saveStatus === 'saved'"><span>✓ 已保存</span></template>
+                    <template x-if="saveStatus === 'saving'"><span class="animate-pulse">● 保存中</span></template>
+                    <template x-if="saveStatus === 'error'"><span class="cursor-pointer" @click.stop="doSave()">⚠ 点击重试</span></template>
+                    <template x-if="!saveStatus"><span>● 就绪</span></template>
+                </span>
+                <button type="button" class="theme-toggle" @click="toggleTheme()"
+                        :aria-label="theme === 'dark' ? '切换到明亮模式' : '切换到暗夜模式'"
+                        :title="theme === 'dark' ? '切换到明亮模式' : '切换到护眼暗夜模式'">
+                    <svg x-show="theme === 'dark'" class="theme-toggle-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 3v1.5M12 19.5V21M3 12h1.5M19.5 12H21M5.64 5.64l1.06 1.06M17.3 17.3l1.06 1.06M18.36 5.64 17.3 6.7M6.7 17.3l-1.06 1.06M16.5 12a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Z"/></svg>
+                    <svg x-show="theme === 'light'" class="theme-toggle-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M20.5 15.5A8.5 8.5 0 0 1 8.5 3.5a8.5 8.5 0 1 0 12 12Z"/></svg>
+                    <span class="text-[12px] font-medium" x-text="theme === 'dark' ? 'Light' : 'Dark'"></span>
+                </button>
+                <button @click="compilePDF()" class="primary-action px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all duration-200 disabled:opacity-50 disabled:shadow-none" :disabled="isCompiling || !currentSubtitle">
+                    <span class="flex items-center gap-1.5">
+                        <span x-show="!isCompiling">📄 编译全卷</span>
+                        <span x-show="isCompiling" class="animate-pulse">⏳ 编译中...</span>
+                    </span>
+                </button>
+                <button @click="distributePDFs()" class="secondary-action px-4 py-2.5 text-[13px] font-medium rounded-lg transition-all duration-200 bg-ink-elevated border border-white/[0.03] text-cream-muted hover:text-cream hover:border-white/8 hover:bg-ink-input active:scale-[0.97] disabled:opacity-40" :disabled="isDistributing || !currentSubtitle">
+                    <span class="flex items-center gap-1.5">
+                        <span x-show="!isDistributing">📦 分发 PDF</span>
+                        <span x-show="isDistributing" class="animate-pulse">⏳ 分发中...</span>
+                    </span>
+                </button>
+            </div>
+        </div>
+
+        <div x-show="toast.show" x-transition.opacity.duration.300ms class="fixed top-6 right-6 z-50 flex items-center gap-2 max-w-xl px-5 py-3 rounded-xl text-sm font-medium leading-relaxed shadow-2xl border backdrop-blur-md" :class="toast.isError ? 'bg-danger/90 border-red-500/30 text-white' : 'bg-success/90 border-green-500/30 text-white'">
+            <span class="whitespace-normal" x-text="toast.msg"></span>
+        </div>
+
+        <div class="workspace-shell flex gap-5">
+
+            <div class="problem-sidebar w-[220px] shrink-0 ink-card rounded-2xl p-4 flex flex-col overflow-hidden">
+                <div class="flex items-center justify-between mb-4 px-1 shrink-0">
+                    <h2 class="font-serif text-[15px] font-semibold text-cream tracking-wide">题目列表</h2>
+                    <span class="text-[11px] text-cream-subtle font-mono" x-text="problems.length + ' 题'"></span>
+                </div>
+                <div id="sortable-list" class="space-y-1.5 flex-1 overflow-y-auto pr-0.5">
+                    <template x-for="(prob, index) in problems" :key="prob.problem.display_name + index">
+                        <div @click="selectProb(index)" :class="selectedIdx === index ? 'bg-gold/10 border-gold/40 text-cream' : 'border-transparent hover:border-white/[0.03] hover:bg-ink-elevated/50 text-cream-muted'" class="flex flex-wrap items-center gap-x-2.5 gap-y-1 px-3 py-2.5 rounded-lg cursor-move border transition-all duration-150 group">
+                            <span class="text-[11px] font-mono shrink-0 opacity-50 w-4 text-center" :class="selectedIdx === index ? 'text-gold opacity-80' : ''" x-text="String.fromCharCode(65 + index)"></span>
+                            <span class="w-1.5 h-4 rounded-full shrink-0 transition-transform duration-200" :class="selectedIdx === index ? 'scale-125' : ''" :style="'background:' + getDifficultyInfo(index).color"></span>
+                            <span class="text-[13px] font-medium truncate min-w-0 flex-1" x-text="prob.problem.display_name"></span>
+                            <span class="inline-flex flex-wrap items-center gap-1 shrink-0">
+                                <template x-for="(tag, ti) in getTags(index)" :key="ti">
+                                    <span
+                                          class="text-[9px] px-1.5 py-0.5 rounded leading-none font-medium transition-all duration-150"
+                                          :class="selectedIdx === index ? 'bg-gold/12 border border-gold/25 text-gold-light' : 'bg-ink-input/80 border border-white/[0.03] text-cream-muted'"
+                                          x-text="tag"></span>
+                                </template>
+                            </span>
+                        </div>
+                    </template>
+                    <div x-show="problems.length === 0 && currentSubtitle" class="text-center text-sm text-cream-subtle mt-10">
+                        当前排版集为空
+                    </div>
+                </div>
+            </div>
+
+            <div x-show="activePage === 'layout'" class="workspace-panel flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
+                <div x-show="selectedIdx === null" class="absolute inset-0 overflow-y-auto">
+                    <!-- Empty set: no problems loaded yet -->
+                    <div x-show="problems.length === 0" class="absolute inset-0 flex flex-col items-center justify-center">
+                        <div class="w-20 h-20 rounded-2xl bg-ink-input/40 flex items-center justify-center mb-5">
+                            <svg class="w-8 h-8 text-cream-subtle/40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                        </div>
+                        <p class="font-serif text-[15px] text-cream-muted mb-1.5">选择一道题目开始编排</p>
+                        <p class="text-xs text-cream-subtle">在左侧列表中点击题目，即可编辑题面、难度与样例</p>
+                    </div>
+
+                    <!-- Dashboard: problems exist but none selected -->
+                    <div x-show="problems.length > 0" class="p-6 space-y-8">
+                        <div class="flex items-center gap-4">
+                            <div class="w-14 h-14 rounded-2xl bg-ink-input/40 flex items-center justify-center shrink-0">
+                                <svg class="w-6 h-6 text-cream-subtle/50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                            </div>
+                            <div>
+                                <h2 class="font-serif text-[16px] font-semibold text-cream">排版集概览</h2>
+                                <p class="text-xs text-cream-subtle mt-0.5">
+                                    <span x-text="currentSubtitle"></span> · <span x-text="problems.length + ' 题'"></span>
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Cover Settings -->
+                        <div @input.stop="autoSaveCover()">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="flex items-center gap-2">
+                                    <div class="w-1 h-3.5 rounded-full bg-gold"></div>
+                                    <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">封面设置 <span class="text-[9px] text-cream-subtle font-normal tracking-normal normal-case">（编译后可预览 当心眼睛（）</span></h3>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">比赛标题</label>
+                                    <input type="text" x-model="coverConfig.title" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">副标题</label>
+                                    <input type="text" x-model="coverConfig.subtitle" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">作者</label>
+                                    <input type="text" x-model="coverConfig.author" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">日期</label>
+                                    <input type="text" x-model="coverConfig.date" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">校徽文件</label>
+                                    <input type="text" x-model="coverConfig.logo" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">校徽宽度</label>
+                                    <input type="text" x-model="coverConfig.logo_width" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">校徽上方间距 <span class="text-cream-subtle">（可为负数）</span></label>
+                                    <input type="text" x-model="coverConfig.logo_space_above" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">校徽下方间距</label>
+                                    <input type="text" x-model="coverConfig.logo_space_below" class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                </div>
+                            </div>
+                            <!-- Cover preview thumbnail -->
+                            <template x-if="currentSubtitle && pdfPages.length > 0">
+                                <div class="mt-3" data-testid="cover-preview">
+                                    <p class="text-[10px] font-medium text-cream-subtle mb-2">封面预览</p>
+                                    <div class="rounded-lg overflow-hidden border border-white/[0.02] bg-ink-bg relative">
+                                        <img :src="'/api/pdf-page/' + encodeURIComponent(currentSubtitle) + '/0?t=' + pdfRefresh"
+                                             class="w-full block" :style="theme === 'light' ? 'filter:none' : 'filter:brightness(0.92) contrast(0.95)'">
+                                        <div x-show="theme === 'dark'" class="absolute inset-0 bg-black/20 pointer-events-none"></div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+
+                        <!-- Difficulty Distribution -->
+                        <div>
+                            <div class="flex items-center gap-2 mb-4">
+                                <div class="w-1 h-3.5 rounded-full bg-gold"></div>
+                                <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">难度分布</h3>
+                            </div>
+                            <div class="space-y-1.5">
+                                <template x-for="(level, li) in difficultyLevels" :key="level.label">
+                                    <div class="flex items-center gap-2.5">
+                                        <span class="text-[10px] font-mono w-[72px] text-right shrink-0" :style="'color:' + level.color" x-text="level.label"></span>
+                                        <div class="flex-1 h-5 rounded-md bg-ink-input overflow-hidden">
+                                            <div class="h-full rounded-md transition-all duration-700 ease-out"
+                                                 :style="'width:' + (getDifficultyStats()[li] / Math.max(1, problems.length) * 100) + '%; background:' + level.color"></div>
+                                        </div>
+                                        <span class="text-[11px] font-mono text-cream-subtle w-4 text-right shrink-0 font-medium" x-text="getDifficultyStats()[li]"></span>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Tag Cloud -->
+                        <div x-show="getAllTags().length > 0">
+                            <div class="flex items-center gap-2 mb-4">
+                                <div class="w-1 h-3.5 rounded-full bg-gold"></div>
+                                <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">算法标签</h3>
+                                <span class="text-[10px] font-mono text-cream-subtle/60" x-text="getAllTags().length + ' 种'"></span>
+                            </div>
+                            <div class="flex flex-wrap gap-1.5">
+                                <template x-for="tag in getAllTags()" :key="tag">
+                                    <span class="text-[10px] px-2.5 py-1 rounded-md font-medium leading-none bg-ink-elevated border border-white/[0.03] text-cream-muted select-none" x-text="tag"></span>
+                                </template>
+                            </div>
+                        </div>
+
+                        <p class="text-[12px] text-cream-subtle/50 text-center pt-4">点击左侧题目开始编辑</p>
+                    </div>
+                </div>
+
+                <template x-if="problems[selectedIdx]">
+                    <div class="space-y-8 animate-fade-in">
+
+                        <div class="grid grid-cols-[1fr_auto] gap-6 items-end">
+                            <div>
+                                <label class="block text-[11px] font-medium tracking-wide text-cream-muted uppercase mb-1.5">Display Name</label>
+                                <input type="text" x-model="problems[selectedIdx].problem.display_name" class="w-full px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg text-[14px] font-medium text-cream focus:border-gold/40 focus:outline-none transition-colors">
+                            </div>
+                            <div class="flex items-end pb-2">
+                                <label class="flex items-center gap-2.5 cursor-pointer select-none">
+                                    <div class="relative w-9 h-5 rounded-full toggle-track transition-colors" :class="hasQuote() ? 'bg-gold' : 'bg-ink-border'">
+                                        <div class="toggle-dot absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-md" :class="hasQuote() ? 'translate-x-[18px]' : 'translate-x-[2px]'"></div>
+                                    </div>
+                                    <input type="checkbox" class="sr-only" :checked="hasQuote()" @change="toggleQuote($event.target.checked)">
+                                    <span class="text-[12px] font-medium" :class="hasQuote() ? 'text-gold' : 'text-cream-subtle'">启用题面引言 (Quote)</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Tags Editor -->
+                        <div class="pt-5 mt-2 border-t border-white/[0.02]">
+                            <div class="flex items-center justify-between mb-3">
+                                <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">Tags</label>
+                                <span class="text-[10px] font-mono text-cream-subtle/60" x-text="getTags(selectedIdx).length + ' tags'"></span>
+                            </div>
+                            <div class="flex flex-wrap items-center gap-1.5">
+                                <template x-for="(tag, ti) in getTags(selectedIdx)" :key="ti">
+                                    <span class="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md leading-none font-medium bg-gold/12 border border-gold/20 text-gold-light group/tag transition-colors">
+                                        <span x-text="tag"></span>
+                                        <button @click="removeTag(selectedIdx, ti)" class="text-gold-light/50 hover:text-danger transition-colors leading-none">&times;</button>
+                                    </span>
+                                </template>
+                                <div class="relative flex items-center">
+                                    <input type="text" x-ref="tagInput" x-model="tagDraft"
+                                           @keydown.enter.prevent="commitTag()"
+                                           @keydown.,.prevent="commitTag()"
+                                           @keydown.backspace="if(!tagDraft && getTags(selectedIdx).length) removeTag(selectedIdx, getTags(selectedIdx).length - 1)"
+                                           class="w-24 px-2.5 py-1 bg-transparent border border-dashed border-white/[0.02] rounded-md text-[10px] text-cream placeholder-cream-subtle/30 focus:border-gold/30 focus:outline-none transition-colors"
+                                           placeholder="添加标签">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Limits Editor -->
+                        <div class="pt-5 mt-2 border-t border-white/[0.02]">
+                            <div class="flex items-center justify-between mb-3">
+                                <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">Limits</label>
+                                <span class="text-[10px] font-mono text-cream-subtle/60">
+                                    <span x-text="getTimeLimit(selectedIdx)"></span>s /
+                                    <span x-text="getMemoryLimit(selectedIdx)"></span>MB
+                                </span>
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">时间限制</label>
+                                    <div class="flex items-center gap-2">
+                                        <input type="number" min="0.1" step="0.1"
+                                               :value="getTimeLimit(selectedIdx)"
+                                               @input.stop="setTimeLimit(selectedIdx, $event.target.value)"
+                                               class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                        <span class="text-[11px] text-cream-subtle font-mono">s</span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-medium text-cream-subtle mb-1">内存限制</label>
+                                    <div class="flex items-center gap-2">
+                                        <input type="number" min="1" step="1"
+                                               :value="getMemoryLimit(selectedIdx)"
+                                               @input.stop="setMemoryLimit(selectedIdx, $event.target.value)"
+                                               class="w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg text-[13px] text-cream focus:border-gold/40 focus:outline-none transition-colors font-mono">
+                                        <span class="text-[11px] text-cream-subtle font-mono">MB</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Difficulty Slider -->
+                        <div class="pt-5 mt-2 border-t border-white/[0.02]">
+                            <div class="flex items-center justify-between mb-3">
+                                <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">Difficulty</label>
+                                <span class="text-[12px] font-semibold px-2.5 py-0.5 rounded font-mono transition-all duration-300"
+                                      :style="'background:' + getDifficultyInfo(selectedIdx).bg + '; color:' + getDifficultyInfo(selectedIdx).color"
+                                      x-text="getDifficultyInfo(selectedIdx).label"></span>
+                            </div>
+                            <!-- Stepped Track -->
+                            <div class="relative h-12 flex items-center cursor-pointer select-none"
+                                 x-init="trackWidth = $el.offsetWidth; new ResizeObserver(() => trackWidth = $el.offsetWidth).observe($el)"
+                                 @click="setDifficultyFromTrack(selectedIdx, $event)">
+                                <div class="absolute inset-x-0 h-1.5 rounded-full bg-ink-border"></div>
+                                <div class="absolute left-0 h-1.5 rounded-full overflow-hidden transition-all duration-300"
+                                     :style="'width:' + (getDifficulty(selectedIdx) / 5 * 100) + '%'">
+                                    <div class="flex h-full" :style="'width:' + trackWidth + 'px'">
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#9b7ec4,#5a8ec0)"></div>
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#5a8ec0,#6b9b6a)"></div>
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#6b9b6a,#c8a050)"></div>
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#c8a050,#e08840)"></div>
+                                        <div class="flex-1 h-full" style="background:linear-gradient(90deg,#e08840,#e05555)"></div>
+                                    </div>
+                                </div>
+                                <template x-for="(level, li) in difficultyLevels" :key="level.label">
+                                    <div class="absolute w-3.5 h-3.5 rounded-full transition-all duration-300 z-10"
+                                         :style="'left:calc(' + (li / 5 * 100) + '% - 7px); background:' + (getDifficulty(selectedIdx) >= li ? level.color : 'rgb(var(--ink-input))') + '; border: 2px solid ' + (getDifficulty(selectedIdx) >= li ? level.color : 'rgb(var(--ink-border))') + ';' + (getDifficulty(selectedIdx) === li ? 'transform: scale(1.7); box-shadow: 0 0 12px ' + level.color + '99;' : '')"
+                                         @click.stop="setDifficulty(selectedIdx, li)"></div>
+                                </template>
+                            </div>
+                            <!-- Labels -->
+                            <div class="flex justify-between mt-1">
+                                <template x-for="(level, li) in difficultyLevels" :key="level.label">
+                                    <span class="text-[9px] font-medium transition-colors duration-300 select-none"
+                                          :style="getDifficulty(selectedIdx) === li ? 'color:' + level.color : 'color:rgb(var(--cream-subtle))'"
+                                          x-text="level.label"></span>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Quote expandable section -->
+                        <template x-if="hasQuote()">
+                            <div x-show="true" x-collapse>
+                                <div class="soft-gold-panel p-4 rounded-xl space-y-4 border-l-2 border-gold/30">
+                                    <div>
+                                        <label class="block text-[11px] font-medium tracking-wide text-cream-muted uppercase mb-1.5">引言内容</label>
+                                        <textarea x-model="problems[selectedIdx].statement.quote.text" rows="3"
+                                                  class="editor-surface w-full px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg
+                                                         text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed
+                                                         focus:border-gold/40 focus:outline-none transition-colors resize-none"
+                                                  placeholder="这是出题人最喜欢的一段话..."></textarea>
+                                    </div>
+                                    <div>
+                                        <label class="block text-[11px] font-medium tracking-wide text-cream-muted uppercase mb-1.5">出处</label>
+                                        <input type="text" x-model="problems[selectedIdx].statement.quote.source"
+                                               class="w-full px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg
+                                                      text-[13px] text-cream placeholder-cream-subtle/40
+                                                      focus:border-gold/40 focus:outline-none transition-colors"
+                                               placeholder="——《某某书籍》">
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+
+                        <div class="space-y-6 pt-4 border-t border-white/[0.02]">
+                            <div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Description</label>
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full opacity-0"></div> Live Preview</label>
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <textarea x-model="problems[selectedIdx].statement.description" rows="8" class="editor-surface w-full h-56 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="preview-surface w-full h-56 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.descPreview, problems[selectedIdx]?.statement?.description)" x-ref="descPreview"></div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Input Format</label>
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <textarea x-model="problems[selectedIdx].statement.input" class="editor-surface w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.inputPreview, problems[selectedIdx]?.statement?.input)" x-ref="inputPreview"></div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Output Format</label>
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <textarea x-model="problems[selectedIdx].statement.output" class="editor-surface w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.outputPreview, problems[selectedIdx]?.statement?.output)" x-ref="outputPreview"></div>
+                                </div>
+                            </div>
+
+                            <!-- Samples Section -->
+                            <div>
+                                <div class="flex items-center justify-between mb-3">
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Samples</label>
+                                    <button @click="addSample()" class="px-3 py-1.5 text-[11px] font-medium rounded-md transition-all duration-150 border border-gold/30 text-gold hover:bg-gold/10 active:scale-[0.97]">
+                                        + 添加样例
+                                    </button>
+                                </div>
+                                <template x-if="!problems[selectedIdx].problem.samples || problems[selectedIdx].problem.samples.length === 0">
+                                    <p class="text-[12px] text-cream-subtle italic py-6 text-center border border-dashed border-white/[0.03] rounded-lg">暂无样例，点击上方按钮添加</p>
+                                </template>
+                                <template x-if="problems[selectedIdx].problem.samples && problems[selectedIdx].problem.samples.length > 0">
+                                    <div class="space-y-3">
+                                        <template x-for="(sample, si) in problems[selectedIdx].problem.samples" :key="si">
+                                            <div class="soft-panel p-4 rounded-xl border border-white/[0.02]">
+                                                <div class="flex items-center justify-between mb-2.5">
+                                                    <span class="text-[11px] font-mono text-gold tracking-wide" x-text="'样例 #' + (si + 1)"></span>
+                                                    <button @click="removeSample(si)" class="text-[11px] text-cream-subtle hover:text-danger transition-colors px-2 py-0.5 rounded hover:bg-danger/10" x-show="problems[selectedIdx].problem.samples.length > 1">✕ 移除</button>
+                                                </div>
+                                                <div class="grid grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label class="block text-[10px] font-medium tracking-wide text-cream-muted uppercase mb-1">Input</label>
+                                                        <textarea x-model="sample.input" rows="3"
+                                                                  class="editor-surface w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
+                                                                  placeholder="3 5 7"></textarea>
+                                                    </div>
+                                                    <div>
+                                                        <label class="block text-[10px] font-medium tracking-wide text-cream-muted uppercase mb-1">Output</label>
+                                                        <textarea x-model="sample.output" rows="3"
+                                                                  class="editor-surface w-full px-3 py-2 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[12px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"
+                                                                  placeholder="2"></textarea>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </template>
+                            </div>
+
+                            <div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-2">
+                                    <label class="text-[11px] font-medium tracking-wide text-cream-muted uppercase flex items-center gap-2"><div class="w-1 h-3.5 rounded-full bg-gold"></div> Notes & Constraints</label>
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <textarea x-model="problems[selectedIdx].statement.notes" class="editor-surface w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
+                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.notesPreview, problems[selectedIdx]?.statement?.notes)" x-ref="notesPreview"></div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            <div x-show="activePage === 'sandbox'" class="workspace-panel flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
+                <div class="space-y-6 animate-fade-in">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <div class="flex items-center gap-2 mb-2">
+                                <div class="w-1 h-4 rounded-full bg-gold"></div>
+                                <h2 class="font-serif text-[18px] font-semibold text-cream">沙箱评测控制台</h2>
+                            </div>
+                            <p class="text-xs text-cream-subtle">
+                                <template x-if="selectedIdx !== null && problems[selectedIdx]">
+                                    <span>
+                                        当前题目
+                                        <span class="font-mono text-gold" x-text="String.fromCharCode(65 + selectedIdx)"></span>
+                                        · <span x-text="problems[selectedIdx].problem.display_name"></span>
+                                        <span x-show="sandboxLastRunAt" class="ml-2 text-cream-subtle/70">
+                                            上次运行 <span class="font-mono" x-text="sandboxLastRunAt"></span>
+                                        </span>
+                                    </span>
+                                </template>
+                                <template x-if="selectedIdx === null">
+                                    <span>请先在左侧选择一道题目。</span>
+                                </template>
+                            </p>
+                        </div>
+                        <button @click="runSandbox()"
+                                class="primary-action px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all duration-200 disabled:opacity-40 disabled:shadow-none"
+                                :disabled="sandboxRunning || !sandboxInfo || !sandboxInfo.runnable">
+                            <span x-show="!sandboxRunning">▶ 运行沙箱评测</span>
+                            <span x-show="sandboxRunning" class="animate-pulse">● 评测中...</span>
+                        </button>
+                    </div>
+
+                    <div x-show="!sandboxInfo || !sandboxInfo.matched" class="rounded-xl border border-white/[0.02] bg-ink-input/40 p-5 text-sm text-cream-subtle">
+                        <p x-show="selectedIdx === null">选择左侧题目后，这里会显示目录、数据和代码状态。</p>
+                        <p x-show="selectedIdx !== null && sandboxInfo && !sandboxInfo.matched">未找到匹配的题目目录，请检查该题 `meta.json` 的 `display_name`。</p>
+                    </div>
+
+                    <div x-show="sandboxInfo && sandboxInfo.matched" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Problem Dir</p>
+                            <p class="font-mono text-[13px] text-cream truncate" x-text="sandboxInfo?.dir || '-'"></p>
+                        </div>
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Test Data</p>
+                            <p class="font-mono text-[13px] text-cream"><span x-text="sandboxInfo?.data_count || 0"></span> cases</p>
+                            <p class="text-[10px] text-cream-subtle mt-1">
+                                <span x-text="sandboxInfo?.sample_count || 0"></span> sample /
+                                <span x-text="sandboxInfo?.secret_count || 0"></span> secret
+                            </p>
+                        </div>
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Limits</p>
+                            <p class="font-mono text-[13px] text-cream">
+                                <span x-text="sandboxInfo?.limits?.time || 1"></span>s /
+                                <span x-text="sandboxInfo?.limits?.memory || 256"></span>MB
+                            </p>
+                        </div>
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Validator</p>
+                            <p class="font-mono text-[13px]" :class="sandboxInfo?.files?.validator ? 'text-success' : 'text-cream-subtle'" x-text="sandboxInfo?.files?.validator || 'missing'"></p>
+                        </div>
+                        <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
+                            <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Solutions</p>
+                            <p class="font-mono text-[13px] text-cream">
+                                <span x-text="(sandboxInfo?.files?.std || []).length"></span> std /
+                                <span x-text="(sandboxInfo?.files?.brute || []).length"></span> brute /
+                                <span x-text="(sandboxInfo?.files?.wrong || []).length"></span> wrong
+                            </p>
+                        </div>
+                    </div>
+
+                    <div x-show="sandboxInfo && sandboxInfo.runnable" class="rounded-xl border border-gold/20 bg-gold/[0.04] p-5 space-y-4">
+                        <div class="flex items-start justify-between gap-4">
+                            <div>
+                                <div class="flex items-center gap-2">
+                                    <h3 class="text-[13px] font-semibold text-cream">临时提交评测</h3>
+                                    <span class="px-2 py-0.5 rounded-full bg-success/10 text-success text-[10px] font-mono">isolated</span>
+                                </div>
+                                <p class="mt-1 text-[11px] text-cream-subtle">上传源码只会进入 <span class="font-mono text-gold">.probhub/submissions/&lt;task-id&gt;</span> 临时目录；不会覆盖题目原有 <span class="font-mono">code/</span> 文件。</p>
+                            </div>
+                            <span x-show="submissionLastRunAt" class="text-[10px] font-mono text-cream-subtle" x-text="submissionLastRunAt"></span>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-3 items-center">
+                            <label class="flex items-center gap-3 px-4 py-3 rounded-lg border border-dashed border-white/10 bg-ink-input/50 cursor-pointer hover:border-gold/35 transition-colors">
+                                <input x-ref="submissionFile" type="file" accept=".cpp,text/x-c++src" class="hidden" @change="handleSubmissionFile($event)">
+                                <span class="text-gold">＋</span>
+                                <span class="min-w-0">
+                                    <span class="block text-[12px] text-cream truncate" x-text="submissionFilename || '选择 UTF-8 C++ 源码（最大 1 MiB）'"></span>
+                                    <span class="block text-[10px] text-cream-subtle mt-0.5">仅接受单个 .cpp 文件</span>
+                                </span>
+                            </label>
+                            <div class="flex items-center gap-2">
+                                <button @click="cancelSubmission()" x-show="submissionRunning"
+                                        class="px-4 py-3 rounded-lg text-[12px] font-semibold border border-danger/30 text-danger hover:bg-danger/10 transition-colors">取消</button>
+                                <button @click="runSubmission()"
+                                        :disabled="submissionRunning || !submissionFilename"
+                                        class="px-5 py-3 rounded-lg text-[12px] font-semibold bg-gold text-ink-deep hover:bg-gold-light disabled:opacity-40 transition-colors">
+                                    <span x-show="!submissionRunning">上传并评测</span>
+                                    <span x-show="submissionRunning" class="animate-pulse">评测中...</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div x-show="submissionResult || submissionRunning" class="space-y-3">
+                            <div class="flex items-center gap-3">
+                                <span class="px-3 py-1 rounded font-mono text-[12px] font-semibold" :class="sandboxStatusClass(submissionVerdict)" x-text="submissionVerdict"></span>
+                                <span class="text-[11px] text-cream-subtle" x-text="submissionRunning ? '已进入独立评测任务' : submissionStatsText()"></span>
+                                <span x-show="submissionResult?.submission?.workspace_cleaned" class="text-[10px] text-success">临时工作区已清理</span>
+                            </div>
+                            <div x-show="submissionCompile() && submissionCompile().ok === false" class="rounded-lg bg-danger/10 border border-danger/20 p-3">
+                                <p class="text-[11px] font-medium text-danger mb-2">编译失败</p>
+                                <pre class="max-h-48 overflow-auto whitespace-pre-wrap text-[10px] font-mono text-cream-muted" x-text="submissionCompile()?.stderr || 'compiler failed'"></pre>
+                            </div>
+                            <div x-show="submissionCases().length > 0" class="rounded-lg border border-white/[0.03] overflow-hidden">
+                                <div class="max-h-72 overflow-auto">
+                                    <table class="w-full text-left text-[11px]">
+                                        <thead class="sticky top-0 bg-ink-card"><tr class="text-cream-subtle"><th class="px-3 py-2">Case</th><th class="px-3 py-2">Verdict</th><th class="px-3 py-2">Time</th><th class="px-3 py-2">Memory</th><th class="px-3 py-2">Message</th></tr></thead>
+                                        <tbody class="divide-y divide-white/[0.02]">
+                                            <template x-for="item in submissionCases()" :key="item.case">
+                                                <tr><td class="px-3 py-2 font-mono text-cream" x-text="item.case"></td><td class="px-3 py-2"><span class="px-2 py-0.5 rounded font-mono" :class="sandboxStatusClass(item.status)" x-text="item.status"></span></td><td class="px-3 py-2 font-mono text-cream-muted" x-text="item.time.toFixed(3) + 's'"></td><td class="px-3 py-2 font-mono text-cream-muted" x-text="item.memory == null ? '-' : item.memory.toFixed(1) + ' MiB'"></td><td class="px-3 py-2 text-cream-subtle" x-text="item.message || '-'"></td></tr>
+                                            </template>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div x-show="submissionLogs" class="terminal-panel rounded-lg overflow-hidden">
+                                <button @click="submissionLogOpen = !submissionLogOpen" class="w-full px-3 py-2 flex justify-between text-[10px] text-cream-subtle"><span>提交日志</span><span x-text="submissionLogOpen ? '收起' : '展开'"></span></button>
+                                <pre x-show="submissionLogOpen" class="max-h-56 overflow-auto px-3 pb-3 whitespace-pre-wrap text-[10px] font-mono text-cream-muted" x-text="submissionLogs"></pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 xl:grid-cols-4 gap-3" x-show="selectedIdx !== null && sandboxResult">
+                        <template x-for="card in sandboxCards()" :key="card.key">
+                            <div class="rounded-xl border p-4 transition-colors"
+                                 :class="card.ok ? 'bg-success/10 border-success/20' : (card.warn ? 'bg-gold/10 border-gold/20' : 'bg-danger/10 border-danger/25')">
+                                <div class="flex items-center justify-between mb-2">
+                                    <span class="text-[11px] uppercase tracking-wide text-cream-muted" x-text="card.title"></span>
+                                    <span class="text-[10px] font-mono px-2 py-0.5 rounded"
+                                          :class="card.ok ? 'bg-success/15 text-success' : (card.warn ? 'bg-gold/15 text-gold' : 'bg-danger/15 text-danger')"
+                                          x-text="card.status"></span>
+                                </div>
+                                <p class="text-[13px] text-cream" x-text="card.detail"></p>
+                            </div>
+                        </template>
+                    </div>
+
+                    <div x-show="selectedIdx !== null && sandboxMatrixRows().length > 0" class="rounded-xl border border-white/[0.02] overflow-hidden bg-ink-input/30">
+                        <div class="px-4 py-3 border-b border-white/[0.02] flex items-center justify-between">
+                            <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">用例矩阵</h3>
+                            <span class="text-[10px] font-mono text-cream-subtle" x-text="sandboxMatrixPrograms().length + ' programs'"></span>
+                        </div>
+                        <div class="overflow-auto max-h-[360px]">
+                            <table class="w-full text-left text-[12px]">
+                                <thead class="sticky top-0 bg-ink-card z-10">
+                                    <tr class="border-b border-white/[0.02]">
+                                        <th class="px-3 py-2 font-mono text-cream-subtle">case</th>
+                                        <template x-for="prog in sandboxMatrixPrograms()" :key="prog">
+                                            <th class="px-3 py-2 font-mono text-cream-subtle" x-text="prog"></th>
+                                        </template>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="row in sandboxMatrixRows()" :key="row.case">
+                                        <tr class="border-b border-white/[0.015]">
+                                            <td class="px-3 py-2 font-mono text-cream-muted">
+                                                <span x-text="row.case"></span>
+                                                <span x-show="row.groups.length" class="block mt-1 text-[9px] text-gold" x-text="row.groups.join(', ')"></span>
+                                            </td>
+                                            <template x-for="prog in sandboxMatrixPrograms()" :key="prog">
+                                                <td class="px-3 py-2">
+                                                    <span class="inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px]"
+                                                          :class="sandboxStatusClass(row.results[prog]?.status)"
+                                                          x-text="row.results[prog] ? row.results[prog].status + ' ' + row.results[prog].time.toFixed(3) + 's' : '-'"></span>
+                                                </td>
+                                            </template>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div x-show="selectedIdx !== null && sandboxExpectationRows().length > 0" class="rounded-xl border border-white/[0.02] overflow-hidden bg-ink-input/30">
+                        <div class="px-4 py-3 border-b border-white/[0.02] flex items-center justify-between">
+                            <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">宿命断言</h3>
+                            <span class="text-[10px] font-mono text-cream-subtle" x-text="sandboxExpectationRows().length + ' programs'"></span>
+                        </div>
+                        <div class="divide-y divide-white/[0.02]">
+                            <template x-for="exp in sandboxExpectationRows()" :key="exp.program">
+                                <div class="px-4 py-3 grid grid-cols-1 md:grid-cols-[minmax(0,1.4fr)_auto_minmax(0,1fr)_minmax(0,1.4fr)] gap-2 md:gap-4 items-center text-[11px]">
+                                    <div>
+                                        <p class="font-mono text-cream" x-text="exp.program"></p>
+                                        <p class="text-cream-subtle mt-1" x-text="'status ' + (exp.expected_statuses || []).join('/') + ' · forbid ' + ((exp.forbidden_statuses || []).join('/') || '-')"></p>
+                                    </div>
+                                    <span class="font-mono px-2 py-0.5 rounded" :class="exp.ok ? 'bg-success/15 text-success' : 'bg-danger/15 text-danger'" x-text="exp.ok ? 'PASS' : 'FAIL'"></span>
+                                    <p class="font-mono text-gold" x-text="(exp.groups && exp.groups.length) ? exp.groups.join(', ') : 'all cases'"></p>
+                                    <p class="font-mono text-cream-subtle" x-text="sandboxFirstRelevant(exp) ? sandboxFirstRelevant(exp).case + ' → ' + sandboxFirstRelevant(exp).status : '-' "></p>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div x-show="selectedIdx !== null" class="terminal-panel rounded-xl overflow-hidden">
+                        <button @click="sandboxLogOpen = !sandboxLogOpen" class="w-full px-4 py-3 flex items-center justify-between text-left">
+                            <span class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">原始日志</span>
+                            <span class="text-[11px] text-cream-subtle" x-text="sandboxLogOpen ? '收起' : '展开'"></span>
+                        </button>
+                        <pre x-show="sandboxLogOpen" x-collapse class="max-h-[320px] overflow-auto px-4 pb-4 text-[11px] leading-relaxed font-mono text-cream-muted whitespace-pre-wrap" x-text="sandboxLogs || '暂无日志。'"></pre>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script src="/webui/assets/app.js"></script>
+</body>
+</html>
