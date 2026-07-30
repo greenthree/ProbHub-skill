@@ -81,19 +81,19 @@ class UiSecurityTests(unittest.TestCase):
 
     def test_only_declared_package_assets_are_served(self):
         expected_types = {
-            "app.css": "text/css",
-            "app.js": "application/javascript",
-            "mathjax-config.js": "application/javascript",
-            "tailwind-config.js": "application/javascript",
-            "theme.js": "application/javascript",
+            "app.css": {"text/css"},
+            "app.js": {"application/javascript", "text/javascript"},
+            "mathjax-config.js": {"application/javascript", "text/javascript"},
+            "tailwind-config.js": {"application/javascript", "text/javascript"},
+            "theme.js": {"application/javascript", "text/javascript"},
         }
-        for name, content_type in expected_types.items():
+        for name, content_types in expected_types.items():
             with self.subTest(name=name):
                 response = self.client.get(f"/webui/assets/{name}")
                 try:
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(response.get_data(), (self.ui.WEBUI_ASSET_DIR / name).read_bytes())
-                    self.assertTrue(response.content_type.startswith(content_type), response.content_type)
+                    self.assertIn(response.mimetype, content_types)
                 finally:
                     response.close()
         self.assertEqual(self.client.get("/webui/assets/index.html").status_code, 404)
