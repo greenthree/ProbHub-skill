@@ -1,634 +1,334 @@
-# ProbHub Skill
+# ProbHub
 
 ![ProbHub Logo](logo.svg)
 
-ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工作流。它把题面整理、数据生成、标准程序与错解验证、Typst 组卷、单题 PDF 裁剪、WebUI 微调和 DOMjudge 打包串成一条可由 Agent 执行的流程，尽量减少出题过程中重复、易错、但又必须严谨完成的杂活。
+**把一道算法竞赛题，从想法整理成可测试的题目、排版好的 PDF 和可上传 DOMjudge 的 ZIP。**
 
-> 适合场景：从一个题目 idea 或现有题面出发，快速生成一份可自检、可排版、可上传 DOMjudge 的题目目录。
+ProbHub 是一套在本机运行的 ACM/ICPC 出题工具。你可以使用 WebUI 编辑题面，也可以让 Codex、Claude Code 等 Agent 按固定流程协助出题。ProbHub 会把题面、程序、数据、测试、组卷和打包连接起来，减少重复操作和漏检。
 
----
+[查看排版示例](https://github.com/greenthree/ProbHub-skill/blob/main/typst-template/%E6%AD%A3%E5%BC%8F%E8%B5%9B/main.pdf) · [npm](https://www.npmjs.com/package/probhub) · [GitHub Releases](https://github.com/greenthree/ProbHub-skill/releases)
 
-## 核心能力
+## ProbHub 能做什么
 
-- **Agent 驱动出题**：内置 [SKILL.md](SKILL.md)，让 Claude Code、Codex 或兼容 Agent 按固定流程完成出题任务。
-- **严谨数据闭环**：`probhub gen` 按 recipe 复现 secret 数据和答案；数据逻辑分组、结构化宿命与 Checker 复核共同保证生成结果可追踪、可验证。
-- **可复现差分测试**：`probhub stress` 按 seed 对拍 accepted 与 brute，也可用 `--against` 给指定错解找 killer，并把反例一键固化为分组数据与生成配方。
-- **跨平台资源控制**：共享 `probhub/process_control.py` 为普通程序、Checker、Validator、编译器、Interactor 和 stress 提供完整进程树清理、时间/内存/输出/进程数限制，并报告 TLE/MLE/OLE/RE/WA/AC。
-- **本机限制校准**：Judge 汇总每个解法的最大用时、TL 占比和 TLE/MLE/OLE 击杀余量；lint/status 读取最近一次完整成功的本地证据，按可配置阈值提示余量不足，并明确本机结果不等于目标 Linux/DOMjudge 承诺。
-- **题面与样例体检**：lint 确定性检查题面标题、章节、样例来源和问题内路径，并以非阻断报告对照题面范围与 Validator 字面量；`sample-check` 只运行样例和首个 accepted，严格确认 `.ans` 与当前标程输出一致。
-- **双实现互证与运行域**：accepted 可记录算法/关键实现独立性；较慢参考解可通过 `run_on` 只覆盖可承受的数据组，同时保留样例必跑、期望覆盖栅栏和高难度单标程 warning。
-- **整场只读体检**：`probhub report` 汇总题号、难度、标签、测试规模、数据组配比、recipe 覆盖、TL 余量和错解击杀矩阵；支持终端、Markdown 与 JSON，不写正式工作区路径。
-- **Typst 高速排版**：使用 Typst 模板生成全卷 PDF，并能按题目自动裁剪出独立 `problem.pdf`。
-- **WebUI 出题工作台**：提供响应式明暗双主题控制台，支持题目导航与排序、Markdown 和题面图片预览、题面/样例/封面编辑、revision 冲突保护、隔离 PDF 编译预览及临时代码沙箱评测，正式分发统一调用 Core。
-- **可重复构建 Core**：Workspace Schema v1、不可变 checkpoint/generation、sealed revision 正式发布门禁、Manifest v3、过期检测和统一 `probhub` CLI。
-- **DOMjudge 交付验证**：从规范源生成确定性 `.zip`，以小写 `.in`/`.ans` 和 LF-only 字节流发布测试数据；验包在解析中央目录前限制归档大小和条目数，拒绝路径/大小写冲突、可执行文件与缓存，并可对账题名/限制/Judge 类型、运行输入 Validator 和编译包内 output validator。
+一次典型的出题流程是：
 
-示例 PDF：
-[真实赛事 Typst 题面排版示例](https://github.com/greenthree/ProbHub-skill/blob/main/typst-template/%E6%AD%A3%E5%BC%8F%E8%B5%9B/main.pdf)
+1. 写下题目想法、已有题面或约束。
+2. 完成题面、标准程序、暴力程序、错解、数据生成器和 Validator。
+3. 在本机检查样例，运行所有测试数据，并用 stress 随机对拍。
+4. 生成整场试卷和单题 PDF。
+5. 生成并验证 DOMjudge 题目包。
 
-> 该 PDF 是有意入库的排版效果样例；`typst-template/` 下的其他 PDF 均视为构建产物，已被 `.gitignore` 排除。
+ProbHub 会在这条流程中提供：
 
----
+- 面向出题人的 WebUI，支持题面、样例、限制、封面和题序编辑；
+- 面向 Agent 的 Skill，让 Agent 了解规范文件、验证顺序和交付标准；
+- standard、custom checker、浮点比较和 interactive 四类常见评测场景；
+- AC、WA、TLE、MLE、OLE、RE、FAIL 等结果和完整进程树清理；
+- 可复现的数据生成、差分测试、反例重放和错解击杀矩阵；
+- Typst 全卷排版、单题 PDF、DOMjudge ZIP 和交付前验包；
+- Windows 与 Ubuntu 双平台 CI 验证。
 
-## 快速安装
+## 快速开始
 
-Skill 自举默认只向显式 Python 虚拟环境安装依赖，避免修改受 PEP 668 管理的系统 Python。先创建并激活专用环境，再安装完整主包并执行 Skill 注入。
+### 1. 安装 Skill
+
+安装前请确认已安装 Node.js 18 或更高版本（包含 npm），以及 Python 3.10 或更高版本。安装 Skill 时会把 Flask、PyYAML 和 pypdf 等依赖安装到当前 `python` 指向的环境；下面的命令显式允许这次安装。
 
 Windows PowerShell：
 
 ```powershell
-py -3 -m venv "$HOME\.probhub\venv"
-& "$HOME\.probhub\venv\Scripts\Activate.ps1"
 npm install -g probhub
+$env:PROBHUB_ALLOW_SYSTEM_PYTHON = "1"
 probhub-skill
 probhub doctor
 ```
 
-Linux/macOS：
+Ubuntu/Linux：
 
 ```bash
-python3 -m venv ~/.probhub/venv
-source ~/.probhub/venv/bin/activate
 npm install -g probhub
-probhub-skill
+PROBHUB_ALLOW_SYSTEM_PYTHON=1 probhub-skill
 probhub doctor
 ```
 
-后续终端继续激活该环境，或把 `PYTHON` 指向它的解释器。只有明确接受修改当前系统 Python 时才设置 `PROBHUB_ALLOW_SYSTEM_PYTHON=1`。
+`probhub doctor` 会列出 Python、Node.js、npm、`g++`、Typst、字体和 Python 依赖的实际状态。先修复其中的错误，再继续创建题目。
 
-只需临时注入 Skill 时，也应在上述虚拟环境中使用轻量入口包：
-
-```bash
-npx probhub-skill
-```
-
-`probhub` 包含 Python Core、CLI、WebUI、Skill 和 references；`probhub-skill` 依赖相同版本的 `probhub` 并提供命令转发，不复制功能实现。
-
-安装脚本会把 skill 注入到两个常见 Agent 目录：
+`probhub-skill` 还会把 Agent Skill 安装到：
 
 ```text
 ~/.claude/skills/probhub
 ~/.agents/skills/probhub
 ```
 
-如果希望只安装到当前项目目录，可以使用：
+只想临时安装 Skill 时可以运行 `npx probhub-skill`；只想安装到当前项目时使用 `npx probhub-skill --local`。
 
-```bash
-npx probhub-skill --local
-```
+### 2. 调用 Agent
 
-这会写入：
+在准备存放比赛文件的目录中打开 Codex、Claude Code 或其他兼容 Agent，然后直接描述需求。
 
-```text
-./.claude/skills/probhub
-./.agents/skills/probhub
-```
-
----
-
-## 环境依赖
-
-ProbHub 会尽量自动安装 Python 依赖，但底层编译和排版仍依赖本机环境。
-
-### 基础工具
-
-- Node.js 18+ / npm
-- Python 3.10+
-- GCC/G++，用于编译 C++ 标程、验证器、checker 和 interactor
-- Typst 0.14.2
-
-### Python 包
-
-```bash
-pip install -r requirements.txt
-```
-
-需要使用 CYaRon 数据生成器时再额外安装：
-
-```bash
-pip install cyaron
-```
-
-### Typst
-
-macOS：
-
-```bash
-brew install typst
-```
-
-Windows：
-
-```powershell
-winget install typst
-```
-
-也可以从 [Typst v0.14.2](https://github.com/typst/typst/releases/tag/v0.14.2) 下载可执行文件。执行 `probhub doctor` 会拒绝与固定交付工具链不一致的 Typst 版本。
-
-### 字体
-
-模板兼容下列字体。正式交付要求 `Noto Sans CJK SC`；`probhub doctor` 会通过 `typst fonts` 检查它。Windows/Ubuntu CI 固定使用下述字体文件并禁用系统字体搜索，以保证跨平台复现。
-
-- `Noto Sans CJK SC`（固定 CI/发布验证环境）
-- `New Computer Modern Math`
-- `New Computer Modern Mono`
-- `KaiTi`
-- `STZhongSong`
-- `Microsoft YaHei`
-- `SimSun` / `simsun`
-
-安装与 CI 相同的固定字体文件：
-
-```powershell
-$fontDir = "$HOME\.probhub\fonts"
-New-Item -ItemType Directory -Force $fontDir | Out-Null
-Invoke-WebRequest "https://raw.githubusercontent.com/notofonts/noto-cjk/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf" -OutFile "$fontDir\NotoSansCJKsc-Regular.otf"
-if ((Get-FileHash -Algorithm SHA256 "$fontDir\NotoSansCJKsc-Regular.otf").Hash.ToLowerInvariant() -ne "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b") { throw "font checksum mismatch" }
-$env:TYPST_FONT_PATHS = $fontDir
-```
-
-```bash
-font_dir="$HOME/.probhub/fonts"
-mkdir -p "$font_dir"
-curl -fL "https://raw.githubusercontent.com/notofonts/noto-cjk/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf" -o "$font_dir/NotoSansCJKsc-Regular.otf"
-echo "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b  $font_dir/NotoSansCJKsc-Regular.otf" | sha256sum -c -
-export TYPST_FONT_PATHS="$font_dir"
-```
-
-固定文件的 SHA-256 为 `2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b`。把 `TYPST_FONT_PATHS` 写入终端配置后再运行 `probhub doctor`。
-
----
-
-## ProbHub CLI 与 Workspace Schema v1
-
-`0.3.0` 开始，推荐让 Skill 编排统一 CLI，而不是手工串联脚本：
-
-```powershell
-probhub doctor
-probhub init . --title "Contest" --subtitle "正式赛" --author "Team"
-probhub new L05 --name "新题"
-probhub lint L01
-probhub status
-probhub report                    # 终端整场体检
-probhub report --format markdown  # Markdown 报告
-probhub gen L01              # 只读计划
-probhub gen L01 --apply      # 事务化生成数据与答案
-probhub sample-check L01     # 只运行样例与首个 accepted
-probhub judge L01
-probhub judge L01 --no-cache  # 强制完整重跑并刷新缓存
-probhub stress L01 --rounds 10000 --seed 12345
-probhub stress L01 --against code/wrong.cpp --fixate killer01
-probhub checkpoint L01        # 发布并行组卷使用的不可变草稿
-probhub seal L01 --no-cache   # 验证、冻结并生成一版完整试卷
-probhub generation-status
-probhub typeset L01
-probhub package L01
-probhub build L01
-probhub build             # 构建全工作区
-probhub verify-package L01.zip --require-pdf
-probhub --workspace . verify-package L01.zip --require-pdf --problem L01  # 深度复核
-```
-
-如果 npm bin 不在 PATH，可使用 Skill/工作区中的兼容入口：
-
-```powershell
-python scripts/probhub.py build L01
-```
-
-Schema v1 使用以下事实来源：
+从零创建比赛：
 
 ```text
-.probhub/workspace.yaml    # 赛事配置、题目顺序、Typst 集合
-L01/probhub.yaml           # 稳定 ID、限制、代码矩阵和数据目录
-L01/problem.md             # 题面描述、输入、输出和提示
-L01/code/                   # 全部 C++ 源码与本地编译产物
-L01/data/sample/           # 样例唯一来源
-L01/data/secret/           # 隐藏数据唯一来源
+使用 probhub 技能，帮我创建一场算法竞赛，并先完成第一道题。
+题目想法是：……
+请完成题面、程序、数据、验证、组卷和 DOMjudge 题目包。
 ```
 
-以下均为构建产物，不应手工维护：
-
-- `meta.json`
-- Typst `problems.json`
-- `problem.yaml` 与 `domjudge-problem.ini`
-- `problem.pdf`、全卷 PDF 和 DOMjudge ZIP
-- `.probhub/build-manifest.json`
-
-本地诊断目录 `.probhub/stress/` 保存差分反例；`.probhub/checkpoints/` 保存题目 revision，`.probhub/generations/` 保存内容寻址的完整试卷预览。这些目录都不属于正式构建产物，也不应提交。
-
-并行出题时，每个任务可在开发过程中运行 `checkpoint`，完成 lint、judge 和配置的 stress 后运行 `seal`。`seal` 只读取其他题目最后发布的 checkpoint，并立即返回一份隔离的完整试卷；其他任务可以继续修改 live 目录，不需要等待统一构建。预览 generation 不覆盖正式 PDF、ZIP、metadata 或 Manifest，完整协议见 [`references/generations.md`](references/generations.md)。
-
-全部题目 seal 后，`probhub build` 才进入正式发布：它先取得跨平台工作区写锁，确认整场所有 sealed revision 与 live 输入一致，再建立快照并完成 lint、沙箱、元数据、Typst、单题 PDF、DOMjudge ZIP 和 Manifest。多 ID build 只编译一次完整 Typst 集合；发布前会再次复核 live 输入与 sealed revisions。Manifest v3 为所选题目记录同一 `batch_id` 和各自 `sealed_revision_id`；`probhub status` 会报告 `current`、`stale` 或 `never-built`。
-
-build、gen 和 fixate 的正式写入共用同一工作区锁与恢复屏障。硬中断留下的 journal 会由下一次 writer 在读取题目配置前统一恢复；在恢复完成前，lint、status、judge 等只读命令返回 `recovery_required`，不会把半发布状态误报为有效结果。成功提交使用 committed 标记，因此即使事务目录暂时无法清理，后续恢复也不会撤销已发布内容。
-
-完整命令语法、单题/多题操作、缓存语义与故障处理见 [`references/cli.md`](references/cli.md)。无 `.probhub/workspace.yaml` 的旧工作区流程已独立整理到 [`references/legacy-workflow.md`](references/legacy-workflow.md)，Schema v1 工作区不要混用。
-
----
-
-## 基本用法
-
-在一个题目工作区中启动你的 Agent 工具，例如 Claude Code：
-
-```bash
-claude
-```
-
-然后告诉它：
+维护已有题目：
 
 ```text
-使用 probhub 技能，我要出一道新题。
+使用 probhub 技能，继续完善 L01。
+请检查题面、标准程序、Validator、暴力程序、典型错解和测试数据，
+完成 judge、stress、seal 和最终构建，不要修改其他题目。
 ```
 
-你可以提供：
+你可以提供题目想法、已有 Markdown、PDF、网页、代码或数据。Agent 会根据 [SKILL.md](SKILL.md) 调用同一套 ProbHub Core；你只需要审查题意、算法、数据强度和最终 PDF。
 
-- 一个题目 idea
-- 现有 Markdown 题面
-- PDF 题面
-- 网页 URL
-- 已有代码或数据约束
+## 环境要求
 
-Agent 会按 [SKILL.md](SKILL.md) 中的流程推进：
+ProbHub 已在 Windows 和 Ubuntu 上持续测试。macOS 通常可以运行，但目前不是发布 CI 的强制验证平台。
 
-1. 确立题面、中文题名和英文目录名。
-2. 判断是否需要 checker、interactor 或特殊评测。
-3. 在 `code/` 中编写 `std.cpp`、`validator.cpp`、`brute.cpp`、`wrong.cpp` 和数据生成器。
-4. 生成 `data/sample` 与 `data/secret`。
-5. 运行本地沙箱自检。
-6. 加入 Typst 组卷并裁剪 `problem.pdf`。
-7. 按需生成 DOMjudge 题目包。
+| 工具 | 要求 | 用途 |
+|---|---:|---|
+| [Python](https://www.python.org/downloads/) | 3.10 或更高 | 运行 ProbHub Core |
+| [Node.js](https://nodejs.org/) | 18 或更高 | 安装 `probhub` 命令和 Agent Skill |
+| `g++` | 支持 C++17 | 编译标程、Validator 和 Checker |
+| [Typst](https://github.com/typst/typst/releases/tag/v0.14.2) | 0.14.2 | 生成 PDF |
+| Noto Sans CJK SC | 固定中文字体 | 保证题面中文正常显示 |
 
----
+<details>
+<summary>g++、Typst 或中文字体安装提示</summary>
 
-## 本地沙箱自检
+Windows 推荐使用 [MSYS2](https://www.msys2.org/) 安装 `g++`，并把其 UCRT64 `bin` 目录加入 `PATH`。Typst 请下载 `typst-x86_64-pc-windows-msvc.zip`，解压后把 `typst.exe` 所在目录加入 `PATH`。
 
-对题目目录执行：
+Ubuntu 可以安装编译器：
 
 ```bash
-python scripts/local_judge.py <problem_dir> --jsonl
+sudo apt update
+sudo apt install -y g++
 ```
 
-自动化流程以退出码和最后一个 JSONL 事件为准。成功事件固定为：
-
-```json
-{"protocol":"probhub.local_judge","protocol_version":1,"type":"final","ok":true,"status":"passed","code":"all_expectations_met","exit_code":0,"message":"..."}
-```
-
-不带 `--jsonl` 时仍会输出适合人工阅读的文本，但调用方不应匹配自然语言成功提示。
-
-`local_judge.py` 会检查：
-
-- `probhub.yaml` 中 `judge.validator` 指向的验证器是否接受所有输入数据。
-- `solutions.accepted` 指向的程序是否全部 AC。
-- 首个 accepted 是否保持全量运行；第二及后续 accepted 的 `run_on` 是否只引用有效数据组，且完整公开实际执行与跳过用例。
-- accepted 的 `independence` 是否包含可人工复核的来源、依据和说明；Core 会拒绝同路径、同字节或直接 include 复用等确定反证，但不会冒充算法独立性证明。
-- 首个 accepted 在每个样例上的原始输出是否与 `.ans` 经换行归一后字节一致；Custom Checker 接受非唯一输出也不能绕过该不变量。
-- `solutions.brute` 指向的程序是否不 WA，并且至少出现 TLE、MLE 或 OLE，用于证明强数据足够强。
-- `solutions.wrong` 指向的程序是否不能全 AC。
-- `judge.type: standard` 的普通题按行比较，允许每行末尾多余的空格或 Tab；行内空格和内部换行仍严格检查。
-- `judge.type: custom` 时，使用 `code/checker.cpp` 按 DOMjudge/testlib 协议判定输出。
-- `judge.type: interactive` 时，将选手程序与 `code/interactor.cpp` 双向连接，执行总时间/空闲超时，并记录双向原子共享字节上限、支持跨块 UTF-8 解码的 Transcript。
-- 每个测试点的时间、内存、输出和进程数状态，以及 Checker/Interactor 判定信息；选手输出超过限制时报告 `OLE`。
-- 普通程序、Checker、Validator、编译器、Interactor 与 stress 统一使用完整进程树控制；即使父进程正常退出，残留后代也会被清理。
-- `data.groups` 与 `solutions.*[].expected` 定义的数据组击杀矩阵、目标/禁止状态和首个相关用例；详见 `references/data-groups-expectations.md`。
-- `difficulty >= 4` 且缺少额外全域 AC 参考实现时给出结构化 warning；只在局部组运行的参考解不会消除该提示。
-- 每个解法的 `max_time`、最大用例、TL 占比和资源击杀余量。默认建议 accepted 满足 `max_time × 3 <= TL`；期望 TLE 的目标用例通过延长探针证明至少 `1.5 × TL` 的本机运行下界。
-
-完整成功的 Judge 会原子更新本地忽略文件 `<problem>/.probhub/judge-evidence-v2.json`。失败、取消或超时保留上一份成功证据；lint/status 先按 schema、当前 source/data hash 与平台识别过期证据，再验证测量策略、结构和每个解法的运行域。Windows 与 Linux/DOMjudge 的启动、调度、计时和内存口径不同，正式限制仍需在目标 Linux 评测环境重新校准。
-
-### 沙箱增量缓存
-
-沙箱会把本地缓存写入 `<problem>/.probhub/sandbox-cache-v1.json`：
-
-- C++ 编译缓存按源码、相关头文件、编译参数、编译器和平台指纹失效。
-- Validator 结果按验证器指纹和输入文件内容失效。
-- 程序逐点结果按程序指纹、输入、答案、时限、内存、输出上限、进程数上限、平台和沙箱策略失效。
-- 修改单个数据点时，只重新验证和运行受影响的测试点；没有相关改动时，重复沙箱通常只需读取缓存。
-
-缓存文件是本地产物，不应提交。需要排查非确定性程序或强制完整重跑并刷新缓存时使用：
-
-```powershell
-probhub judge L01 --no-cache
-probhub build L01 --no-cache
-```
-
-JSONL 的 `compile`、`validator`、`case` 事件包含 `cached` 字段，结束前会输出 `type=cache` 的命中统计。WebUI 使用同一协议展示缓存状态。资源控制语义变化时缓存 Schema 会升级，旧结果不会绕过新的 OLE、进程树或进程数规则。
-
-### 进程与资源控制
-
-题目级资源限制写在 `probhub.yaml`：
-
-```yaml
-limits:
-  time: 1       # 秒
-  memory: 256   # MiB
-  output: 64    # MiB，默认 64
-  processes: 32 # 整棵进程树，默认 32
-```
-
-- `limits.output` 限制一次受控运行写出的 stdout 与 stderr 总量；超过后立即终止完整进程树、截断已保存的诊断文件，并把选手程序判为 `OLE`。Checker、Validator、Generator、编译器或 Interactor 自身超限属于题目基础设施失败。
-- `limits.processes` 限制整棵进程树。普通父进程即使先正常退出，ProbHub 仍会清理遗留后代。
-- Windows 使用 Job Object 约束进程树、总内存和活动进程数；无法建立 Job 时 fail closed，不会降级为无保护执行。
-- Linux/Unix 使用独立进程组、`RLIMIT_AS` 和低频 `/proc` 进程树监控；超时、超限、异常和正常退出路径都会清理后代。
-- 编译器、Validator、Checker 和 stress 工具使用独立的内部诊断上限，但共享相同的进程树控制。
-
-完整状态语义、平台差异、截断行为和缓存规则见 [`references/process-control.md`](references/process-control.md)。
-
-### 差分测试（stress）
-
-在题目的 `probhub.yaml` 中配置小数据生成器：
-
-```yaml
-stress:
-  generator: code/stress_generator.cpp
-  args: ["{seed}", "{round}"]
-  rounds: 1000
-  time_limit: 5
-  tool_timeout: 5
-  # accepted/brute 可省略，默认取 solutions 中的第一项
-  accepted: code/std.cpp
-  brute: code/brute.cpp
-```
-
-生成器每轮把一个完整测试点写到 stdout；stderr 只用于日志。第 `round` 轮 seed 为 `master_seed + round - 1`，其中 round 从 1 开始。常用命令：
-
-```powershell
-probhub stress L01 --rounds 10000 --seed 12345
-probhub stress L01 --replay latest
-```
-
-- `standard` 题沿用普通沙箱的逐行比较规则，允许整个输出首尾空白和每行行尾空格/Tab。
-- `custom` 题把 accepted 输出作为 jury answer、brute 输出作为 contestant output，交给 `judge.checker` 判定。
-- 首个不匹配、程序异常或工具失败会停止测试，并写入 `<problem>/.probhub/stress/`；结果包含可直接执行的 `replay_command`。Generator、Validator、accepted、brute、Checker 和编译器都使用同一进程树控制，输出超限会被截断并记录为 `OLE` 或基础设施失败。
-- `interactive` 暂不支持 stress。
-- 全部轮次或 replay 通过时退出码为 `0`；反例、基础设施失败、配置或编译错误为 `1`；Ctrl+C 为 `130`。
-
-完整 Schema、Generator 协议、反例目录、失败分类与 replay 语义见 [`references/stress.md`](references/stress.md)。
-
-资源限制读取优先级：
-
-1. `<problem_dir>/probhub.yaml` 中的 `limits.time`、`limits.memory`、`limits.output` 和 `limits.processes`
-2. Legacy 工作区的 `meta.json`、`domjudge-problem.ini` 与 `problem.yaml` 提供时间和内存；输出与进程数仍使用默认值
-3. 默认 `1s / 256MiB / 64MiB output / 32 processes`
-
----
-
-## Typst 组卷
-
-第一次组卷时，ProbHub 会创建类似结构：
+Typst 请使用上方链接中的 0.14.2 固定版本。Noto Sans CJK SC 固定字体可从下列地址下载：
 
 ```text
-typst-statement/
-├── lib.typ
-├── problems-sample.json
-├── usts.png
-└── <subtitle>/
-    ├── main.typ
-    ├── problems.typ
-    └── problems.json
+https://raw.githubusercontent.com/notofonts/noto-cjk/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf
 ```
 
-单题元数据写入 `<problem_dir>/meta.json`，再通过脚本合并到对应卷的 `problems.json`：
+Windows 可以双击字体文件安装；Linux 可以把它放入 `~/.local/share/fonts/` 后执行 `fc-cache -f`。如果不想安装到系统，也可以把字体所在目录设置为 `TYPST_FONT_PATHS`。
+
+</details>
+
+## WebUI 与 CLI
+
+### WebUI：适合第一次使用
+
+进入包含 `.probhub/workspace.yaml` 的比赛目录后运行：
 
 ```bash
-python scripts/add_problem.py typst-statement/<subtitle>/problems.json <problem_dir>/meta.json
-```
-
-编译并裁剪单题 PDF：
-
-```bash
-python scripts/extract_new_problem.py typst-statement/<subtitle> <problem_dir>
-```
-
-裁剪策略：
-
-- 新增最后一题：使用页数差值提取新增页面。
-- 修改旧题：扫描 PDF 中的 `题目 X. 题名` 标题定位页面范围。
-
----
-
-## WebUI 控制台
-
-WebUI 由当前安装的 `probhub` 主包提供。进入 Workspace Schema v1 工作区后前台启动，方便随时退出：
-
-```powershell
 probhub ui
 ```
 
-浏览器会打开：
+WebUI 的“编译”用于隔离预览；“分发”才会正式生成 PDF、ZIP 和构建记录。导航、翻页和普通预览不会替代正式验证。服务只监听本机 `127.0.0.1`。
 
-```text
-http://127.0.0.1:33933
-```
+不希望自动打开浏览器时使用：
 
-不需要自动打开浏览器时使用：
-
-```powershell
+```bash
 probhub ui --no-browser
 ```
 
-CI 或排查安装问题可执行 `probhub --json ui --check`，只验证 workspace 与打包 WebUI 可导入，不启动服务。赛事仓库无需复制 `probhub/`、`scripts/ui.py`、`scripts/local_judge.py` 或 references；需要兼容旧命令时，只保留调用已安装 CLI 的薄入口。
+### CLI：需要手动控制流程时使用
 
-控制台支持：
+Agent 和 WebUI 都会调用同一套 Core。只有需要手动排查或编排流程时，才需要直接使用 CLI：
 
-- 拖拽排序题目。
-- 编辑题面、输入输出格式、提示和样例。
-- 编辑难度、标签、时间限制、内存限制。
-- 添加或移除题面引言 Quote。
-- 编译全卷 PDF。
-- 将每题 `problem.pdf` 分发回题目目录，并同步注入已有 zip。
-- 运行本地沙箱并展示逐点结果。
+| 命令 | 用途 |
+|---|---|
+| `probhub doctor` | 检查安装环境 |
+| `probhub ui` | 启动 WebUI |
+| `probhub lint L01` | 检查目录、配置和题面结构 |
+| `probhub judge L01` | 编译并运行 Validator、标程、暴力和错解 |
+| `probhub stress L01 --rounds 1000 --seed 12345` | 用随机小数据对拍 |
+| `probhub seal L01 --no-cache` | 验证并冻结当前题目版本 |
+| `probhub build L01 --no-cache` | 正式生成 PDF、ZIP 和 Manifest |
+| `probhub status L01` | 检查产物是否过期 |
 
-WebUI 支持在“沙箱评测”页上传单个 UTF-8 `.cpp` 文件并直接评测：
+完整参数见 [CLI 手册](references/cli.md)。
 
-- 源码大小上限为 `1 MiB`，每次提交使用唯一 task ID；
-- 源码、临时配置、编译产物和输出只写入 `.probhub/submissions/<task-id>/`；
-- 评测复用普通题、Custom Checker 和交互题的同一套 Core 与进程控制；
-- 页面展示编译诊断、逐测试点 AC/WA/TLE/MLE/OLE/RE 和汇总结果；
-- 排队中或运行中的任务可以取消；取消请求先通知评测 Core，超时后再强制清理监督进程及其后代进程树；
-- 任务结束或取消后自动删除临时工作区；服务启动和接受新提交时也会清理超过 24 小时的安全 UUID 遗留目录；
-- 题目原有 `code/`、数据、配置、答案和构建产物不会被覆盖。
+## 一道题由哪些文件组成
 
-WebUI 的上传任务由后台线程监督独立评测子进程。`CANCELLING` 表示正在协作停止，`CANCELLED` 表示进程树与临时工作区已完成清理。请勿把上传源码写入题目目录或将临时提交目录加入版本控制。
-
----
-
-## DOMjudge 打包约定
-
-每道题建议保持如下结构：
+创建 `L01` 后，主要目录如下：
 
 ```text
-<problem_dir>/
-├── probhub.yaml             # 规范配置与代码调用路径
-├── problem.md               # 规范题面源文件
+L01/
+├── probhub.yaml
+├── problem.md
 ├── code/
 │   ├── std.cpp
 │   ├── validator.cpp
 │   ├── brute.cpp
-│   ├── wrong.cpp
-│   ├── inmaker.cpp
-│   ├── checker.cpp          # 可选，非唯一答案时需要
-│   ├── interactor.cpp       # 可选，交互题需要
-│   └── *.exe                # 本地编译产物，不跟踪
-├── meta.json                # Core 生成
-├── problem.pdf              # Core 生成
-├── domjudge-problem.ini     # Core 生成
-├── problem.yaml             # Core 生成
-├── data/
-│   ├── sample/
-│   │   ├── 1.in
-│   │   └── 1.ans
-│   └── secret/
-│       ├── 2.in
-│       └── 2.ans
-└── output_validators/        # 自定义 checker/interactor 时使用
+│   └── wrong.cpp
+└── data/
+    ├── sample/
+    └── secret/
 ```
 
-打包时应包含：
+初学时只需要知道下面这些事实来源：
 
-- `data/`
-- `domjudge-problem.ini`
-- `problem.yaml`
-- `problem.pdf`，如果已生成
-- `output_validators/`，如果存在自定义评测；Schema v1 下由 Core 从 `code/checker.cpp` 或 `code/interactor.cpp` 自动生成
+| 位置 | 内容 |
+|---|---|
+| `.probhub/workspace.yaml` | 比赛名称、题目顺序和组卷设置 |
+| `L01/problem.md` | 题目描述、输入、输出和提示 |
+| `L01/probhub.yaml` | 时间限制、评测方式、代码和数据配置 |
+| `L01/code/` | 标程、暴力、错解、Validator、Checker 等源码 |
+| `L01/data/sample/` | 题面展示的样例 |
+| `L01/data/secret/` | 选手不可见的正式测试数据 |
 
-推荐使用确定性打包和验证脚本：
+以下文件由 Core 自动生成，不要手工修改：
+
+- `meta.json` 和 Typst `problems.json`；
+- `problem.yaml` 和 `domjudge-problem.ini`；
+- `problem.pdf`、整场 PDF 和 `<ID>.zip`；
+- `.probhub/build-manifest.json`。
+
+如果生成物过期，应重新运行 `seal` / `build`，而不是直接改 PDF、ZIP 或 Manifest。
+
+## 完成标准
+
+Agent 完成题目后，应明确报告下列结果：
+
+- 命令退出码为 0；
+- Judge 最终结果为 `all_expectations_met`；
+- `status` 为 `current`；
+- ZIP 深度验证没有错误；
+- 人工检查过单题 PDF 和整场 PDF。
+
+最终交付文件通常是整场 `main.pdf`、每题的 `problem.pdf` 和工作区根目录下的 `<ID>.zip`。如果题目、数据或模板发生变化，应由 Agent 重新验证和构建，不要手工修改生成物。
+
+本机通过不等于目标 DOMjudge 机器一定具有相同速度。时间限制和内存限制仍应在目标 Linux/DOMjudge 环境校准。
+
+## 并行出题时怎么做
+
+多名出题人或多个 Agent 可以各自只修改自己的题目目录：
+
+1. 开始前一次性登记所有题目 ID 和正式顺序。
+2. 开发中使用 `probhub checkpoint <ID>` 发布不可变草稿。
+3. 单题完成后使用 `probhub seal <ID> --no-cache`。
+4. `seal` 会立即生成一份完整试卷预览；其他未完成题目使用最近的 checkpoint 或占位页。
+5. 全部题目 seal 后，只执行一次多题正式构建：
 
 ```bash
-python scripts/package_problem.py <problem_dir> <problem_id>.zip --require-pdf
-python scripts/verify_package.py <problem_id>.zip --require-pdf --problem-dir <problem_dir>
+probhub build L10 L11 L12 --no-cache
 ```
 
-打包脚本会按稳定顺序和固定时间戳流式写入 ZIP，并把测试数据规范为 LF-only 字节而不修改源文件。CLI 的多题 `package` 在隔离快照中完成全部深验，再以同一 journal/rollback 事务整批发布；失败不会留下部分题已更新。验证脚本会安全流式解压并限制条目/体积，检查路径、普通文件类型、根配置、样例/隐藏数据和 `.in`/`.ans` 配对；提供题目目录后还会对账规范源并运行输入 Validator。无题目上下文的结果仅为 `verification_scope: structural`。
+每个题目任务不需要等待其他题目完成才能获得自己的完整试卷预览。正式构建仍会一次生成整场产物，避免多个任务互相覆盖。详细机制见 [generation 与并行组卷说明](references/generations.md)。
 
----
+## 常见评测结果
 
-## 仓库结构
+| 结果 | 含义 | 通常先检查什么 |
+|---|---|---|
+| `AC` | 答案正确 | 无需处理 |
+| `WA` | 答案错误 | 算法、答案文件或 Checker |
+| `TLE` | 运行超时 | 算法复杂度和时间限制 |
+| `MLE` | 内存超限 | 内存使用和内存限制 |
+| `OLE` | 输出过多 | 无限输出、调试日志或输出限制 |
+| `RE` | 运行时错误 | 越界、崩溃或进程数超限 |
+| `FAIL` | 题目基础设施错误 | Validator、Checker、Interactor 或编译环境 |
 
-```text
-ProbHub-skill/
-├── SKILL.md                  # Agent 工作流指令
-├── README.md                 # 项目说明
-├── bin/
-│   ├── init.js               # Skill 注入入口（probhub-skill）
-│   └── probhub.js            # CLI 入口（probhub）
-├── compat/
-│   └── probhub-skill/        # 轻量 npm 命令转发包
-├── references/
-│   ├── cli.md                # Workspace Schema v1 完整 CLI 手册
-│   ├── checker-interactor.md # Checker 与交互题协议和模板
-│   ├── stress.md             # 差分测试 Schema、协议、反例与 replay
-│   ├── process-control.md    # 进程树、资源限制、OLE 与平台语义
-│   ├── legacy-workflow.md    # 无 Schema v1 时按需加载的旧工作流
-│   ├── cyaron.md             # CYaRon 快速参考
-│   ├── fast.md               # 简单 C++ 数据生成模板
-│   ├── testlib.h             # testlib 头文件
-│   ├── lib.typ               # Typst 宏与样式
-│   ├── main.typ              # Typst 主入口模板
-│   ├── problems.typ          # Typst 题目列表入口
-│   └── problems-sample.json  # 单题元数据样例
-├── probhub/
-│   └── process_control.py     # 跨平台共享进程与资源控制
-├── scripts/
-│   ├── add_problem.py
-│   ├── extract_new_problem.py
-│   ├── launch_ui.py
-│   ├── local_judge.py
-│   └── ui.py
-└── typst-template/           # 示例组卷工程与 PDF
-```
-
----
-
-## npm 双包发布
-
-当前同时发布两个 npm package：
-
-- `probhub`：完整主包，是 Core、CLI、WebUI、Skill 与 references 的唯一事实来源；
-- `probhub-skill`：轻量入口包，依赖完全相同版本的 `probhub`，提供 `npx probhub-skill` 安装入口。
-
-发布前执行：
-
-```powershell
-npm run check
-npm run pack:check
-python scripts\check_clean_install.py
-```
-
-`npm run pack:check` 不只列 tarball：它会对账 `package.json`、`package-lock.json`、Python Core、兼容包精确依赖、CHANGELOG，并验证主包必需/禁入文件与兼容包精确 5 文件。`check_clean_install.py` 从真实两份本地 tarball 安装到空 npm prefix 和无业务依赖的全新 Python venv，由 Skill 完成首次依赖安装，再执行 `doctor -> init -> new -> gen -> judge -> seal -> build -> status -> verify-package`；随后二次生成、seal、build 与深度验包，核对数据、PDF、Manifest 稳定字段和 ZIP 等价。Windows/Ubuntu CI 使用同一闭环。
-
-合并版本提交后先创建指向当前 HEAD 的 `v<version>` 标签，运行 `npm run release:check -- --tag v<version>`，推送标签并等待 tag CI 全绿。`prepublishOnly` 会再次强制检查精确 tag、干净工作树和两份 tarball；随后先发布主包，再发布入口包：
-
-```powershell
-$version = node -p "require('./package.json').version"
-npm publish
-npm view "probhub@$version" version
-Push-Location compat/probhub-skill
-npm publish
-Pop-Location
-npm view "probhub-skill@$version" version
-```
-
-两个包的版本必须一致，入口包的 `dependencies.probhub` 必须锁定精确版本，不能使用 `^` 或 `~`。不要在入口包中复制 Python Core、WebUI、Skill 或 references。
-
-CI 会在 `v*` tag push 上再次核对 tag、HEAD、CHANGELOG 和五处版本事实源；不要从未打标签或 CI 未通过的提交发布。
-
----
+`FAIL` 不能当成“错解被成功卡掉”。它表示题目自身的评测设施需要修复。
 
 ## 常见问题
 
-### Skill 注入后没有找到技能
+### 找不到 `probhub` 命令
 
-安装脚本会写入以下目录：
-
-```text
-~/.claude/skills/probhub
-~/.agents/skills/probhub
-```
-
-如果你的 Agent 工具使用了不同的技能目录，可以手动把 `SKILL.md`、`references/`、`scripts/` 和 `probhub/` 一并复制到对应位置。
-
-### Typst 编译失败
-
-常见原因：
-
-- Typst 未安装或不在 PATH 中。
-- 缺少模板使用的字体。
-- `problems.json` 中 Markdown、LaTeX 或图片路径格式错误。
-- 图片路径、题名或 `meta.json` 中的 `display_name` 与实际文件不一致。
-
-可以先确认 Typst 是否可用：
+先确认：
 
 ```bash
-typst --version
+node --version
+npm --version
+npm install -g probhub
 ```
+
+如果仍找不到，检查 npm 的全局可执行目录是否在 `PATH` 中。也可以临时使用：
+
+```bash
+npx probhub --version
+```
+
+### `probhub doctor` 报错
+
+按输出逐项处理。最常见的是：
+
+- 当前终端调用了另一套 Python，或当前 Python 没有完成依赖安装；
+- `g++` 或 Typst 不在 `PATH`；
+- Typst 不是 0.14.2；
+- Typst 找不到 `Noto Sans CJK SC`；
+- Python 依赖没有安装，可重新运行 `probhub-skill`。
 
 ### WebUI 打不开
 
-确认 Flask 已安装：
+请确认当前目录或上级目录中存在 `.probhub/workspace.yaml`，然后运行：
 
 ```bash
-pip install -r requirements.txt
+probhub --json ui --check
+probhub ui --no-browser
 ```
 
-然后在包含 `.probhub/workspace.yaml` 的工作区根目录运行：
+第二条命令不会自动打开浏览器。请手动访问 <http://127.0.0.1:33933/>。
+
+### `build` 提示需要 sealed revision
+
+正式构建要求整场所有题目都有与当前文件一致的 seal。先逐题执行：
 
 ```bash
-probhub ui
+probhub seal L01 --no-cache --seed 12345
 ```
 
-浏览器打开 `http://127.0.0.1:33933` 后即可使用控制台。
+所有题目完成后再运行多题 `build`。
 
----
+### `status` 显示 `stale`
+
+这表示题目、数据、题序、模板或正式产物在上次构建后发生了变化。重新 `seal` 并 `build`，不要手工修改 Manifest。
+
+### 出现 `recovery_required`
+
+上一次正式写入可能被断电或强制结束。重新运行原来的 `build`、`gen --apply` 或 `stress --fixate`，让 ProbHub 使用事务记录恢复。不要手工删除 `.probhub` 中的恢复材料。
+
+## 安全边界
+
+ProbHub 面向本地、单用户、可信的出题环境。它会限制时间、内存、输出和进程树，但这不是强安全容器。不要用它运行来源不明或有意攻击主机的代码；这类任务应放在专门的虚拟机或容器隔离环境中。
+
+## 进一步阅读
+
+- [CLI 完整手册](references/cli.md)
+- [Workspace Schema v1](references/workspace-schema-v1.md)
+- [数据组与解法期望](references/data-groups-expectations.md)
+- [错解分类与数据强度](references/mistake-taxonomy.md)
+- [Stress 差分测试](references/stress.md)
+- [Checker 与交互题](references/checker-interactor.md)
+- [进程和资源控制](references/process-control.md)
+- [Checkpoint、Seal 与 Generation](references/generations.md)
+- [C++ 数据生成模板](references/fast.md)
+- [CYaRon 数据生成](references/cyaron.md)
+- [旧工作区兼容说明](references/legacy-workflow.md)
+
+## 参与开发
+
+从源码运行检查：
+
+```bash
+npm ci
+npm run check
+npm run pack:check
+```
+
+`npm run check` 会检查 Python、Node.js、WebUI 静态资源并运行测试；`npm run pack:check` 会验证两个 npm 包的内容。可复用的 standard、custom、float、interactive 和 stress 测试工作区位于 `tests/fixtures/`。
+
+提交问题或建议请使用 [GitHub Issues](https://github.com/greenthree/ProbHub-skill/issues)。版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 鸣谢
 
-ProbHub Skill 基于以下优秀项目构建：
-
-- [CYaRon](https://github.com/luogu-dev/cyaron)：洛谷团队开源的 Python 测试数据生成库。
-- [olymp-in-typst](https://github.com/lihaoze123/olymp-in-typst)：基于 Typst 的算法竞赛题面排版模板。
+- [CYaRon](https://github.com/luogu-dev/cyaron)：测试数据生成工具。
+- [olymp-in-typst](https://github.com/lihaoze123/olymp-in-typst)：算法竞赛 Typst 排版模板。
 - [testlib](https://github.com/MikeMirzayanov/testlib)：算法竞赛评测辅助库。
-
----
 
 ## License
 
