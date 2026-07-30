@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- 重构 README 为面向普通出题人与技术新手的使用指南：快速开始聚焦 Skill 安装与 Agent 调用，另行说明环境、WebUI、最小 CLI、交付标准、常见故障和并行出题流程，并把内部协议和维护者细节收敛到 references。
 - 新增 standard、custom、float、interactive、stress 五个独立 Schema v1 测试工作区，以及可复用的临时复制与故障注入辅助层；端到端覆盖 Validator 拒绝、Checker FAIL、OLE、进程上限和 stale-artifact 状态，提交型 Fixture 不包含二进制、缓存或正式生成物。
 
 ## [0.6.0] - 2026-07-29
