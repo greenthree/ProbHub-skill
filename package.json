@@ -1,6 +1,6 @@
 {
   "name": "probhub",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "基于大语言模型 (LLM Agent) 和现代排版框架构建的 ACM/ICPC 自动化出题工作流。",
   "main": "bin/init.js",
   "bin": {
@@ -9,8 +9,10 @@
   },
   "scripts": {
     "test": "python -m unittest discover -s tests -v",
-    "check": "python -m compileall -q probhub scripts tests && python -m probhub --version && node --check bin/init.js && node --check bin/probhub.js && npm --prefix compat/probhub-skill run check && npm test",
-    "pack:check": "npm pack --dry-run && npm pack --dry-run ./compat/probhub-skill"
+    "check": "python -m compileall -q probhub scripts tests && python -m probhub --version && node --check bin/init.js && node --check bin/probhub.js && node --check bin/python.js && npm --prefix compat/probhub-skill run check && npm run release:check && npm test",
+    "release:check": "python scripts/check_release.py",
+    "pack:check": "python scripts/check_release.py --pack",
+    "prepublishOnly": "python scripts/check_release.py --pack --require-head-tag --require-clean"
   },
   "repository": {
     "type": "git",
@@ -31,15 +33,18 @@
     "url": "https://github.com/greenthree/ProbHub-skill/issues"
   },
   "homepage": "https://github.com/greenthree/ProbHub-skill#readme",
-  "dependencies": {
-    "fs-extra": "^11.3.5"
+  "engines": {
+    "node": ">=18"
   },
   "files": [
     "bin/*.js",
+    "CHANGELOG.md",
     "requirements.txt",
     "SKILL.md",
     "references/**",
     "scripts/*.py",
+    "!scripts/check_clean_install.py",
+    "!scripts/check_release.py",
     "probhub/**/*.py"
   ]
 }

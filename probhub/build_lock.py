@@ -1,5 +1,6 @@
 import errno
 import os
+import stat
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,6 +38,59 @@ def _release(stream):
     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def _open_lock_stream(path, *, no_follow=False):
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_BINARY", 0)
+    if no_follow:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise ProbHubError(
+            f"failed to open ProbHub workspace lock {path}: {exc}",
+            code="workspace_lock_failed",
+        ) from exc
+    try:
+        if no_follow:
+            opened = os.fstat(descriptor)
+            linked = os.lstat(path)
+            parent = path.parent.absolute()
+            if (
+                not stat.S_ISREG(linked.st_mode)
+                or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+                or parent.resolve() != parent
+            ):
+                raise ProbHubError(
+                    f"ProbHub workspace lock must not use a symlink or junction: {path}",
+                    code="workspace_lock_unsafe",
+                )
+        return os.fdopen(descriptor, "r+b")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _verify_lock_identity(stream, path, *, no_follow=False):
+    if not no_follow:
+        return
+    try:
+        opened = os.fstat(stream.fileno())
+        linked = os.lstat(path)
+    except OSError as exc:
+        raise ProbHubError(
+            f"ProbHub workspace lock changed while being acquired: {path}: {exc}",
+            code="workspace_lock_unsafe",
+        ) from exc
+    if (
+        not stat.S_ISREG(linked.st_mode)
+        or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+    ):
+        raise ProbHubError(
+            f"ProbHub workspace lock changed while being acquired: {path}",
+            code="workspace_lock_unsafe",
+        )
+
+
 @contextmanager
 def workspace_file_lock(
     root,
@@ -46,10 +100,11 @@ def workspace_file_lock(
     busy_message="another ProbHub operation is already running",
     wait_timeout=0,
     poll_interval=0.1,
+    no_follow=False,
 ):
     path = Path(root).resolve() / Path(relative_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    stream = path.open("a+b")
+    stream = _open_lock_stream(path, no_follow=no_follow)
     try:
         if path.stat().st_size == 0:
             stream.write(b"\0")
@@ -58,6 +113,7 @@ def workspace_file_lock(
         while True:
             try:
                 _acquire(stream)
+                _verify_lock_identity(stream, path, no_follow=no_follow)
                 break
             except OSError as exc:
                 busy = exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}

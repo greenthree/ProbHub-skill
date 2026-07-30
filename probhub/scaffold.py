@@ -335,10 +335,21 @@ def scaffold_config(problem_id, name, judge_type):
                     "targets": ["code/wrong2.cpp"],
                 },
             ],
-            "recipes": [
-                {"case": "random01", "manual": True},
-                {"case": "overflow01", "manual": True},
-            ],
+            "recipes": (
+                [
+                    {"case": "random01", "manual": True},
+                    {"case": "overflow01", "manual": True},
+                ]
+                if judge_type == "interactive"
+                else [
+                    {
+                        "case": "random01",
+                        "generator": "code/inmaker.cpp",
+                        "args": ["random", "1"],
+                    },
+                    {"case": "overflow01", "manual": True},
+                ]
+            ),
         },
         "domjudge": {"include_pdf": True},
     }

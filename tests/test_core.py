@@ -534,20 +534,174 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "sample_not_utf8")
 
     def test_doctor_reports_hung_tool_instead_of_crashing(self):
-        import subprocess
-
         from probhub.doctor import run_doctor
 
         with (
             patch("probhub.doctor.shutil.which", return_value="/fake/tool"),
             patch(
-                "probhub.doctor.subprocess.run",
-                side_effect=subprocess.TimeoutExpired(cmd=["tool"], timeout=10),
+                "probhub.doctor.run_managed_to_files",
+                return_value={
+                    "reason": "time_limit",
+                    "message": "time limit exceeded",
+                    "returncode": -1,
+                },
             ),
         ):
             report = run_doctor()
         self.assertFalse(report["ok"])
         self.assertEqual(report["tools"]["g++"]["version"], "timed out after 10s")
+
+    def test_doctor_tool_probe_does_not_apply_virtual_memory_limit(self):
+        from probhub.doctor import _command_probe
+
+        with tempfile.TemporaryDirectory() as temp:
+            executable = Path(temp) / "tool"
+            executable.write_text("", encoding="utf-8")
+            result = {
+                "reason": "completed",
+                "message": None,
+                "returncode": 0,
+            }
+            with (
+                patch("probhub.doctor.shutil.which", return_value=str(executable)),
+                patch(
+                    "probhub.doctor.run_managed_to_files",
+                    return_value=result,
+                ) as run_managed,
+            ):
+                probe = _command_probe("tool")
+
+        self.assertTrue(probe["ok"])
+        self.assertIsNone(run_managed.call_args.kwargs["memory_limit_mb"])
+        self.assertEqual(run_managed.call_args.kwargs["output_limit_bytes"], 1024 * 1024)
+        self.assertEqual(run_managed.call_args.kwargs["process_limit"], 8)
+
+    def test_doctor_rejects_old_node_and_missing_pinned_cjk_font(self):
+        from probhub.doctor import run_doctor
+
+        def command_version(command, args=("--version",)):
+            versions = {
+                "node": "v16.20.2",
+                "typst": "typst 0.14.2",
+                "g++": "g++ 13.2.0",
+                "npm": "10.9.0",
+            }
+            return {"ok": True, "path": f"/fake/{command}", "version": versions[command]}
+
+        with (
+            patch("probhub.doctor._command_version", side_effect=command_version),
+            patch(
+                "probhub.doctor._command_probe",
+                return_value={
+                    "ok": True,
+                    "path": "/fake/typst",
+                    "lines": ["DejaVu Sans Mono"],
+                    "diagnostic": None,
+                },
+            ),
+        ):
+            report = run_doctor()
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["tools"]["node"]["version_ok"])
+        self.assertEqual(report["tools"]["node"]["requirement"], ">=18")
+        self.assertFalse(report["tools"]["typst"]["font_ok"])
+        self.assertEqual(report["tools"]["typst"]["requirement"], "0.14.2")
+
+    def test_doctor_runs_resolved_npm_javascript_entry_through_node(self):
+        from probhub.doctor import _npm_version
+
+        with tempfile.TemporaryDirectory() as temp:
+            npm_cli = Path(temp) / "npm-cli.js"
+            npm_cli.write_text("", encoding="utf-8")
+            probe = {
+                "ok": True,
+                "path": "/fake/node",
+                "lines": ["10.9.0"],
+                "diagnostic": None,
+            }
+            with (
+                patch("probhub.doctor.shutil.which", return_value=str(npm_cli)),
+                patch("probhub.doctor._command_probe", return_value=probe) as command_probe,
+            ):
+                result = _npm_version({"ok": True, "path": "/fake/node"})
+
+        self.assertEqual(result, {
+            "ok": True,
+            "path": str(npm_cli),
+            "version": "10.9.0",
+        })
+        command_probe.assert_called_once_with(
+            "/fake/node",
+            (str(npm_cli.resolve()), "--version"),
+        )
+
+    def test_doctor_finds_npm_javascript_entry_behind_wrapper(self):
+        from probhub.doctor import _npm_version
+
+        layouts = (
+            ("bin/npm", "lib/node_modules/npm/bin/npm-cli.js"),
+            ("npm.CMD", "node_modules/npm/bin/npm-cli.js"),
+        )
+        for wrapper_relative, cli_relative in layouts:
+            with self.subTest(wrapper=wrapper_relative), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                wrapper = root / wrapper_relative
+                npm_cli = root / cli_relative
+                wrapper.parent.mkdir(parents=True, exist_ok=True)
+                npm_cli.parent.mkdir(parents=True, exist_ok=True)
+                wrapper.write_text("wrapper\n", encoding="utf-8")
+                npm_cli.write_text("", encoding="utf-8")
+                probe = {
+                    "ok": True,
+                    "path": "/fake/node",
+                    "lines": ["10.9.0"],
+                    "diagnostic": None,
+                }
+                with (
+                    patch("probhub.doctor.shutil.which", return_value=str(wrapper)),
+                    patch("probhub.doctor._command_probe", return_value=probe) as command_probe,
+                ):
+                    result = _npm_version({"ok": True, "path": "/fake/node"})
+
+                self.assertEqual(result, {
+                    "ok": True,
+                    "path": str(wrapper),
+                    "version": "10.9.0",
+                })
+                command_probe.assert_called_once_with(
+                    "/fake/node",
+                    (str(npm_cli.resolve()), "--version"),
+                )
+
+    def test_doctor_executes_unresolved_posix_npm_through_shell(self):
+        from probhub.doctor import _npm_version
+
+        with tempfile.TemporaryDirectory() as temp:
+            wrapper = Path(temp) / "npm"
+            wrapper.write_text("not parsed by the shell\n", encoding="utf-8")
+            probe = {
+                "ok": True,
+                "path": "/bin/sh",
+                "lines": ["10.9.0"],
+                "diagnostic": None,
+            }
+            with (
+                patch("probhub.doctor.shutil.which", return_value=str(wrapper)),
+                patch("probhub.doctor._npm_javascript_entry", return_value=None),
+                patch("probhub.doctor.os.name", "posix"),
+                patch("probhub.doctor._command_probe", return_value=probe) as command_probe,
+            ):
+                result = _npm_version({"ok": True, "path": "/fake/node"})
+
+        self.assertEqual(result, {
+            "ok": True,
+            "path": str(wrapper),
+            "version": "10.9.0",
+        })
+        command_probe.assert_called_once_with(
+            "sh",
+            ("-c", 'exec "$1" --version', "probhub-npm", str(wrapper)),
+        )
 
     def test_publish_output_validators_stages_before_removing_old(self):
         from probhub.building import _publish_output_validators

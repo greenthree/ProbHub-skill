@@ -32,15 +32,31 @@ ProbHub Skill 是一个面向 ACM/ICPC、XCPC 和 DOMjudge 的自动化出题工
 
 ## 快速安装
 
-若需要持久的 `probhub` CLI，安装完整主包后执行 Skill 注入：
+Skill 自举默认只向显式 Python 虚拟环境安装依赖，避免修改受 PEP 668 管理的系统 Python。先创建并激活专用环境，再安装完整主包并执行 Skill 注入。
 
-```bash
+Windows PowerShell：
+
+```powershell
+py -3 -m venv "$HOME\.probhub\venv"
+& "$HOME\.probhub\venv\Scripts\Activate.ps1"
 npm install -g probhub
 probhub-skill
-probhub --version
+probhub doctor
 ```
 
-只需临时注入 Skill 时，使用轻量入口包：
+Linux/macOS：
+
+```bash
+python3 -m venv ~/.probhub/venv
+source ~/.probhub/venv/bin/activate
+npm install -g probhub
+probhub-skill
+probhub doctor
+```
+
+后续终端继续激活该环境，或把 `PYTHON` 指向它的解释器。只有明确接受修改当前系统 Python 时才设置 `PROBHUB_ALLOW_SYSTEM_PYTHON=1`。
+
+只需临时注入 Skill 时，也应在上述虚拟环境中使用轻量入口包：
 
 ```bash
 npx probhub-skill
@@ -76,10 +92,10 @@ ProbHub 会尽量自动安装 Python 依赖，但底层编译和排版仍依赖�
 
 ### 基础工具
 
-- Node.js / npm
+- Node.js 18+ / npm
 - Python 3.10+
 - GCC/G++，用于编译 C++ 标程、验证器、checker 和 interactor
-- Typst 编译器
+- Typst 0.14.2
 
 ### Python 包
 
@@ -107,18 +123,39 @@ Windows：
 winget install typst
 ```
 
-也可以从 [Typst Releases](https://github.com/typst/typst/releases) 下载可执行文件。
+也可以从 [Typst v0.14.2](https://github.com/typst/typst/releases/tag/v0.14.2) 下载可执行文件。执行 `probhub doctor` 会拒绝与固定交付工具链不一致的 Typst 版本。
 
 ### 字体
 
-模板默认使用下列字体。缺少字体时，Typst 可能仍能编译，但排版效果会偏离示例。
+模板兼容下列字体。正式交付要求 `Noto Sans CJK SC`；`probhub doctor` 会通过 `typst fonts` 检查它。Windows/Ubuntu CI 固定使用下述字体文件并禁用系统字体搜索，以保证跨平台复现。
 
+- `Noto Sans CJK SC`（固定 CI/发布验证环境）
 - `New Computer Modern Math`
 - `New Computer Modern Mono`
 - `KaiTi`
 - `STZhongSong`
 - `Microsoft YaHei`
 - `SimSun` / `simsun`
+
+安装与 CI 相同的固定字体文件：
+
+```powershell
+$fontDir = "$HOME\.probhub\fonts"
+New-Item -ItemType Directory -Force $fontDir | Out-Null
+Invoke-WebRequest "https://raw.githubusercontent.com/notofonts/noto-cjk/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf" -OutFile "$fontDir\NotoSansCJKsc-Regular.otf"
+if ((Get-FileHash -Algorithm SHA256 "$fontDir\NotoSansCJKsc-Regular.otf").Hash.ToLowerInvariant() -ne "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b") { throw "font checksum mismatch" }
+$env:TYPST_FONT_PATHS = $fontDir
+```
+
+```bash
+font_dir="$HOME/.probhub/fonts"
+mkdir -p "$font_dir"
+curl -fL "https://raw.githubusercontent.com/notofonts/noto-cjk/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf" -o "$font_dir/NotoSansCJKsc-Regular.otf"
+echo "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b  $font_dir/NotoSansCJKsc-Regular.otf" | sha256sum -c -
+export TYPST_FONT_PATHS="$font_dir"
+```
+
+固定文件的 SHA-256 为 `2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b`。把 `TYPST_FONT_PATHS` 写入终端配置后再运行 `probhub doctor`。
 
 ---
 
@@ -128,6 +165,7 @@ winget install typst
 
 ```powershell
 probhub doctor
+probhub init . --title "Contest" --subtitle "正式赛" --author "Team"
 probhub new L05 --name "新题"
 probhub lint L01
 probhub status
@@ -512,24 +550,26 @@ ProbHub-skill/
 ```powershell
 npm run check
 npm run pack:check
-npm publish --dry-run
-Push-Location compat/probhub-skill
-npm publish --dry-run
-Pop-Location
+python scripts\check_clean_install.py
 ```
 
-正式发布必须先发布主包，再发布入口包：
+`npm run pack:check` 不只列 tarball：它会对账 `package.json`、`package-lock.json`、Python Core、兼容包精确依赖、CHANGELOG，并验证主包必需/禁入文件与兼容包精确 5 文件。`check_clean_install.py` 从真实两份本地 tarball 安装到空 npm prefix 和无业务依赖的全新 Python venv，由 Skill 完成首次依赖安装，再执行 `doctor -> init -> new -> gen -> judge -> seal -> build -> status -> verify-package`；随后二次生成、seal、build 与深度验包，核对数据、PDF、Manifest 稳定字段和 ZIP 等价。Windows/Ubuntu CI 使用同一闭环。
+
+合并版本提交后先创建指向当前 HEAD 的 `v<version>` 标签，运行 `npm run release:check -- --tag v<version>`，推送标签并等待 tag CI 全绿。`prepublishOnly` 会再次强制检查精确 tag、干净工作树和两份 tarball；随后先发布主包，再发布入口包：
 
 ```powershell
+$version = node -p "require('./package.json').version"
 npm publish
-npm view probhub@0.5.0 version
+npm view "probhub@$version" version
 Push-Location compat/probhub-skill
 npm publish
 Pop-Location
-npm view probhub-skill@0.5.0 version
+npm view "probhub-skill@$version" version
 ```
 
 两个包的版本必须一致，入口包的 `dependencies.probhub` 必须锁定精确版本，不能使用 `^` 或 `~`。不要在入口包中复制 Python Core、WebUI、Skill 或 references。
+
+CI 会在 `v*` tag push 上再次核对 tag、HEAD、CHANGELOG 和五处版本事实源；不要从未打标签或 CI 未通过的提交发布。
 
 ---
 
@@ -544,7 +584,7 @@ npm view probhub-skill@0.5.0 version
 ~/.agents/skills/probhub
 ```
 
-如果你的 Agent 工具使用了不同的技能目录，可以手动把 `SKILL.md`、`references/` 和 `scripts/` 复制到对应位置。
+如果你的 Agent 工具使用了不同的技能目录，可以手动把 `SKILL.md`、`references/`、`scripts/` 和 `probhub/` 一并复制到对应位置。
 
 ### Typst 编译失败
 

@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 concurrency:
@@ -24,13 +25,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.11"]
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
           cache: pip
       - uses: actions/setup-node@v4
         with:
@@ -115,3 +117,85 @@ jobs:
       - run: npm run check
       - name: Verify both npm package contents
         run: npm run pack:check
+
+  clean-install-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: windows-latest
+            python: "3.11"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Assert g++ toolchain is available
+        run: g++ --version
+      - name: Install pinned Typst (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
+            -o "$RUNNER_TEMP/typst.tar.xz" \
+            "https://github.com/typst/typst/releases/download/$TYPST_VERSION/typst-x86_64-unknown-linux-musl.tar.xz"
+          echo "$TYPST_LINUX_SHA256  $RUNNER_TEMP/typst.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: Install pinned Typst (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $archive = Join-Path $env:RUNNER_TEMP 'typst.zip'
+          $url = "https://github.com/typst/typst/releases/download/$env:TYPST_VERSION/typst-x86_64-pc-windows-msvc.zip"
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $archive
+              break
+            } catch {
+              if ($attempt -eq 3) { throw }
+              Start-Sleep -Seconds (2 * $attempt)
+            }
+          }
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $env:TYPST_WINDOWS_SHA256) {
+            throw "Typst archive checksum mismatch: $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath "$env:RUNNER_TEMP"
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\typst-x86_64-pc-windows-msvc"
+      - name: Install pinned CJK font
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $fontDir = Join-Path $env:RUNNER_TEMP 'probhub-fonts'
+          New-Item -ItemType Directory -Force -Path $fontDir | Out-Null
+          $font = Join-Path $fontDir 'NotoSansCJKsc-Regular.otf'
+          $url = "https://raw.githubusercontent.com/notofonts/noto-cjk/$env:CJK_FONT_COMMIT/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $font
+              break
+            } catch {
+              if ($attempt -eq 3) { throw }
+              Start-Sleep -Seconds (2 * $attempt)
+            }
+          }
+          $actual = (Get-FileHash -Algorithm SHA256 $font).Hash.ToLowerInvariant()
+          if ($actual -ne $env:CJK_FONT_SHA256) {
+            throw "CJK font checksum mismatch: $actual"
+          }
+          $packageCache = Join-Path $env:RUNNER_TEMP 'typst-package-cache'
+          Add-Content -Path $env:GITHUB_ENV -Value "TYPST_FONT_PATHS=$fontDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "TYPST_PACKAGE_CACHE_PATH=$packageCache"
+      - name: Run clean npm and Python delivery flow
+        run: python scripts/check_clean_install.py --json

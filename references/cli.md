@@ -69,9 +69,15 @@ probhub init [directory] --title "Contest" --subtitle "正式赛" --author "Team
 
 ```text
 .probhub/workspace.yaml
+typst-statement/lib.typ
+typst-statement/usts.png
+typst-statement/<subtitle>/main.typ
+typst-statement/<subtitle>/problems.typ
 ```
 
-已初始化的工作区不要再次执行 `init`。只有明确需要覆盖时才使用 `--force`。
+模板直接来自当前已安装 npm 包，不依赖源码仓库；workspace 固定记录 `creation_timestamp: 0`，避免构建时间进入 PDF 身份。已有 Typst 文件会保留，不被 `init --force` 静默覆盖。`subtitle` 必须是跨平台安全的单级目录名。
+
+已初始化的工作区不要再次执行 `init`。只有明确需要覆盖 workspace 配置时才使用 `--force`。
 
 ## 4. `new`
 
@@ -109,7 +115,7 @@ probhub new L07 --name "交互题" --judge interactive
 
 - `--judge` 可选 `standard`（默认）、`custom`、`interactive`；custom 附 Checker 骨架，interactive 附 Interactor 骨架并使用带刷新的标程模板。
 - `std2.cpp` 不只是更换 I/O：它用异或与进位迭代实现加法，并在第二 accepted 上声明 `independence.from/basis/note`，示范真正的交叉实现证据。
-- 两个 secret 测试点以 `manual: true` 配方登记（配方覆盖完整，lint 无 warning）；换成生成器数据时改写 `data.recipes` 后运行 `probhub gen`。
+- standard/custom 的 `random01` 使用固定参数的真实生成 recipe，`overflow01` 以 `manual: true` 登记；脚手架因此可以直接演示 `probhub gen --apply` 的 Generator → Validator → accepted 闭环，同时保持 recipe 覆盖完整、lint 无 warning。interactive 的答案由 Interactor 协议定义，不支持 `gen`，两个测试点均显式登记为 manual。
 - `solutions.brute` 初始为空：judge 对已登记的 brute 默认要求至少一个 TLE/MLE/OLE，脚手架数据尚无 brute-killer，实现真实暴力并准备击杀数据后再登记。
 - 错解枚举与数据强度纪律见 `references/mistake-taxonomy.md`；示例的 `overflow` 组演示了 `data.groups` + `targets` + `expected` 的定向击杀写法。
 - `new` 会持有工作区写锁并原子写入 `workspace.yaml`；并发写入返回 `build_busy`。
@@ -149,7 +155,7 @@ probhub gen L05 --case max01    # 只处理指定配方（可重复）
 probhub doctor
 ```
 
-用于确认 Python、Node/npm、Typst、g++ 和 Python 依赖。首次安装、换机器或 CI 失败时优先运行。
+用于确认 Python >=3.10、Node >=18、npm、固定 Typst 0.14.2、`Noto Sans CJK SC`、g++ 和 Flask/PyYAML/pypdf，并报告 Python 包实际版本。`python -m probhub doctor` 与 npm `probhub doctor` 在这些业务模块尚未安装时也会输出结构化缺失报告，而不是在参数解析前 traceback。首次安装、换机器或 CI 失败时优先运行。
 
 ## 7. `lint`
 
@@ -586,6 +592,7 @@ probhub build L01
 最后一次影响代码、数据、答案或限制的修改后：
 
 ```powershell
+probhub seal L01 --no-cache --seed 12345
 probhub build L01 --no-cache
 probhub status L01
 probhub verify-package L01.zip --require-pdf
