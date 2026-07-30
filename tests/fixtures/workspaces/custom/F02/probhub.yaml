@@ -1,0 +1,30 @@
+schema_version: 1
+id: F02
+name: Custom Fixture
+limits:
+  time: 1
+  memory: 256
+  output: 1
+  processes: 8
+statement:
+  source: problem.md
+judge:
+  type: custom
+  validator: code/validator.cpp
+  checker: code/checker.cpp
+solutions:
+  accepted:
+  - file: code/std.cpp
+    expected: {status: AC, all: true}
+  brute:
+  - file: code/brute.cpp
+    expected: {status: AC, all: true}
+  wrong:
+  - file: code/wrong.cpp
+    expected: {status: WA, all: true}
+data:
+  sample_dir: data/sample
+  secret_dir: data/secret
+  recipes:
+  - case: edge
+    manual: true

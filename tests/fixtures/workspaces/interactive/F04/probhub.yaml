@@ -1,0 +1,31 @@
+schema_version: 1
+id: F04
+name: Interactive Fixture
+limits:
+  time: 2
+  memory: 256
+  output: 1
+  processes: 8
+statement:
+  source: problem.md
+judge:
+  type: interactive
+  validator: code/validator.cpp
+  interactor: code/interactor.cpp
+  interactive:
+    idle_limit: 0.5
+    transcript_limit: 4096
+solutions:
+  accepted:
+  - file: code/std.cpp
+    expected: {status: AC, all: true}
+  brute: []
+  wrong:
+  - file: code/wrong.cpp
+    expected: {status: WA, all: true}
+data:
+  sample_dir: data/sample
+  secret_dir: data/secret
+  recipes:
+  - case: edge
+    manual: true
