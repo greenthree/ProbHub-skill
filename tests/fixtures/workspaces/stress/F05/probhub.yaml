@@ -1,0 +1,35 @@
+schema_version: 1
+id: F05
+name: Stress Fixture
+limits:
+  time: 1
+  memory: 256
+  output: 1
+  processes: 8
+statement:
+  source: problem.md
+judge:
+  type: standard
+  validator: code/validator.cpp
+solutions:
+  accepted:
+  - file: code/std.cpp
+    expected: {status: AC, all: true}
+  brute:
+  - file: code/brute.cpp
+    expected: {status: AC, all: true}
+  wrong:
+  - file: code/wrong.cpp
+    expected: {status: WA, all: true}
+stress:
+  generator: code/generator.cpp
+  args: ['{seed}', '{round}']
+  rounds: 5
+  time_limit: 2
+  tool_timeout: 2
+data:
+  sample_dir: data/sample
+  secret_dir: data/secret
+  recipes:
+  - case: edge
+    manual: true
