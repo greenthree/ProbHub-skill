@@ -24,7 +24,7 @@ def _command_probe(command, args=("--version",)):
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 timeout=10,
-                memory_limit_mb=512,
+                memory_limit_mb=None,
                 output_limit_bytes=1024 * 1024,
                 process_limit=8,
             )

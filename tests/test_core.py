@@ -551,6 +551,31 @@ class CoreWorkspaceTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertEqual(report["tools"]["g++"]["version"], "timed out after 10s")
 
+    def test_doctor_tool_probe_does_not_apply_virtual_memory_limit(self):
+        from probhub.doctor import _command_probe
+
+        with tempfile.TemporaryDirectory() as temp:
+            executable = Path(temp) / "tool"
+            executable.write_text("", encoding="utf-8")
+            result = {
+                "reason": "completed",
+                "message": None,
+                "returncode": 0,
+            }
+            with (
+                patch("probhub.doctor.shutil.which", return_value=str(executable)),
+                patch(
+                    "probhub.doctor.run_managed_to_files",
+                    return_value=result,
+                ) as run_managed,
+            ):
+                probe = _command_probe("tool")
+
+        self.assertTrue(probe["ok"])
+        self.assertIsNone(run_managed.call_args.kwargs["memory_limit_mb"])
+        self.assertEqual(run_managed.call_args.kwargs["output_limit_bytes"], 1024 * 1024)
+        self.assertEqual(run_managed.call_args.kwargs["process_limit"], 8)
+
     def test_doctor_rejects_old_node_and_missing_pinned_cjk_font(self):
         from probhub.doctor import run_doctor
 
