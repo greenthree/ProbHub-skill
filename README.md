@@ -32,7 +32,7 @@ ProbHub 会在这条流程中提供：
 
 ### 1. 安装 Skill
 
-ProbHub 需要 Python 3.10 或更高版本。安装 Skill 时会把 Flask、PyYAML 和 pypdf 等依赖安装到当前 `python` 指向的环境；下面的命令显式允许这次安装。
+安装前请确认已安装 Node.js 18 或更高版本（包含 npm），以及 Python 3.10 或更高版本。安装 Skill 时会把 Flask、PyYAML 和 pypdf 等依赖安装到当前 `python` 指向的环境；下面的命令显式允许这次安装。
 
 Windows PowerShell：
 
