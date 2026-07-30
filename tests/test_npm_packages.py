@@ -128,6 +128,24 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertFalse(payload["python_modules"]["yaml"])
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_stdlib_bootstrap_reports_runtime_import_failure_without_traceback(self):
+        result = subprocess.run(
+            [sys.executable, "-S", "-m", "probhub", "--json", "lint"],
+            cwd=ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["code"], "runtime_dependency_missing")
+        self.assertEqual(payload["module"], "yaml")
+        self.assertNotIn("Traceback", result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_skill_installer_rejects_source_directory_and_descendants(self):
         for cwd in (ROOT, ROOT / "probhub"):

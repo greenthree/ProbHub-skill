@@ -51,6 +51,16 @@ def configure_stdout():
             pass
 
 
+def webui_port(value):
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 1 and 65535")
+    return port
+
+
 def emit(data, json_output=False):
     if json_output:
         print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -404,6 +414,20 @@ def command_doctor(args):
     return run_doctor()
 
 
+def command_ui(args):
+    root = find_workspace(getattr(args, "workspace", None))
+    load_workspace(root, allow_empty=True)
+    from .webui_runtime import check_webui, run_webui
+
+    if args.check:
+        return check_webui(root)
+    return run_webui(
+        root,
+        port=args.port,
+        open_browser=not args.no_browser,
+    )
+
+
 def command_lint(args):
     root, workspace = workspace_context(args)
     entries = select_entries(workspace, args.problem)
@@ -699,6 +723,12 @@ def build_parser():
 
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(handler=command_doctor)
+
+    ui = sub.add_parser("ui")
+    ui.add_argument("--port", type=webui_port, default=33933)
+    ui.add_argument("--no-browser", action="store_true")
+    ui.add_argument("--check", action="store_true", help="load the packaged WebUI and exit")
+    ui.set_defaults(handler=command_ui)
 
     report = sub.add_parser("report")
     report.add_argument("problem", nargs="*")

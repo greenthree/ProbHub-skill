@@ -3334,13 +3334,21 @@ def serve_pdf_page(subtitle, page):
     return send_file(os.path.abspath(png_path), mimetype='image/png')
 
 
-def open_browser():
-    webbrowser.open_new("http://127.0.0.1:33933")
+def open_browser(url="http://127.0.0.1:33933"):
+    webbrowser.open_new(url)
 
-if __name__ == '__main__':
+
+def run_server(*, port=33933, open_browser=True):
+    url = f"http://127.0.0.1:{port}"
     print("\n" + "="*50)
     print("🚀 ProbHub 动态排版控制台启动...")
-    print(f"📂 正在监听基础目录: {BASE_DIR}/")
+    print(f"📂 工作区: {Path.cwd()}")
+    print(f"🌐 地址: {url}")
     print("="*50)
-    Timer(1, open_browser).start()
-    app.run(host='127.0.0.1', port=33933, debug=False)
+    if open_browser:
+        browser_opener = globals()["open_browser"]
+        Timer(1, lambda: browser_opener(url)).start()
+    app.run(host="127.0.0.1", port=port, debug=False)
+
+if __name__ == '__main__':
+    run_server()

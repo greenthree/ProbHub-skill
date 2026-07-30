@@ -235,6 +235,14 @@ def run_clean_install():
             if not (workspace / relative).is_file():
                 raise CleanInstallError(f"init omitted Typst template: {relative}")
 
+        webui = _run_json(
+            [probhub, "--workspace", workspace, "--json", "ui", "--check"],
+            cwd=project,
+            env=env,
+        )
+        if webui.get("version") != metadata["version"]:
+            raise CleanInstallError(f"installed WebUI version mismatch: {webui!r}")
+
         common = [probhub, "--workspace", workspace, "--json"]
         _run_json([*common, "new", "E2E", "--name", "干净安装闭环"], cwd=project, env=env)
         generated = _run_json([*common, "gen", "E2E", "--apply"], cwd=project, env=env)
@@ -290,7 +298,7 @@ def run_clean_install():
             "ok": True,
             "version": metadata["version"],
             "packages": inventories,
-            "workflow": ["doctor", "init", "new", "gen", "judge", "seal", "build", "status", "verify-package"],
+            "workflow": ["doctor", "init", "ui-check", "new", "gen", "judge", "seal", "build", "status", "verify-package"],
             "rebuild_equivalent": True,
         }
 

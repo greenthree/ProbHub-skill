@@ -230,6 +230,7 @@ probhub build L01 --skip-judge
 
 # 7. WebUI 与交付限制
 
+- 在 Workspace Schema v1 根目录前台启动已安装 WebUI 使用 `probhub ui`；CI 或安装诊断使用 `probhub --json ui --check`。不要向赛事仓库复制 `probhub/`、`scripts/ui.py` 或 `scripts/local_judge.py` 作为运行时回退。
 - Schema v1 WebUI 导航和 PDF 翻页必须只读；题面保存只允许修改 `workspace.yaml` 题序、`probhub.yaml`、`problem.md` 和样例规范源，封面保存只修改 `workspace.yaml` 的 `contest` / `typst.cover`。不得让保存或导航隐式重写 PDF、ZIP、metadata 或 Manifest。
 - WebUI “编译”使用隔离快照和临时 PDF 预览；只有显式“分发”可调用 Core 正式 build。保存冲突以 `source_conflict` 返回，不得静默覆盖其他会话或 Agent 的修改。
 - Schema v1 WebUI 的临时提交评测只接受 UTF-8 `.cpp`，源码必须进入 `.probhub/submissions/<task-id>/` 独立目录；评测结束后清理，不得覆盖或修改题目原有 `code/`、数据、配置、答案和构建产物。
