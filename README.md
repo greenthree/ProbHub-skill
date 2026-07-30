@@ -32,14 +32,13 @@ ProbHub 会在这条流程中提供：
 
 ### 1. 安装 Skill
 
-ProbHub 会安装 Python 依赖。推荐为它创建独立虚拟环境，避免影响系统 Python。
+ProbHub 需要 Python 3.10 或更高版本。安装 Skill 时会把 Flask、PyYAML 和 pypdf 等依赖安装到当前 `python` 指向的环境；下面的命令显式允许这次安装。
 
 Windows PowerShell：
 
 ```powershell
-py -3 -m venv "$HOME\.probhub\venv"
-& "$HOME\.probhub\venv\Scripts\Activate.ps1"
 npm install -g probhub
+$env:PROBHUB_ALLOW_SYSTEM_PYTHON = "1"
 probhub-skill
 probhub doctor
 ```
@@ -47,17 +46,9 @@ probhub doctor
 Ubuntu/Linux：
 
 ```bash
-python3 -m venv ~/.probhub/venv
-source ~/.probhub/venv/bin/activate
 npm install -g probhub
-probhub-skill
+PROBHUB_ALLOW_SYSTEM_PYTHON=1 probhub-skill
 probhub doctor
-```
-
-以后打开新终端时，需要再次激活这个虚拟环境。PowerShell 不允许执行激活脚本时，可以在当前终端直接指定 Python：
-
-```powershell
-$env:PYTHON = "$HOME\.probhub\venv\Scripts\python.exe"
 ```
 
 `probhub doctor` 会列出 Python、Node.js、npm、`g++`、Typst、字体和 Python 依赖的实际状态。先修复其中的错误，再继续创建题目。
@@ -266,7 +257,7 @@ npx probhub --version
 
 按输出逐项处理。最常见的是：
 
-- 当前终端没有激活 ProbHub 的 Python 虚拟环境；
+- 当前终端调用了另一套 Python，或当前 Python 没有完成依赖安装；
 - `g++` 或 Typst 不在 `PATH`；
 - Typst 不是 0.14.2；
 - Typst 找不到 `Noto Sans CJK SC`；
