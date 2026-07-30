@@ -1,6 +1,6 @@
 ---
 name: probhub
-description: 当用户需要创作或维护算法竞赛题目、生成测试数据、运行 ProbHub CLI 受控沙箱或 stress 差分测试、配置进程与输出限制、使用 Workspace Schema v1、配置 DOMjudge 题目包或使用 Typst 组卷时调用。覆盖从题面和代码矩阵到 PDF、ZIP、Manifest 与状态验证的完整流程。
+description: 当用户需要创作或维护算法竞赛题目、选择快速/普通/完整 Agent 验证模式、生成测试数据、运行 ProbHub CLI 受控沙箱或 stress 差分测试、配置进程与输出限制、使用 Workspace Schema v1、配置 DOMjudge 题目包或使用 Typst 组卷时调用。覆盖从题面和代码矩阵到独立审查、PDF、ZIP、Manifest 与状态验证的完整流程。
 ---
 
 # 角色
@@ -139,7 +139,20 @@ probhub build L01 --skip-judge
 
 完整语法、产物、退出码和故障处理见 `references/cli.md`。配置或执行差分测试前读取 `references/stress.md`；修改资源限制、解释 OLE 或排查残留进程时读取 `references/process-control.md`。
 
-# 4. Schema v1 标准执行闭环
+# 4. Agent 验证模式
+
+创作新题、重构算法/约束/Judge、补强正式数据或做交付级正确性审查时，必须先读取 `references/verification-modes.md`，选择并记录 `requested_mode`、`effective_mode` 和理由。
+
+- 用户未指定时使用普通模式；普通模式运行固定 seed stress，并调用一个只能看到冻结公开题面的盲审独立解题者。
+- 仅当题目简单、确定性、证明闭合、Judge 风险低且资源余量充足时，才可自行选择快速模式；该模式不以 stress 或子 Agent 作为模式证据，但不能绕过 Core 已有门禁。
+- 难题、随机化/启发式、浮点、复杂 Checker/Interactor、紧张资源限制或任何未解决分歧使用完整模式；在普通模式上增加独立证明/参考实现和对抗审查角色。
+- 发现证明缺口、实现分歧、反例、幸存错解或高风险 Judge 时只能升级，不能静默降级。所需审查者不可用时必须报告验证未完成，不得伪称已经执行。
+- 子 Agent 默认只读并使用隔离上下文，不得直接修改 live 题目文件；主 Agent 统一审查、落盘和重跑。模型档位不算独立性证据，并且必须遵守用户与工作区的模型限制。
+- 单题任务完成到有效 `seal` 和隔离 generation 后即可结束；整场正式多题 `build` 仍只在所有题目 sealed 后执行一次。
+
+模式只约束 Agent 行为，不是 CLI 参数或 Core Schema。不要虚构 `--mode`，也不要把自然语言审查冒充 Judge、stress、Manifest 或 package verification 结果。
+
+# 5. Schema v1 标准执行闭环
 
 1. 读取 `.probhub/workspace.yaml`，确认稳定 ID、目录和正式题序。
 2. 读取所选题目的 `probhub.yaml`、`problem.md`、`code/` 与 `data/`。
@@ -183,7 +196,7 @@ probhub build L01 --skip-judge
 
 本地 `max_time`、内存和输出余量不是正式评测承诺。Windows 与 Linux/DOMjudge 的启动、链接、调度、计时和内存口径不同；正式 TL/ML/OL 必须在目标 Linux 评测环境重新校准，结构化结果中的 `target_guarantee` 固定为 `false`。
 
-# 5. 出题内容要求
+# 6. 出题内容要求
 
 - 现有题面来源不得擅自改意，只修正格式；Idea 题应自行完成约束、算法与简洁题面。
 - 输入格式中的数据范围使用中文括号，紧跟变量第一次出现处，例如：`输入一个整数 $T$（$1\le T\le 100$）。`
@@ -211,7 +224,7 @@ probhub build L01 --skip-judge
 - `limits.time` 使用正数秒；`limits.memory` 至少为 `256MB` 且为 2 的幂；`limits.output` 使用正整数 MiB，默认 `64`；`limits.processes` 使用正整数，默认 `32`。
 - 复杂生成器读取 `references/cyaron.md`；简单 C++ 生成器读取 `references/fast.md`。用于差分测试的 Generator 必须把单个测试点写到 stdout，并只由 `{seed}` / `{round}` 参数控制随机性；读取 `references/stress.md`。
 
-# 6. 沙箱宿命与修复
+# 7. 沙箱宿命与修复
 
 - Validator 失败：修复生成器或数据格式并重新生成。
 - accepted 非全 AC：修复标程、答案或 Checker/Interactor。
@@ -228,7 +241,7 @@ probhub build L01 --skip-judge
 
 不得根据自然语言提示判断成功：普通沙箱同时检查退出码和最后一个 JSONL `final` 事件；stress 同时检查退出码和单个结果中的 `ok`、`status`、`reason`。
 
-# 7. WebUI 与交付限制
+# 8. WebUI 与交付限制
 
 - 在 Workspace Schema v1 根目录前台启动已安装 WebUI 使用 `probhub ui`；CI 或安装诊断使用 `probhub --json ui --check`。不要向赛事仓库复制 `probhub/`、`scripts/ui.py` 或 `scripts/local_judge.py` 作为运行时回退。
 - Schema v1 WebUI 导航和 PDF 翻页必须只读；题面保存只允许修改 `workspace.yaml` 题序、`probhub.yaml`、`problem.md` 和样例规范源，封面保存只修改 `workspace.yaml` 的 `contest` / `typst.cover`。不得让保存或导航隐式重写 PDF、ZIP、metadata 或 Manifest。
@@ -242,6 +255,6 @@ probhub build L01 --skip-judge
 - 不得提交 `.exe`、沙箱缓存、临时输出或 Typst/WebUI 预览缓存。
 - 遇到错误必须自行定位、修复并重跑相应验证。
 
-# 8. Legacy 工作区
+# 9. Legacy 工作区
 
 仅当 `.probhub/workspace.yaml` 不存在时，读取 `references/legacy-workflow.md` 并按其中阶段执行。Legacy 工作区允许使用 `meta.json`、Typst `problems.json` 和手工 DOMjudge 配置；Schema v1 不允许。
