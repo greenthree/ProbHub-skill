@@ -187,6 +187,9 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "probhub/install_skill.py", "probhub/process_control.py",
         "probhub/webui_runtime.py",
         "scripts/probhub.py", "scripts/local_judge.py", "scripts/ui.py",
+        "scripts/webui/index.html", "scripts/webui/app.css", "scripts/webui/app.js",
+        "scripts/webui/theme.js", "scripts/webui/tailwind-config.js",
+        "scripts/webui/mathjax-config.js",
         "references/cli.md", "references/lib.typ", "references/main.typ",
         "references/problems.typ", "references/usts.png", "references/testlib.h",
     }

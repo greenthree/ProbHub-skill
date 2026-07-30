@@ -359,13 +359,15 @@ class UiWriteBoundaryTests(unittest.TestCase):
 
     def test_existing_visual_template_and_theme_markers_are_unchanged(self):
         html = self.ui.HTML_TEMPLATE
-        self.assertIn('html[data-theme="light"]', html)
-        self.assertIn('html[data-theme="dark"]', html)
+        css = (self.ui.WEBUI_ASSET_DIR / "app.css").read_text(encoding="utf-8")
+        javascript = (self.ui.WEBUI_ASSET_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertIn('html[data-theme="light"]', css)
+        self.assertIn('html[data-theme="dark"]', css)
         self.assertIn('data-testid="cover-preview"', html)
-        self.assertIn("_postWriterJson('/api/compile'", html)
-        self.assertIn("_postWriterJson('/api/distribute'", html)
-        self.assertIn("_queueWriter(operation)", html)
-        self.assertIn("/api/problem-assets/", html)
+        self.assertIn("_postWriterJson('/api/compile'", javascript)
+        self.assertIn("_postWriterJson('/api/distribute'", javascript)
+        self.assertIn("_queueWriter(operation)", javascript)
+        self.assertIn("/api/problem-assets/", javascript)
 
 
 if __name__ == "__main__":

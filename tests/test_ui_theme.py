@@ -16,14 +16,16 @@ class UiThemeTests(unittest.TestCase):
         cls.ui = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.ui)
         cls.client = cls.ui.app.test_client()
+        cls.css = (cls.ui.WEBUI_ASSET_DIR / "app.css").read_text(encoding="utf-8")
+        cls.javascript = (cls.ui.WEBUI_ASSET_DIR / "app.js").read_text(encoding="utf-8")
 
     def test_index_contains_persistent_light_and_dark_theme_controls(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('html[data-theme="light"]', html)
-        self.assertIn('html[data-theme="dark"]', html)
-        self.assertIn("localStorage.setItem('probhub-theme', this.theme)", html)
+        self.assertIn('html[data-theme="light"]', self.css)
+        self.assertIn('html[data-theme="dark"]', self.css)
+        self.assertIn("localStorage.setItem('probhub-theme', this.theme)", self.javascript)
         self.assertIn('@click="toggleTheme()"', html)
         self.assertIn('@input.stop @change.stop="switchSubtitle()"', html)
         self.assertIn('切换到护眼暗夜模式', html)
@@ -35,7 +37,7 @@ class UiThemeTests(unittest.TestCase):
         self.assertIn('data-testid="cover-preview"', html)
 
     def test_initial_load_fetches_page_count_before_rendering_preview_image(self):
-        html = self.ui.HTML_TEMPLATE
+        html = self.javascript
         init_start = html.index("initApp() {")
         load_data_start = html.index("loadData() {", init_start)
         init_app = html[init_start:load_data_start]
@@ -44,7 +46,7 @@ class UiThemeTests(unittest.TestCase):
         self.assertNotIn("/api/pdf-page/' + encodeURIComponent(currentSubtitle)", init_app)
 
     def test_pdf_page_count_ignores_stale_subtitle_responses(self):
-        html = self.ui.HTML_TEMPLATE
+        html = self.javascript
         load_start = html.index("loadPdfPages() {")
         sortable_start = html.index("initSortable() {", load_start)
         loader = html[load_start:sortable_start]
@@ -56,21 +58,22 @@ class UiThemeTests(unittest.TestCase):
 
     def test_theme_uses_css_variables_without_changing_api_markup(self):
         html = self.ui.HTML_TEMPLATE
-        self.assertIn("rgb(var(--ink-bg) / <alpha-value>)", html)
-        self.assertIn("--primary-top: 235 199 124", html)
-        self.assertIn("--primary-top: 226 198 139", html)
-        self.assertIn("--editor-surface: 250 247 241", html)
-        self.assertIn("--editor-surface: 36 42 36", html)
-        self.assertIn("--preview-surface: 253 251 247", html)
-        self.assertIn("--preview-surface: 30 35 30", html)
-        self.assertIn("background: linear-gradient(180deg, rgb(var(--primary-top)), rgb(var(--primary-bottom)))", html)
+        tailwind = (self.ui.WEBUI_ASSET_DIR / "tailwind-config.js").read_text(encoding="utf-8")
+        self.assertIn("rgb(var(--ink-bg) / <alpha-value>)", tailwind)
+        self.assertIn("--primary-top: 235 199 124", self.css)
+        self.assertIn("--primary-top: 226 198 139", self.css)
+        self.assertIn("--editor-surface: 250 247 241", self.css)
+        self.assertIn("--editor-surface: 36 42 36", self.css)
+        self.assertIn("--preview-surface: 253 251 247", self.css)
+        self.assertIn("--preview-surface: 30 35 30", self.css)
+        self.assertIn("background: linear-gradient(180deg, rgb(var(--primary-top)), rgb(var(--primary-bottom)))", self.css)
         self.assertIn('class="editor-surface w-full h-56', html)
         self.assertIn('class="preview-surface w-full h-56', html)
         self.assertIn('x-data="probhub()"', html)
-        self.assertIn("fetch('/api/subtitles')", html)
-        self.assertIn("_postWriterJson('/api/compile'", html)
-        self.assertIn("_postWriterJson('/api/distribute'", html)
-        self.assertIn("fetch('/api/submission/run'", html)
+        self.assertIn("fetch('/api/subtitles')", self.javascript)
+        self.assertIn("_postWriterJson('/api/compile'", self.javascript)
+        self.assertIn("_postWriterJson('/api/distribute'", self.javascript)
+        self.assertIn("fetch('/api/submission/run'", self.javascript)
 
     def test_pdf_preview_renders_into_process_temp_cache(self):
         original_cwd = Path.cwd()

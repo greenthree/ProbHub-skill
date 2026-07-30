@@ -40,6 +40,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertIn("--require-clean", main["scripts"]["prepublishOnly"])
         self.assertIn("--require-head-tag", compat["scripts"]["prepublishOnly"])
         self.assertIn("CHANGELOG.md", main["files"])
+        self.assertIn("scripts/webui/**", main["files"])
 
     def test_both_packages_expose_cli_and_skill_installer(self):
         expected_bins = {

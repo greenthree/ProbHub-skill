@@ -66,7 +66,7 @@ class UiSecurityTests(unittest.TestCase):
     def csrf_headers(self):
         return {"X-ProbHub-CSRF": self.ui.WEBUI_CSRF_TOKEN}
 
-    def test_index_injects_startup_token_and_nonce(self):
+    def test_index_injects_startup_token_and_uses_external_assets(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
@@ -74,9 +74,30 @@ class UiSecurityTests(unittest.TestCase):
             f'<meta name="probhub-csrf-token" content="{self.ui.WEBUI_CSRF_TOKEN}">',
             html,
         )
-        inline_scripts = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>", html)
-        self.assertGreaterEqual(len(inline_scripts), 4)
-        self.assertTrue(all('nonce="' in tag for tag in inline_scripts), inline_scripts)
+        self.assertEqual(re.findall(r"<script(?![^>]*\bsrc=)[^>]*>", html), [])
+        self.assertNotIn("<style", html)
+        for asset in self.ui.WEBUI_PUBLIC_ASSETS:
+            self.assertIn(f'/webui/assets/{asset}', html)
+
+    def test_only_declared_package_assets_are_served(self):
+        expected_types = {
+            "app.css": "text/css",
+            "app.js": "application/javascript",
+            "mathjax-config.js": "application/javascript",
+            "tailwind-config.js": "application/javascript",
+            "theme.js": "application/javascript",
+        }
+        for name, content_type in expected_types.items():
+            with self.subTest(name=name):
+                response = self.client.get(f"/webui/assets/{name}")
+                try:
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.get_data(), (self.ui.WEBUI_ASSET_DIR / name).read_bytes())
+                    self.assertTrue(response.content_type.startswith(content_type), response.content_type)
+                finally:
+                    response.close()
+        self.assertEqual(self.client.get("/webui/assets/index.html").status_code, 404)
+        self.assertEqual(self.client.get("/webui/assets/unknown.js").status_code, 404)
 
     def test_write_routes_reject_missing_or_invalid_csrf_token(self):
         requests = [
@@ -186,14 +207,14 @@ class UiSecurityTests(unittest.TestCase):
         self.assertEqual(response.get_json()["code"], "request_too_large")
 
     def test_markdown_preview_routes_rendered_html_through_sanitizer(self):
-        html = self.ui.HTML_TEMPLATE
+        html = (self.ui.WEBUI_ASSET_DIR / "app.js").read_text(encoding="utf-8")
         self.assertIn("function sanitizeRenderedMarkdown(html)", html)
         self.assertIn("el.innerHTML = sanitizeRenderedMarkdown(marked.parse(text));", html)
         self.assertNotIn("el.innerHTML = marked.parse(text);", html)
 
     @unittest.skipUnless(HEADLESS_BROWSER, "Edge, Chrome, or Chromium is required for DOM sanitizer tests")
     def test_markdown_sanitizer_executes_against_malicious_dom(self):
-        template = self.ui.HTML_TEMPLATE
+        template = (self.ui.WEBUI_ASSET_DIR / "app.js").read_text(encoding="utf-8")
         start = template.index("const PROBHUB_MARKDOWN_TAGS")
         end = template.index("document.addEventListener('alpine:init'", start)
         sanitizer = template[start:end]
