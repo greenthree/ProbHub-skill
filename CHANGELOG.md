@@ -4,8 +4,12 @@
 
 ## [Unreleased]
 
-- 重构 README 为面向普通出题人与技术新手的使用指南：快速开始聚焦 Skill 安装与 Agent 调用，另行说明环境、WebUI、最小 CLI、交付标准、常见故障和并行出题流程，并把内部协议和维护者细节收敛到 references。
-- 新增 standard、custom、float、interactive、stress 五个独立 Schema v1 测试工作区，以及可复用的临时复制与故障注入辅助层；端到端覆盖 Validator 拒绝、Checker FAIL、OLE、进程上限和 stale-artifact 状态，提交型 Fixture 不包含二进制、缓存或正式生成物。
+## [0.6.1] - 2026-07-31
+
+- 新增已安装 Core 的 `probhub ui` 入口与依赖诊断；WebUI 的 HTML、CSS 和 JavaScript 拆分为包内静态资源，保留现有界面、主题、交互和 Schema v1 写入边界。
+- 新增 standard、custom、float、interactive、stress 五个独立 Schema v1 Fixture，以及可复用的临时复制与故障注入辅助层；端到端覆盖 Validator 拒绝、Checker FAIL、OLE、进程上限和 stale-artifact 状态。
+- README 重构为面向普通出题人与技术新手的使用指南：快速开始聚焦 Skill 安装、Agent 调用和验证模式选择，环境、WebUI、最小 CLI、交付标准与常见故障分别组织。
+- Agent Skill 新增快速、普通、完整三种验证模式：快速模式固定完成 100 轮 stress；普通模式增加隔离上下文的盲审独立证明与 std；完整模式再增加独立证明/参考实现和对抗审查，并统一模式升级、证据记录与 `SEALED` 并行交接规则。
 
 ## [0.6.0] - 2026-07-29
 
