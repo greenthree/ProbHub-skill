@@ -185,11 +185,16 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "requirements.txt", "bin/init.js", "bin/probhub.js", "bin/python.js",
         "probhub/__init__.py", "probhub/cli.py", "probhub/install_deps.py",
         "probhub/install_skill.py", "probhub/process_control.py",
+        "probhub/_unix_exec.py",
         "probhub/webui_runtime.py",
         "scripts/probhub.py", "scripts/local_judge.py", "scripts/ui.py",
         "scripts/webui/index.html", "scripts/webui/app.css", "scripts/webui/app.js",
-        "scripts/webui/theme.js", "scripts/webui/tailwind-config.js",
-        "scripts/webui/mathjax-config.js",
+        "scripts/webui/theme.js", "scripts/webui/mathjax-config.js",
+        "scripts/webui/asset-manifest.json", "scripts/webui/vendor/fonts.css",
+        "scripts/webui/vendor/tailwind.css", "scripts/webui/vendor/alpine.js",
+        "scripts/webui/vendor/alpine-collapse.js", "scripts/webui/vendor/marked.js",
+        "scripts/webui/vendor/mathjax-tex-svg.js", "scripts/webui/vendor/sortable.js",
+        "scripts/webui/vendor/THIRD_PARTY_NOTICES.txt",
         "references/cli.md", "references/lib.typ", "references/main.typ",
         "references/problems.typ", "references/usts.png", "references/testlib.h",
         "references/verification-modes.md",
@@ -197,6 +202,9 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
     missing = sorted(required_main - main_paths)
     if missing:
         raise ReleaseCheckError(f"main npm package is missing required files: {missing}")
+    for prefix in ("scripts/webui/vendor/fonts/", "scripts/webui/vendor/licenses/"):
+        if not any(path.startswith(prefix) for path in main_paths):
+            raise ReleaseCheckError(f"main npm package is missing WebUI assets under {prefix}")
     forbidden = []
     for path in sorted(main_paths):
         lowered = path.lower()

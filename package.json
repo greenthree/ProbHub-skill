@@ -9,7 +9,9 @@
   },
   "scripts": {
     "test": "python -m unittest discover -s tests -v",
-    "check": "python -m compileall -q probhub scripts tests && python -m probhub --version && node --check bin/init.js && node --check bin/probhub.js && node --check bin/python.js && node --check scripts/webui/theme.js && node --check scripts/webui/tailwind-config.js && node --check scripts/webui/mathjax-config.js && node --check scripts/webui/app.js && npm --prefix compat/probhub-skill run check && npm run release:check && npm test",
+    "webui:build": "node scripts/build_webui_assets.js && tailwindcss -c scripts/webui/tailwind.config.cjs -i scripts/webui/tailwind.input.css -o scripts/webui/vendor/tailwind.css --minify && node scripts/build_webui_assets.js --manifest",
+    "webui:csp-check": "node scripts/check_webui_csp.js",
+    "check": "npm run webui:build && python -m compileall -q probhub scripts tests && python -m probhub --version && node --check bin/init.js && node --check bin/probhub.js && node --check bin/python.js && node --check scripts/build_webui_assets.js && node --check scripts/check_webui_csp.js && node --check scripts/webui/theme.js && node --check scripts/webui/tailwind.config.cjs && node --check scripts/webui/mathjax-config.js && node --check scripts/webui/app.js && node --check scripts/webui/vendor/alpine-collapse.js && node --check scripts/webui/vendor/alpine.js && node --check scripts/webui/vendor/marked.js && node --check scripts/webui/vendor/mathjax-tex-svg.js && node --check scripts/webui/vendor/sortable.js && npm run webui:csp-check && npm --prefix compat/probhub-skill run check && npm run release:check && npm test",
     "release:check": "python scripts/check_release.py",
     "pack:check": "python scripts/check_release.py --pack",
     "prepublishOnly": "python scripts/check_release.py --pack --require-head-tag --require-clean"
@@ -44,8 +46,22 @@
     "references/**",
     "scripts/*.py",
     "scripts/webui/**",
+    "!scripts/webui/tailwind.config.cjs",
+    "!scripts/webui/tailwind.input.css",
     "!scripts/check_clean_install.py",
     "!scripts/check_release.py",
     "probhub/**/*.py"
-  ]
+  ],
+  "devDependencies": {
+    "@alpinejs/collapse": "3.15.12",
+    "@alpinejs/csp": "3.15.12",
+    "@fontsource-variable/ibm-plex-sans": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@fontsource-variable/noto-serif-sc": "5.3.0",
+    "@tailwindcss/typography": "0.5.20",
+    "marked": "18.0.7",
+    "mathjax-full": "3.2.2",
+    "sortablejs": "1.15.7",
+    "tailwindcss": "3.4.19"
+  }
 }

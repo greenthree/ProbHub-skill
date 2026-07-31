@@ -2,8 +2,10 @@
 
 import os
 import platform
+import selectors
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -14,6 +16,9 @@ DEFAULT_PROCESS_LIMIT = 32
 DEFAULT_POLL_INTERVAL = 0.005
 CANCEL_FILE_ENV = "PROBHUB_CANCEL_FILE"
 WINDOWS_CREATE_SUSPENDED = 0x00000004
+UNIX_EXEC_START_TIMEOUT_SECONDS = 10.0
+UNIX_EXEC_READY = b"PROBHUB_UNIX_EXEC_READY_V1\n"
+UNIX_EXEC_STATUS_LIMIT = 64 * 1024
 
 
 class ProcessCancelled(Exception):
@@ -30,19 +35,78 @@ def cancellation_requested():
         return False
 
 
-def unix_preexec_memory_limit(memory_limit_mb):
-    if platform.system() == "Windows" or memory_limit_mb is None:
-        return None
+def _prepare_unix_memory_limited_command(command, memory_limit_mb):
+    if isinstance(command, (str, bytes, os.PathLike)):
+        raise TypeError("memory-limited Unix commands must be an argument sequence")
+    command = list(command)
+    if not command:
+        raise ValueError("memory-limited Unix target command is missing")
+    helper = Path(__file__).with_name("_unix_exec.py")
+    if not helper.is_file():
+        raise OSError(f"Unix execution helper is missing: {helper}")
+    limit_bytes = int(float(memory_limit_mb) * 1024 * 1024)
+    if limit_bytes <= 0:
+        raise ValueError("memory limit must be positive")
+    return command, helper, limit_bytes
+
+
+def _unix_memory_limited_command(command, helper, limit_bytes, status_fd, restore_signals):
+    return [
+        sys.executable,
+        "-I",
+        "-S",
+        str(helper),
+        "--memory-limit-bytes",
+        str(limit_bytes),
+        "--status-fd",
+        str(status_fd),
+        "--restore-signals" if restore_signals else "--keep-signals",
+        "--",
+        *command,
+    ]
+
+
+def _terminate_failed_unix_start(proc):
     try:
-        import resource
-    except Exception:
-        return None
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
-    def apply_limit():
-        limit_bytes = int(float(memory_limit_mb) * 1024 * 1024)
-        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
 
-    return apply_limit
+def _await_unix_exec(proc, status_fd):
+    deadline = time.monotonic() + UNIX_EXEC_START_TIMEOUT_SECONDS
+    chunks = []
+    total = 0
+    with selectors.DefaultSelector() as selector:
+        selector.register(status_fd, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                _terminate_failed_unix_start(proc)
+                raise OSError(
+                    "Unix execution helper did not reach exec before the startup deadline"
+                )
+            detail = os.read(status_fd, 4096)
+            if not detail:
+                break
+            chunks.append(detail)
+            total += len(detail)
+            if total > UNIX_EXEC_STATUS_LIMIT:
+                _terminate_failed_unix_start(proc)
+                raise OSError("Unix execution helper returned an oversized startup status")
+
+    detail = b"".join(chunks)
+    if detail != UNIX_EXEC_READY:
+        _terminate_failed_unix_start(proc)
+        message = detail.decode("utf-8", errors="replace").strip()
+        raise OSError(message or "Unix execution helper did not report startup readiness")
 
 
 _WINDOWS_API = None
@@ -525,13 +589,55 @@ def spawn_managed(
     **kwargs,
 ):
     kwargs = dict(kwargs)
+    if "preexec_fn" in kwargs:
+        raise ValueError("preexec_fn is not supported; use managed process limits")
+    unix_status_fds = None
     if platform.system() == "Windows":
-        kwargs.pop("preexec_fn", None)
         kwargs["creationflags"] = int(kwargs.get("creationflags", 0)) | WINDOWS_CREATE_SUSPENDED
     else:
         kwargs.setdefault("start_new_session", True)
-        kwargs.setdefault("preexec_fn", unix_preexec_memory_limit(memory_limit_mb))
-    proc = subprocess.Popen(command, **kwargs)
+        if memory_limit_mb is not None:
+            if kwargs.get("shell"):
+                raise ValueError("memory-limited Unix commands do not support shell=True")
+            if kwargs.get("executable") is not None:
+                raise ValueError("memory-limited Unix commands do not support executable=")
+            pass_fds = tuple(kwargs.get("pass_fds") or ())
+            command, helper, limit_bytes = _prepare_unix_memory_limited_command(
+                command, memory_limit_mb
+            )
+            read_fd, write_fd = os.pipe()
+            unix_status_fds = (read_fd, write_fd)
+            try:
+                kwargs["pass_fds"] = (*pass_fds, write_fd)
+                kwargs["close_fds"] = True
+                command = _unix_memory_limited_command(
+                    command,
+                    helper,
+                    limit_bytes,
+                    write_fd,
+                    kwargs.get("restore_signals", True),
+                )
+            except BaseException:
+                os.close(read_fd)
+                os.close(write_fd)
+                raise
+    try:
+        proc = subprocess.Popen(command, **kwargs)
+    except BaseException:
+        if unix_status_fds is not None:
+            os.close(unix_status_fds[0])
+            os.close(unix_status_fds[1])
+        raise
+    if unix_status_fds is not None:
+        read_fd, write_fd = unix_status_fds
+        os.close(write_fd)
+        try:
+            _await_unix_exec(proc, read_fd)
+        except BaseException:
+            _terminate_failed_unix_start(proc)
+            raise
+        finally:
+            os.close(read_fd)
     job_handle = None
     if platform.system() == "Windows":
         started = False
@@ -557,7 +663,7 @@ def spawn_managed(
         job_handle=job_handle,
         memory_limit_mb=memory_limit_mb,
         process_limit=process_limit,
-        memory_enforced=(job_handle is not None if platform.system() == "Windows" else kwargs.get("preexec_fn") is not None),
+        memory_enforced=(job_handle is not None if platform.system() == "Windows" else memory_limit_mb is not None),
         process_limit_enforced=(job_handle is not None if platform.system() == "Windows" else Path("/proc").is_dir()),
     )
 

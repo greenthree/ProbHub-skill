@@ -20,10 +20,8 @@
         function markdownUrlIsSafe(value, attribute) {
             try {
                 const parsed = new URL(String(value || '').trim(), window.location.origin);
-                const allowed = attribute === 'href'
-                    ? new Set(['http:', 'https:', 'mailto:'])
-                    : new Set(['http:', 'https:']);
-                return allowed.has(parsed.protocol);
+                if (attribute === 'href') return new Set(['http:', 'https:', 'mailto:']).has(parsed.protocol);
+                return parsed.origin === window.location.origin && new Set(['http:', 'https:']).has(parsed.protocol);
             } catch (_) {
                 return false;
             }
@@ -109,6 +107,73 @@
                     this.theme = this.theme === 'dark' ? 'light' : 'dark';
                     document.documentElement.dataset.theme = this.theme;
                     localStorage.setItem('probhub-theme', this.theme);
+                },
+
+                problemLetter(index) {
+                    let value = Number(index) + 1;
+                    let result = '';
+                    while (value > 0) {
+                        value -= 1;
+                        result = String.fromCharCode(65 + (value % 26)) + result;
+                        value = Math.floor(value / 26);
+                    }
+                    return result;
+                },
+
+                pdfPageUrl(page) {
+                    return '/api/pdf-page/' + encodeURIComponent(this.currentSubtitle) + '/' + page + '?t=' + this.pdfRefresh;
+                },
+
+                difficultyBarStyle(levelIndex, color) {
+                    const count = this.getDifficultyStats()[levelIndex] || 0;
+                    const width = count / Math.max(1, this.problems.length) * 100;
+                    return 'width:' + width + '%; background:' + color;
+                },
+
+                observeDifficultyTrack(element) {
+                    this.trackWidth = element.offsetWidth;
+                    new ResizeObserver(() => { this.trackWidth = element.offsetWidth; }).observe(element);
+                },
+
+                statementValue(section) {
+                    const problem = this.problems[this.selectedIdx];
+                    return problem && problem.statement ? (problem.statement[section] || '') : '';
+                },
+
+                sandboxInfoValue(name, fallback) {
+                    const value = this.sandboxInfo ? this.sandboxInfo[name] : undefined;
+                    return value == null || value === '' ? fallback : value;
+                },
+
+                sandboxLimit(name, fallback) {
+                    const limits = this.sandboxInfo && this.sandboxInfo.limits;
+                    const value = limits ? limits[name] : undefined;
+                    return value == null ? fallback : value;
+                },
+
+                sandboxFile(name, fallback) {
+                    const files = this.sandboxInfo && this.sandboxInfo.files;
+                    const value = files ? files[name] : undefined;
+                    return value == null || value === '' ? fallback : value;
+                },
+
+                sandboxFileCount(name) {
+                    const value = this.sandboxFile(name, []);
+                    return Array.isArray(value) ? value.length : 0;
+                },
+
+                submissionWorkspaceCleaned() {
+                    return Boolean(this.submissionResult && this.submissionResult.submission && this.submissionResult.submission.workspace_cleaned);
+                },
+
+                submissionCompileError() {
+                    const compile = this.submissionCompile();
+                    return compile && compile.stderr ? compile.stderr : 'compiler failed';
+                },
+
+                matrixStatus(row, program) {
+                    const result = row && row.results ? row.results[program] : null;
+                    return result ? result.status : undefined;
                 },
 
                 initApp() {
@@ -285,6 +350,12 @@
                     this.autoSave();
                 },
 
+                removeLastTag() {
+                    if (this.tagDraft || this.selectedIdx === null) return;
+                    const tags = this.getTags(this.selectedIdx);
+                    if (tags.length) this.removeTag(this.selectedIdx, tags.length - 1);
+                },
+
                 // ── Cover config ────────────────────────────────────────────
                 loadConfig() {
                     if (!this.currentSubtitle) return;
@@ -355,6 +426,11 @@
                 sandboxKey(index = this.selectedIdx) {
                     if (!this.currentSubtitle || index === null || index === undefined) return '';
                     return `${this.currentSubtitle}::${index}`;
+                },
+
+                openSandbox() {
+                    this.activePage = 'sandbox';
+                    this.refreshSandboxInfo();
                 },
 
                 restoreSandboxCache() {

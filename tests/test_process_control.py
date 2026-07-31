@@ -1,12 +1,14 @@
 import ctypes
 import os
 import platform
+import signal
 import sys
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -22,6 +24,158 @@ from probhub.process_control import (
 
 
 class ProcessControlTests(unittest.TestCase):
+    def test_spawn_rejects_caller_preexec_fn(self):
+        with self.assertRaisesRegex(ValueError, "preexec_fn is not supported"):
+            process_control.spawn_managed(
+                [sys.executable, "-c", "print('x')"],
+                preexec_fn=None,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    @mock.patch.object(process_control.platform, "system", return_value="Linux")
+    @mock.patch.object(process_control.os, "pipe")
+    def test_invalid_unix_memory_limited_command_does_not_open_status_pipe(
+        self, pipe, _system
+    ):
+        for command, limit in (("echo x", 256), ([sys.executable], "bad"), ([], 256)):
+            with self.subTest(command=command, limit=limit):
+                with self.assertRaises((TypeError, ValueError)):
+                    process_control.spawn_managed(command, memory_limit_mb=limit)
+        pipe.assert_not_called()
+
+    @unittest.skipIf(platform.system() == "Windows", "Unix exec helper only")
+    def test_unix_exec_helper_failure_is_fail_closed(self):
+        with self.assertRaisesRegex(OSError, "Unix execution helper failed"):
+            process_control.spawn_managed(
+                ["probhub-command-that-does-not-exist"],
+                memory_limit_mb=256,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    @unittest.skipIf(platform.system() == "Windows", "Unix exec helper only")
+    def test_unix_exec_helper_applies_address_space_limit(self):
+        limit_mb = 384
+        managed = process_control.spawn_managed(
+            [
+                sys.executable,
+                "-c",
+                "import resource; print(resource.getrlimit(resource.RLIMIT_AS)[0])",
+            ],
+            memory_limit_mb=limit_mb,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            stdout, stderr = managed.proc.communicate(timeout=10)
+        finally:
+            managed.close()
+        self.assertEqual(managed.proc.returncode, 0, stderr)
+        self.assertEqual(int(stdout.strip()), limit_mb * 1024 * 1024)
+
+    @unittest.skipUnless(Path("/proc/self/status").is_file(), "Linux proc status only")
+    def test_unix_exec_helper_restores_popen_signal_defaults(self):
+        managed = process_control.spawn_managed(
+            ["/bin/sh", "-c", "grep '^SigIgn:' /proc/self/status"],
+            memory_limit_mb=256,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            stdout, stderr = managed.proc.communicate(timeout=10)
+        finally:
+            managed.close()
+        self.assertEqual(managed.proc.returncode, 0, stderr)
+        ignored = int(stdout.split()[-1], 16)
+        for name in ("SIGPIPE", "SIGXFSZ"):
+            signum = getattr(signal, name, None)
+            if signum is not None:
+                self.assertEqual(ignored & (1 << (signum - 1)), 0, name)
+
+    @unittest.skipIf(platform.system() == "Windows", "Unix selector only")
+    def test_unix_exec_status_supports_high_numbered_fd(self):
+        try:
+            import fcntl
+            import resource
+        except ImportError as exc:
+            self.skipTest(str(exc))
+        soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft_limit <= 2048:
+            self.skipTest("RLIMIT_NOFILE is too low for a high-fd regression")
+
+        read_fd, write_fd = os.pipe()
+        high_fd = None
+        try:
+            high_fd = fcntl.fcntl(read_fd, fcntl.F_DUPFD, 2048)
+            os.close(read_fd)
+            read_fd = None
+            os.write(write_fd, process_control.UNIX_EXEC_READY)
+            os.close(write_fd)
+            write_fd = None
+            process_control._await_unix_exec(mock.Mock(), high_fd)
+        finally:
+            if read_fd is not None:
+                os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
+            if high_fd is not None:
+                os.close(high_fd)
+
+    @unittest.skipIf(platform.system() == "Windows", "Unix selector only")
+    def test_unix_exec_empty_status_is_fail_closed(self):
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        proc = mock.Mock()
+        with mock.patch.object(process_control, "_terminate_failed_unix_start") as terminate:
+            with self.assertRaisesRegex(OSError, "did not report startup readiness"):
+                process_control._await_unix_exec(proc, read_fd)
+        os.close(read_fd)
+        terminate.assert_called_once_with(proc)
+
+    @unittest.skipIf(platform.system() == "Windows", "Unix exec helper only")
+    def test_unix_concurrent_threaded_launches_never_use_preexec_fn(self):
+        real_popen = subprocess.Popen
+        calls = []
+        calls_lock = threading.Lock()
+
+        def recording_popen(command, **kwargs):
+            with calls_lock:
+                calls.append(dict(kwargs))
+            return real_popen(command, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def run_one(index):
+                case_dir = root / str(index)
+                case_dir.mkdir()
+                return run_managed_to_files(
+                    [sys.executable, "-c", f"print({index})"],
+                    stdout_path=case_dir / "stdout.txt",
+                    stderr_path=case_dir / "stderr.txt",
+                    timeout=10,
+                    memory_limit_mb=256,
+                    output_limit_bytes=1024,
+                    process_limit=8,
+                    cwd=case_dir,
+                )
+
+            with mock.patch.object(
+                process_control.subprocess,
+                "Popen",
+                side_effect=recording_popen,
+            ):
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    results = list(pool.map(run_one, range(16)))
+
+        self.assertTrue(all(item["reason"] == "completed" for item in results), results)
+        self.assertEqual(len(calls), 16)
+        self.assertTrue(all("preexec_fn" not in item for item in calls), calls)
+        self.assertTrue(all(item.get("start_new_session") is True for item in calls), calls)
+
     def test_windows_job_termination_waits_for_all_processes_before_closing(self):
         class Accounting(ctypes.Structure):
             _fields_ = [("ActiveProcesses", ctypes.c_uint32)]

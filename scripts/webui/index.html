@@ -4,19 +4,15 @@
     <meta charset="UTF-8">
     <meta name="probhub-csrf-token" content="{{ csrf_token }}">
     <title>ProbHub · 题目排版控制台</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="/webui/assets/theme.js"></script>
-    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
-    <script src="/webui/assets/tailwind-config.js"></script>
-
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="/webui/assets/vendor/fonts.css">
+    <link rel="stylesheet" href="/webui/assets/vendor/tailwind.css">
+    <script src="/webui/assets/vendor/marked.js"></script>
     <script src="/webui/assets/mathjax-config.js"></script>
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+    <script id="MathJax-script" async src="/webui/assets/vendor/mathjax-tex-svg.js"></script>
+    <script defer src="/webui/assets/vendor/alpine-collapse.js"></script>
+    <script defer src="/webui/assets/vendor/alpine.js"></script>
+    <script src="/webui/assets/vendor/sortable.js"></script>
 
     <link rel="stylesheet" href="/webui/assets/app.css">
 </head>
@@ -56,7 +52,7 @@
                                     :class="activePage === 'layout' ? 'bg-gold/12 text-gold-light' : 'text-cream-subtle hover:text-cream'">
                                 组卷排版
                             </button>
-                            <button @click="activePage = 'sandbox'; refreshSandboxInfo()"
+                            <button @click="openSandbox()"
                                     class="px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors"
                                     :class="activePage === 'sandbox' ? 'bg-gold/12 text-gold-light' : 'text-cream-subtle hover:text-cream'">
                                 沙箱评测
@@ -115,7 +111,7 @@
                 <div id="sortable-list" class="space-y-1.5 flex-1 overflow-y-auto pr-0.5">
                     <template x-for="(prob, index) in problems" :key="prob.problem.display_name + index">
                         <div @click="selectProb(index)" :class="selectedIdx === index ? 'bg-gold/10 border-gold/40 text-cream' : 'border-transparent hover:border-white/[0.03] hover:bg-ink-elevated/50 text-cream-muted'" class="flex flex-wrap items-center gap-x-2.5 gap-y-1 px-3 py-2.5 rounded-lg cursor-move border transition-all duration-150 group">
-                            <span class="text-[11px] font-mono shrink-0 opacity-50 w-4 text-center" :class="selectedIdx === index ? 'text-gold opacity-80' : ''" x-text="String.fromCharCode(65 + index)"></span>
+                            <span class="text-[11px] font-mono shrink-0 opacity-50 w-4 text-center" :class="selectedIdx === index ? 'text-gold opacity-80' : ''" x-text="problemLetter(index)"></span>
                             <span class="w-1.5 h-4 rounded-full shrink-0 transition-transform duration-200" :class="selectedIdx === index ? 'scale-125' : ''" :style="'background:' + getDifficultyInfo(index).color"></span>
                             <span class="text-[13px] font-medium truncate min-w-0 flex-1" x-text="prob.problem.display_name"></span>
                             <span class="inline-flex flex-wrap items-center gap-1 shrink-0">
@@ -206,7 +202,7 @@
                                 <div class="mt-3" data-testid="cover-preview">
                                     <p class="text-[10px] font-medium text-cream-subtle mb-2">封面预览</p>
                                     <div class="rounded-lg overflow-hidden border border-white/[0.02] bg-ink-bg relative">
-                                        <img :src="'/api/pdf-page/' + encodeURIComponent(currentSubtitle) + '/0?t=' + pdfRefresh"
+                                        <img :src="pdfPageUrl(0)"
                                              class="w-full block" :style="theme === 'light' ? 'filter:none' : 'filter:brightness(0.92) contrast(0.95)'">
                                         <div x-show="theme === 'dark'" class="absolute inset-0 bg-black/20 pointer-events-none"></div>
                                     </div>
@@ -226,7 +222,7 @@
                                         <span class="text-[10px] font-mono w-[72px] text-right shrink-0" :style="'color:' + level.color" x-text="level.label"></span>
                                         <div class="flex-1 h-5 rounded-md bg-ink-input overflow-hidden">
                                             <div class="h-full rounded-md transition-all duration-700 ease-out"
-                                                 :style="'width:' + (getDifficultyStats()[li] / Math.max(1, problems.length) * 100) + '%; background:' + level.color"></div>
+                                                 :style="difficultyBarStyle(li, level.color)"></div>
                                         </div>
                                         <span class="text-[11px] font-mono text-cream-subtle w-4 text-right shrink-0 font-medium" x-text="getDifficultyStats()[li]"></span>
                                     </div>
@@ -288,7 +284,7 @@
                                     <input type="text" x-ref="tagInput" x-model="tagDraft"
                                            @keydown.enter.prevent="commitTag()"
                                            @keydown.,.prevent="commitTag()"
-                                           @keydown.backspace="if(!tagDraft && getTags(selectedIdx).length) removeTag(selectedIdx, getTags(selectedIdx).length - 1)"
+                                           @keydown.backspace="removeLastTag()"
                                            class="w-24 px-2.5 py-1 bg-transparent border border-dashed border-white/[0.02] rounded-md text-[10px] text-cream placeholder-cream-subtle/30 focus:border-gold/30 focus:outline-none transition-colors"
                                            placeholder="添加标签">
                                 </div>
@@ -338,7 +334,7 @@
                             </div>
                             <!-- Stepped Track -->
                             <div class="relative h-12 flex items-center cursor-pointer select-none"
-                                 x-init="trackWidth = $el.offsetWidth; new ResizeObserver(() => trackWidth = $el.offsetWidth).observe($el)"
+                                 x-init="observeDifficultyTrack($el)"
                                  @click="setDifficultyFromTrack(selectedIdx, $event)">
                                 <div class="absolute inset-x-0 h-1.5 rounded-full bg-ink-border"></div>
                                 <div class="absolute left-0 h-1.5 rounded-full overflow-hidden transition-all duration-300"
@@ -399,7 +395,7 @@
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <textarea x-model="problems[selectedIdx].statement.description" rows="8" class="editor-surface w-full h-56 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream placeholder-cream-subtle/40 leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="preview-surface w-full h-56 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.descPreview, problems[selectedIdx]?.statement?.description)" x-ref="descPreview"></div>
+                                    <div class="preview-surface w-full h-56 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.descPreview, statementValue('description'))" x-ref="descPreview"></div>
                                 </div>
                             </div>
 
@@ -409,7 +405,7 @@
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <textarea x-model="problems[selectedIdx].statement.input" class="editor-surface w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.inputPreview, problems[selectedIdx]?.statement?.input)" x-ref="inputPreview"></div>
+                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.inputPreview, statementValue('input'))" x-ref="inputPreview"></div>
                                 </div>
                             </div>
 
@@ -419,7 +415,7 @@
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <textarea x-model="problems[selectedIdx].statement.output" class="editor-surface w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.outputPreview, problems[selectedIdx]?.statement?.output)" x-ref="outputPreview"></div>
+                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.outputPreview, statementValue('output'))" x-ref="outputPreview"></div>
                                 </div>
                             </div>
 
@@ -468,7 +464,7 @@
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <textarea x-model="problems[selectedIdx].statement.notes" class="editor-surface w-full h-32 px-3.5 py-2.5 bg-ink-input border border-white/[0.03] rounded-lg font-mono text-[13px] text-cream leading-relaxed focus:border-gold/40 focus:outline-none transition-colors resize-none"></textarea>
-                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.notesPreview, problems[selectedIdx]?.statement?.notes)" x-ref="notesPreview"></div>
+                                    <div class="preview-surface w-full h-32 px-4 py-3 bg-ink-elevated border border-white/[0.02] rounded-lg overflow-y-auto prose prose-invert max-w-none text-[13.5px] leading-relaxed prose-p:my-1.5 prose-p:leading-normal prose-ul:my-1.5 prose-li:my-0.5 prose-pre:bg-ink-card prose-pre:my-2 prose-a:text-gold" x-effect="renderMath($refs.notesPreview, statementValue('notes'))" x-ref="notesPreview"></div>
                                 </div>
                             </div>
 
@@ -489,7 +485,7 @@
                                 <template x-if="selectedIdx !== null && problems[selectedIdx]">
                                     <span>
                                         当前题目
-                                        <span class="font-mono text-gold" x-text="String.fromCharCode(65 + selectedIdx)"></span>
+                                        <span class="font-mono text-gold" x-text="problemLetter(selectedIdx)"></span>
                                         · <span x-text="problems[selectedIdx].problem.display_name"></span>
                                         <span x-show="sandboxLastRunAt" class="ml-2 text-cream-subtle/70">
                                             上次运行 <span class="font-mono" x-text="sandboxLastRunAt"></span>
@@ -517,33 +513,33 @@
                     <div x-show="sandboxInfo && sandboxInfo.matched" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
                             <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Problem Dir</p>
-                            <p class="font-mono text-[13px] text-cream truncate" x-text="sandboxInfo?.dir || '-'"></p>
+                            <p class="font-mono text-[13px] text-cream truncate" x-text="sandboxInfoValue('dir', '-')"></p>
                         </div>
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
                             <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Test Data</p>
-                            <p class="font-mono text-[13px] text-cream"><span x-text="sandboxInfo?.data_count || 0"></span> cases</p>
+                            <p class="font-mono text-[13px] text-cream"><span x-text="sandboxInfoValue('data_count', 0)"></span> cases</p>
                             <p class="text-[10px] text-cream-subtle mt-1">
-                                <span x-text="sandboxInfo?.sample_count || 0"></span> sample /
-                                <span x-text="sandboxInfo?.secret_count || 0"></span> secret
+                                <span x-text="sandboxInfoValue('sample_count', 0)"></span> sample /
+                                <span x-text="sandboxInfoValue('secret_count', 0)"></span> secret
                             </p>
                         </div>
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
                             <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Limits</p>
                             <p class="font-mono text-[13px] text-cream">
-                                <span x-text="sandboxInfo?.limits?.time || 1"></span>s /
-                                <span x-text="sandboxInfo?.limits?.memory || 256"></span>MB
+                                <span x-text="sandboxLimit('time', 1)"></span>s /
+                                <span x-text="sandboxLimit('memory', 256)"></span>MB
                             </p>
                         </div>
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
                             <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Validator</p>
-                            <p class="font-mono text-[13px]" :class="sandboxInfo?.files?.validator ? 'text-success' : 'text-cream-subtle'" x-text="sandboxInfo?.files?.validator || 'missing'"></p>
+                            <p class="font-mono text-[13px]" :class="sandboxFile('validator', '') ? 'text-success' : 'text-cream-subtle'" x-text="sandboxFile('validator', 'missing')"></p>
                         </div>
                         <div class="rounded-xl bg-ink-input/45 border border-white/[0.02] p-4">
                             <p class="text-[10px] uppercase tracking-wide text-cream-subtle mb-1">Solutions</p>
                             <p class="font-mono text-[13px] text-cream">
-                                <span x-text="(sandboxInfo?.files?.std || []).length"></span> std /
-                                <span x-text="(sandboxInfo?.files?.brute || []).length"></span> brute /
-                                <span x-text="(sandboxInfo?.files?.wrong || []).length"></span> wrong
+                                <span x-text="sandboxFileCount('std')"></span> std /
+                                <span x-text="sandboxFileCount('brute')"></span> brute /
+                                <span x-text="sandboxFileCount('wrong')"></span> wrong
                             </p>
                         </div>
                     </div>
@@ -583,11 +579,11 @@
                             <div class="flex items-center gap-3">
                                 <span class="px-3 py-1 rounded font-mono text-[12px] font-semibold" :class="sandboxStatusClass(submissionVerdict)" x-text="submissionVerdict"></span>
                                 <span class="text-[11px] text-cream-subtle" x-text="submissionRunning ? '已进入独立评测任务' : submissionStatsText()"></span>
-                                <span x-show="submissionResult?.submission?.workspace_cleaned" class="text-[10px] text-success">临时工作区已清理</span>
+                                <span x-show="submissionWorkspaceCleaned()" class="text-[10px] text-success">临时工作区已清理</span>
                             </div>
                             <div x-show="submissionCompile() && submissionCompile().ok === false" class="rounded-lg bg-danger/10 border border-danger/20 p-3">
                                 <p class="text-[11px] font-medium text-danger mb-2">编译失败</p>
-                                <pre class="max-h-48 overflow-auto whitespace-pre-wrap text-[10px] font-mono text-cream-muted" x-text="submissionCompile()?.stderr || 'compiler failed'"></pre>
+                                <pre class="max-h-48 overflow-auto whitespace-pre-wrap text-[10px] font-mono text-cream-muted" x-text="submissionCompileError()"></pre>
                             </div>
                             <div x-show="submissionCases().length > 0" class="rounded-lg border border-white/[0.03] overflow-hidden">
                                 <div class="max-h-72 overflow-auto">
@@ -648,7 +644,7 @@
                                             <template x-for="prog in sandboxMatrixPrograms()" :key="prog">
                                                 <td class="px-3 py-2">
                                                     <span class="inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px]"
-                                                          :class="sandboxStatusClass(row.results[prog]?.status)"
+                                                          :class="sandboxStatusClass(matrixStatus(row, prog))"
                                                           x-text="row.results[prog] ? row.results[prog].status + ' ' + row.results[prog].time.toFixed(3) + 's' : '-'"></span>
                                                 </td>
                                             </template>

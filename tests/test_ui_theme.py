@@ -58,7 +58,7 @@ class UiThemeTests(unittest.TestCase):
 
     def test_theme_uses_css_variables_without_changing_api_markup(self):
         html = self.ui.HTML_TEMPLATE
-        tailwind = (self.ui.WEBUI_ASSET_DIR / "tailwind-config.js").read_text(encoding="utf-8")
+        tailwind = (self.ui.WEBUI_ASSET_DIR / "tailwind.config.cjs").read_text(encoding="utf-8")
         self.assertIn("rgb(var(--ink-bg) / <alpha-value>)", tailwind)
         self.assertIn("--primary-top: 235 199 124", self.css)
         self.assertIn("--primary-top: 226 198 139", self.css)

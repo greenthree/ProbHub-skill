@@ -501,6 +501,10 @@ probhub typeset [ID...]
 
 `typeset` 与正式 `build` 共用工作区写锁、全量 collection lint、隔离输入快照、提交前输入栅栏和 journal/rollback 发布。Typst 编译、任一题切页或正式替换失败时，已有 `meta.json`、`problems.json`、全卷 PDF 和单题 PDF 均保持原字节；只发布全题 metadata、全卷产物和所选单题 PDF，不触碰 ZIP、DOMjudge 配置或 Manifest。
 
+当前模板会在每题首页写入透明但可提取的稳定 ID 标记，Core 要求标记与正式题序一一对应、各出现一次且首页严格递增；题号按 `A` 到 `Z`、`AA`、`AB` 继续。单题页段从自己的标记页开始，到下一题标记页之前结束：封面、目录及首题前空白页不属于任何单题，题目内部空白页和最后一题后的尾页归入其所在题目。任一标记缺失、重复、未知或乱序都会以 `pdf_boundary_invalid` 失败。
+
+未升级的旧 Typst 模板继续按可见题名回退切页，但归一化后大小写、全角字符或空白相同的题名会被 lint 拒绝，不能再静默取得另一题的 PDF。长标题和 27 题以上的可靠切页应升级到当前模板标记协议。
+
 ## 12. `package`
 
 ```powershell
