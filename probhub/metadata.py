@@ -1,9 +1,24 @@
+import hashlib
 import re
+import unicodedata
 from pathlib import Path
 
 from .errors import ProbHubError
 from .io import write_json
 from .statement import parse_statement
+
+
+BOUNDARY_MARKER_PREFIX = "PROBHUB_BOUNDARY_V1_"
+
+
+def normalize_display_name(value):
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return "".join(normalized.split())
+
+
+def problem_boundary_marker(problem_id):
+    digest = hashlib.sha256(str(problem_id).encode("utf-8")).hexdigest()
+    return BOUNDARY_MARKER_PREFIX + digest
 
 
 def natural_key(path):
@@ -58,6 +73,8 @@ def build_meta(problem_dir, config):
             "source": str(quote.get("source", "")),
         }
     return {
+        "id": config["id"],
+        "boundary_marker": problem_boundary_marker(config["id"]),
         "name": config.get("name") or config.get("display_name"),
         "problem": problem,
         "statement": statement,

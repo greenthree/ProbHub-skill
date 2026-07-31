@@ -1,4 +1,6 @@
 import importlib.util
+import hashlib
+import json
 import os
 import uuid
 from pathlib import Path
@@ -7,24 +9,87 @@ from . import __version__
 from .errors import ProbHubError
 
 
-WEBUI_ASSET_NAMES = (
-    "index.html",
-    "app.css",
-    "app.js",
-    "mathjax-config.js",
-    "tailwind-config.js",
-    "theme.js",
-)
+WEBUI_ASSET_MANIFEST = "asset-manifest.json"
+WEBUI_SOURCE_ONLY_FILES = {
+    WEBUI_ASSET_MANIFEST,
+    "tailwind.config.cjs",
+    "tailwind.input.css",
+}
+
+
+def _webui_asset_digest(candidate, expected):
+    data = candidate.read_bytes()
+    if expected.startswith("sha256-text-lf:"):
+        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        prefix = "sha256-text-lf:"
+    elif expected.startswith("sha256:"):
+        prefix = "sha256:"
+    else:
+        return None
+    return prefix + hashlib.sha256(data).hexdigest()
 
 
 def _require_webui_assets(script):
     asset_root = script.parent / "webui"
-    missing = [name for name in WEBUI_ASSET_NAMES if not (asset_root / name).is_file()]
-    if missing:
+    manifest_path = asset_root / WEBUI_ASSET_MANIFEST
+    if not manifest_path.is_file():
         raise ProbHubError(
-            f"installed ProbHub WebUI assets are missing: {', '.join(missing)}",
+            f"installed ProbHub WebUI assets are missing: {WEBUI_ASSET_MANIFEST}",
             code="webui_runtime_missing",
         )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ProbHubError(
+            f"installed ProbHub WebUI asset manifest is invalid: {exc}",
+            code="webui_runtime_invalid",
+        ) from exc
+    files = manifest.get("files") if manifest.get("schema_version") == 1 else None
+    if not isinstance(files, dict) or not files:
+        raise ProbHubError(
+            "installed ProbHub WebUI asset manifest is invalid",
+            code="webui_runtime_invalid",
+        )
+    root = asset_root.resolve()
+    actual_files = {
+        path.relative_to(asset_root).as_posix()
+        for path in asset_root.rglob("*")
+        if path.is_file()
+        and path.relative_to(asset_root).as_posix() not in WEBUI_SOURCE_ONLY_FILES
+    }
+    if set(files) != actual_files:
+        raise ProbHubError(
+            "installed ProbHub WebUI asset inventory does not match its manifest",
+            code="webui_runtime_invalid",
+        )
+    for name, expected in files.items():
+        if not isinstance(name, str) or not isinstance(expected, str):
+            raise ProbHubError(
+                "installed ProbHub WebUI asset manifest is invalid",
+                code="webui_runtime_invalid",
+            )
+        candidate = (asset_root / name).resolve()
+        if (
+            candidate == root
+            or root not in candidate.parents
+            or not candidate.is_file()
+            or candidate.is_symlink()
+        ):
+            raise ProbHubError(
+                f"installed ProbHub WebUI asset is missing or invalid: {name}",
+                code="webui_runtime_missing",
+            )
+        actual = _webui_asset_digest(candidate, expected)
+        if actual is None:
+            raise ProbHubError(
+                f"installed ProbHub WebUI asset manifest is invalid: {name}",
+                code="webui_runtime_invalid",
+            )
+        if actual != expected:
+            raise ProbHubError(
+                f"installed ProbHub WebUI asset hash mismatch: {name}",
+                code="webui_runtime_invalid",
+            )
 
 
 def _webui_script():

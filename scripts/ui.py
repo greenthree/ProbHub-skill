@@ -17,7 +17,7 @@ from threading import BoundedSemaphore, Lock, Thread, Timer
 from urllib.parse import urlsplit
 
 import yaml
-from flask import Flask, g, jsonify, request, render_template_string, send_file
+from flask import Flask, jsonify, request, render_template_string, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -118,7 +118,6 @@ def _security_error(code, message):
 
 @app.before_request
 def protect_local_webui():
-    g.csp_nonce = secrets.token_urlsafe(18)
     if request.path == "/api/submission/run" and request.method == "POST":
         request.max_content_length = MAX_SUBMISSION_REQUEST_BYTES
     if not _request_host_is_loopback():
@@ -152,13 +151,12 @@ def request_too_large(_error):
 
 @app.after_request
 def add_webui_security_headers(response):
-    nonce = getattr(g, "csp_nonce", "")
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        f"script-src 'self' 'nonce-{nonce}' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' data: https:; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; "
+        "img-src 'self' data:; "
         "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     )
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -315,13 +313,25 @@ def enrich_problem_limits(problem_entries):
 # ==========================================
 WEBUI_ASSET_DIR = SCRIPT_DIR / "webui"
 WEBUI_TEMPLATE_PATH = WEBUI_ASSET_DIR / "index.html"
-WEBUI_PUBLIC_ASSETS = frozenset({
-    "app.css",
-    "app.js",
-    "mathjax-config.js",
-    "tailwind-config.js",
-    "theme.js",
+WEBUI_ASSET_MANIFEST = json.loads((WEBUI_ASSET_DIR / "asset-manifest.json").read_text(encoding="utf-8"))
+WEBUI_ENTRY_ASSETS = frozenset({
+    "app.css", "app.js", "mathjax-config.js", "theme.js",
+    "vendor/fonts.css", "vendor/tailwind.css", "vendor/marked.js",
+    "vendor/mathjax-tex-svg.js", "vendor/alpine-collapse.js", "vendor/alpine.js",
+    "vendor/sortable.js",
 })
+WEBUI_MISSING_ENTRY_ASSETS = WEBUI_ENTRY_ASSETS - frozenset(WEBUI_ASSET_MANIFEST["files"])
+if WEBUI_MISSING_ENTRY_ASSETS:
+    raise RuntimeError(
+        "WebUI asset manifest is missing entry assets: "
+        + ", ".join(sorted(WEBUI_MISSING_ENTRY_ASSETS))
+    )
+WEBUI_PUBLIC_ASSETS = frozenset(
+    name for name in WEBUI_ASSET_MANIFEST["files"]
+    if name != "index.html"
+    and name != "vendor/THIRD_PARTY_NOTICES.txt"
+    and not name.startswith("vendor/licenses/")
+)
 HTML_TEMPLATE = WEBUI_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 # ==========================================

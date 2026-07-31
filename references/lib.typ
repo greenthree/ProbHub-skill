@@ -174,6 +174,17 @@
 
 #let render-problems(problems: none) = {}
 
+#let problem-label(index) = {
+  let number = int(index) + 1
+  let label = ""
+  while number > 0 {
+    number -= 1
+    label = str.from-unicode(calc.rem(number, 26) + 65) + label
+    number = calc.quo(number, 26)
+  }
+  label
+}
+
 #let contest-conf(
   title: "这是一场 XCPC 程序设计竞赛",
   subtitle: "热身赛",
@@ -239,7 +250,7 @@
             ),
             // stroke: 0.4pt,
             ..problems.enumerate().map(((i, e)) => (
-              str.from-unicode(int(i) + 65), e.problem.display_name
+              problem-label(i), e.problem.display_name
             )).flatten()
           )
 
@@ -294,7 +305,11 @@
 
     if problems != none {
       for (i, e) in problems.enumerate() {
-        e.problem.display-name = "题目 " + str.from-unicode(int(i) + 65) + ". " + e.problem.display_name
+        place(
+          top + left,
+          text(size: 1pt, fill: rgb("#00000000"), e.boundary_marker),
+        )
+        e.problem.display-name = "题目 " + problem-label(i) + ". " + e.problem.display_name
         render-problem(e.problem, e.statement, language: problem-lang)
 
         if i < problems.len() - 1 {

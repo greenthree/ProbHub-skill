@@ -66,7 +66,7 @@ class UiSecurityTests(unittest.TestCase):
     def csrf_headers(self):
         return {"X-ProbHub-CSRF": self.ui.WEBUI_CSRF_TOKEN}
 
-    def test_index_injects_startup_token_and_uses_external_assets(self):
+    def test_index_injects_startup_token_and_uses_only_local_assets(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
@@ -76,16 +76,31 @@ class UiSecurityTests(unittest.TestCase):
         )
         self.assertEqual(re.findall(r"<script(?![^>]*\bsrc=)[^>]*>", html), [])
         self.assertNotIn("<style", html)
-        for asset in self.ui.WEBUI_PUBLIC_ASSETS:
+        self.assertNotRegex(html, r"(?:src|href)=['\"]https?://")
+        for asset in self.ui.WEBUI_ENTRY_ASSETS:
             self.assertIn(f'/webui/assets/{asset}', html)
+
+    def test_alpine_csp_event_handlers_delegate_statements_to_app_methods(self):
+        html = (ROOT / "scripts" / "webui" / "index.html").read_text(encoding="utf-8")
+        app = (ROOT / "scripts" / "webui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('@click="openSandbox()"', html)
+        self.assertIn('@keydown.backspace="removeLastTag()"', html)
+        self.assertNotIn("activePage = 'sandbox'; refreshSandboxInfo()", html)
+        self.assertNotRegex(html, r'@keydown\.backspace="\s*if\b')
+        self.assertIn("openSandbox() {", app)
+        self.assertIn("removeLastTag() {", app)
 
     def test_only_declared_package_assets_are_served(self):
         expected_types = {
             "app.css": {"text/css"},
             "app.js": {"application/javascript", "text/javascript"},
             "mathjax-config.js": {"application/javascript", "text/javascript"},
-            "tailwind-config.js": {"application/javascript", "text/javascript"},
             "theme.js": {"application/javascript", "text/javascript"},
+            "vendor/tailwind.css": {"text/css"},
+            "vendor/fonts.css": {"text/css"},
+            "vendor/alpine.js": {"application/javascript", "text/javascript"},
+            "vendor/marked.js": {"application/javascript", "text/javascript"},
         }
         for name, content_types in expected_types.items():
             with self.subTest(name=name):
@@ -97,6 +112,7 @@ class UiSecurityTests(unittest.TestCase):
                 finally:
                     response.close()
         self.assertEqual(self.client.get("/webui/assets/index.html").status_code, 404)
+        self.assertEqual(self.client.get("/webui/assets/vendor/licenses/marked.txt").status_code, 404)
         self.assertEqual(self.client.get("/webui/assets/unknown.js").status_code, 404)
 
     def test_write_routes_reject_missing_or_invalid_csrf_token(self):
@@ -165,8 +181,12 @@ class UiSecurityTests(unittest.TestCase):
         self.assertIn("base-uri 'none'", csp)
         self.assertIn("frame-ancestors 'none'", csp)
         script_policy = csp.split("script-src ", 1)[1].split(";", 1)[0]
-        self.assertIn("'nonce-", script_policy)
-        self.assertNotIn("'unsafe-inline'", script_policy)
+        self.assertEqual(script_policy, "'self'")
+        self.assertNotIn("'unsafe-eval'", csp)
+        self.assertNotIn("cdn.", csp)
+        self.assertNotIn("fonts.googleapis.com", csp)
+        self.assertIn("font-src 'self'", csp)
+        self.assertIn("img-src 'self' data:", csp)
 
     def test_oversized_upload_returns_structured_413(self):
         response = self.client.post(
@@ -269,7 +289,7 @@ class UiSecurityTests(unittest.TestCase):
         sanitized = html.unescape(match.group(1))
         self.assertEqual(
             sanitized,
-            '<img src="https://example.com/image.png"><a>x</a>',
+            '<img><a>x</a>',
         )
         for forbidden in ("onerror", "javascript:", "style=", "<svg", "<script", "<iframe", "srcdoc"):
             self.assertNotIn(forbidden, sanitized.lower())

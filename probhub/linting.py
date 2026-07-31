@@ -8,11 +8,11 @@ from .calibration import evaluate_calibration, validate_calibration_config
 from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
-from .metadata import build_meta
+from .metadata import build_meta, normalize_display_name
 from .solutions import analyze_solution_verification
 from .statement import parse_statement
 from .statement_consistency import analyze_constraint_consistency, reconcile_constraints
-from .typesetting import is_temporary_typst_source
+from .typesetting import is_temporary_typst_source, typst_boundary_protocol_supported
 from .transactions import pending_workspace_transactions
 from .workspace import load_problem, problem_entries
 
@@ -655,6 +655,24 @@ def lint_workspace(root, workspace, selected=None):
     ids = [entry["id"] for entry in problem_entries(workspace)]
     duplicate_ids = sorted({item for item in ids if ids.count(item) > 1})
     errors = [f"duplicate problem id: {item}" for item in duplicate_ids]
+    if not typst_boundary_protocol_supported(root, workspace):
+        names = {}
+        for entry in problem_entries(workspace):
+            _, config = load_problem(root, entry)
+            display_name = config.get("display_name") or config.get("name")
+            names.setdefault(normalize_display_name(display_name), []).append(
+                (entry["id"], display_name)
+            )
+        collisions = [items for items in names.values() if len(items) > 1]
+        for items in collisions:
+            details = ", ".join(
+                f"{problem_id}={display_name!r}"
+                for problem_id, display_name in items
+            )
+            errors.append(
+                "legacy Typst template requires unique normalized problem display names: "
+                + details
+            )
     cover = ((workspace.get("typst") or {}).get("cover") or {})
     if not isinstance(cover, dict):
         errors.append("typst.cover must be a mapping")

@@ -10,9 +10,10 @@ from probhub.building import typeset_workspace
 from probhub.errors import ProbHubError
 from probhub.hashing import hash_file
 from probhub.io import write_yaml
+from probhub.metadata import problem_boundary_marker
 from probhub.scaffold import scaffold_config, scaffold_files
 from probhub.typesetting import problem_boundaries
-from probhub.workspace import load_workspace, problem_entries
+from probhub.workspace import load_problem, load_workspace, problem_entries
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,8 @@ RUN_TYPST_E2E = (
     "set PROBHUB_RUN_TYPST_E2E=1 with Typst on PATH to run the PDF integration test",
 )
 class TypstPdfIntegrationTests(unittest.TestCase):
-    def create_production_template_workspace(self, root):
+    def create_production_template_workspace(self, root, items=None):
+        items = items or (("A", "Alpha"), ("B", "Beta"))
         (root / ".probhub").mkdir(parents=True)
         typst_root = root / "typst-statement"
         typst_dir = typst_root / "正式赛"
@@ -57,8 +59,8 @@ class TypstPdfIntegrationTests(unittest.TestCase):
                 },
             },
             "problems": [
-                {"id": "A", "directory": "A"},
-                {"id": "B", "directory": "B"},
+                {"id": problem_id, "directory": problem_id}
+                for problem_id, _ in items
             ],
         })
         statements = {
@@ -83,14 +85,20 @@ class TypstPdfIntegrationTests(unittest.TestCase):
                 "输出它们的和。\n"
             ),
         }
-        for problem_id, name in (("A", "Alpha"), ("B", "Beta")):
+        for problem_id, name in items:
             problem_dir = root / problem_id
             for relative, content in scaffold_files(name, "standard").items():
                 path = problem_dir / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8", newline="\n")
             (problem_dir / "problem.md").write_text(
-                statements[problem_id],
+                statements.get(problem_id) or (
+                    f"# {name}\n\n"
+                    "## 题目描述\n\n"
+                    f"Boundary fixture for {problem_id}.\n\n"
+                    "## 输入格式\n\n输入一个整数。\n\n"
+                    "## 输出格式\n\n输出这个整数。\n"
+                ),
                 encoding="utf-8",
                 newline="\n",
             )
@@ -111,6 +119,7 @@ class TypstPdfIntegrationTests(unittest.TestCase):
             '#set text(font: "Noto Sans CJK SC", size: 12pt)\n'
             '#for (index, entry) in problems.enumerate() {\n'
             '  if index > 0 { pagebreak() }\n'
+            '  text(size: 1pt, fill: rgb("#00000000"), entry.boundary_marker)\n'
             '  heading(level: 1)[题目 #str.from-unicode(65 + index). #entry.problem.display_name]\n'
             '  [#entry.statement.description]\n'
             '  if index == 0 {\n'
@@ -155,12 +164,16 @@ class TypstPdfIntegrationTests(unittest.TestCase):
 
             main_pdf = Path(result["main_pdf"])
             reader = PdfReader(main_pdf)
+            loaded = [
+                load_problem(root, entry)
+                for entry in problem_entries(workspace)
+            ]
             self.assertEqual(len(reader.pages), 4)
             self.assertEqual(
-                problem_boundaries(main_pdf),
+                problem_boundaries(main_pdf, loaded),
                 [
-                    {"display_name": "Alpha", "page": 3},
-                    {"display_name": "Beta", "page": 4},
+                    {"id": "A", "marker": problem_boundary_marker("A"), "page": 3},
+                    {"id": "B", "marker": problem_boundary_marker("B"), "page": 4},
                 ],
             )
             self.assertEqual(result["pdfs"]["A"]["pages"], 1)
@@ -194,6 +207,40 @@ class TypstPdfIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(list(root.rglob(".probhub-*.typ")), [])
 
+    def test_canonical_markers_support_duplicate_long_names_and_aa_label(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            long_name = "跨页边界稳定性验证" * 12
+            items = [
+                (f"P{index:02d}", "重复题名" if index <= 2 else f"Problem {index}")
+                for index in range(1, 27)
+            ]
+            items.append(("P27", long_name))
+            workspace = self.create_production_template_workspace(root, items)
+            main_typ = root / "typst-statement/正式赛/main.typ"
+            main_text = main_typ.read_text(encoding="utf-8")
+            main_text = main_text.replace("enable-titlepage: true", "enable-titlepage: false")
+            main_text = main_text.replace("enable-problem-list: true", "enable-problem-list: false")
+            main_typ.write_text(main_text, encoding="utf-8", newline="\n")
+
+            entries = problem_entries(workspace)
+            result = typeset_workspace(root, workspace, entries)
+            loaded = [load_problem(root, entry) for entry in entries]
+            boundaries = problem_boundaries(result["main_pdf"], loaded)
+
+            self.assertEqual([item["id"] for item in boundaries], [item[0] for item in items])
+            self.assertEqual([item["page"] for item in boundaries], list(range(1, 28)))
+            self.assertTrue(all(result["pdfs"][problem_id]["pages"] == 1 for problem_id, _ in items))
+            for problem_id, _ in items:
+                extracted = "".join(
+                    page.extract_text() or ""
+                    for page in PdfReader(root / problem_id / "problem.pdf").pages
+                )
+                self.assertEqual(extracted.count(problem_boundary_marker(problem_id)), 1)
+            last_page = PdfReader(result["main_pdf"]).pages[-1].extract_text() or ""
+            self.assertIn("题目 AA.", last_page)
+            self.assertIn(long_name[:12], last_page)
+
     def test_real_multi_problem_typeset_splits_pages_and_failure_is_atomic(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -203,12 +250,13 @@ class TypstPdfIntegrationTests(unittest.TestCase):
             result = typeset_workspace(root, workspace, entries)
 
             main_pdf = Path(result["main_pdf"])
+            loaded = [load_problem(root, entry) for entry in entries]
             self.assertEqual(len(PdfReader(main_pdf).pages), 3)
             self.assertEqual(
-                problem_boundaries(main_pdf),
+                problem_boundaries(main_pdf, loaded),
                 [
-                    {"display_name": "Alpha", "page": 1},
-                    {"display_name": "Beta", "page": 3},
+                    {"id": "A", "marker": problem_boundary_marker("A"), "page": 1},
+                    {"id": "B", "marker": problem_boundary_marker("B"), "page": 3},
                 ],
             )
             self.assertEqual(result["pdfs"]["A"]["pages"], 2)
@@ -230,6 +278,26 @@ class TypstPdfIntegrationTests(unittest.TestCase):
                 main_pdf,
             ]
             before = {path: hash_file(path) for path in generated}
+            duplicate_marker_main = (root / "typst/contest/main.typ").read_text(
+                encoding="utf-8"
+            )
+            duplicate_marker_main = duplicate_marker_main.replace(
+                "entry.boundary_marker", f'"{problem_boundary_marker("A")}"'
+            )
+            (root / "typst/contest/main.typ").write_text(
+                duplicate_marker_main,
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            with self.assertRaises(ProbHubError) as raised:
+                typeset_workspace(root, workspace, entries)
+
+            self.assertEqual(raised.exception.code, "pdf_boundary_invalid")
+            self.assertEqual({path: hash_file(path) for path in generated}, before)
+            self.assertEqual(list((root / ".probhub").glob("build-publish-*")), [])
+            self.assertEqual(list(root.parent.glob(f".{root.name}-probhub-*")), [])
+
             (root / "typst/contest/main.typ").write_text(
                 "#let broken =\n",
                 encoding="utf-8",

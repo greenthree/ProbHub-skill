@@ -81,7 +81,63 @@ class WebUiRuntimeTests(unittest.TestCase):
             with self.assertRaises(ProbHubError) as raised:
                 webui_runtime._require_webui_assets(script)
         self.assertEqual(raised.exception.code, "webui_runtime_missing")
-        self.assertIn("index.html", str(raised.exception))
+        self.assertIn("asset-manifest.json", str(raised.exception))
+
+    def test_tampered_packaged_webui_asset_is_a_stable_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "scripts/ui.py"
+            asset_root = script.parent / "webui"
+            asset_root.mkdir(parents=True)
+            script.write_text("", encoding="utf-8")
+            (asset_root / "index.html").write_text("tampered", encoding="utf-8")
+            (asset_root / "asset-manifest.json").write_text(json.dumps({
+                "schema_version": 1,
+                "files": {"index.html": "sha256:" + "0" * 64},
+            }), encoding="utf-8")
+            with self.assertRaises(ProbHubError) as raised:
+                webui_runtime._require_webui_assets(script)
+        self.assertEqual(raised.exception.code, "webui_runtime_invalid")
+        self.assertIn("hash mismatch", str(raised.exception))
+
+    def test_packaged_webui_text_hash_is_newline_stable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "scripts/ui.py"
+            asset_root = script.parent / "webui"
+            asset_root.mkdir(parents=True)
+            script.write_text("", encoding="utf-8")
+            canonical = b"line one\nline two\n"
+            (asset_root / "index.html").write_bytes(canonical.replace(b"\n", b"\r\n"))
+            import hashlib
+
+            (asset_root / "asset-manifest.json").write_text(json.dumps({
+                "schema_version": 1,
+                "files": {
+                    "index.html": "sha256-text-lf:" + hashlib.sha256(canonical).hexdigest(),
+                },
+            }), encoding="utf-8")
+            webui_runtime._require_webui_assets(script)
+
+    def test_incomplete_packaged_webui_manifest_is_a_stable_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "scripts/ui.py"
+            asset_root = script.parent / "webui"
+            asset_root.mkdir(parents=True)
+            script.write_text("", encoding="utf-8")
+            index = b"index"
+            (asset_root / "index.html").write_bytes(index)
+            (asset_root / "app.js").write_text("app", encoding="utf-8")
+            import hashlib
+
+            (asset_root / "asset-manifest.json").write_text(json.dumps({
+                "schema_version": 1,
+                "files": {
+                    "index.html": "sha256:" + hashlib.sha256(index).hexdigest(),
+                },
+            }), encoding="utf-8")
+            with self.assertRaises(ProbHubError) as raised:
+                webui_runtime._require_webui_assets(script)
+        self.assertEqual(raised.exception.code, "webui_runtime_invalid")
+        self.assertIn("inventory", str(raised.exception))
 
     def test_webui_dependency_failure_is_a_stable_error(self):
         loader = mock.Mock()
