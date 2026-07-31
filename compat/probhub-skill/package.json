@@ -1,6 +1,6 @@
 {
   "name": "probhub-skill",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Lightweight ProbHub command package that delegates to the complete probhub package.",
   "main": "bin/init.js",
   "bin": {
@@ -32,7 +32,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "probhub": "0.6.0"
+    "probhub": "0.6.1"
   },
   "files": [
     "bin/*.js",

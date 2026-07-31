@@ -192,6 +192,7 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "scripts/webui/mathjax-config.js",
         "references/cli.md", "references/lib.typ", "references/main.typ",
         "references/problems.typ", "references/usts.png", "references/testlib.h",
+        "references/verification-modes.md",
     }
     missing = sorted(required_main - main_paths)
     if missing:

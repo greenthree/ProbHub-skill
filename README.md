@@ -84,6 +84,18 @@ probhub doctor
 
 你可以提供题目想法、已有 Markdown、PDF、网页、代码或数据。Agent 会根据 [SKILL.md](SKILL.md) 调用同一套 ProbHub Core；你只需要审查题意、算法、数据强度和最终 PDF。
 
+### 3. 选择验证模式
+
+调用 Agent 时可以直接指定模式；未指定时使用普通模式。三种模式都会完成 lint、样例核验、无缓存 Judge 和交付门禁，发现高风险问题时会自动升级。
+
+| 模式 | 适用情况 | 主要差异 |
+|---|---|---|
+| 快速 | 简单、确定性强、证明完整的题目 | 固定 seed 完成 100 轮 stress，不调用独立 Agent |
+| 普通（默认） | 大多数题目 | 正式 stress，并由 1 个盲审 Agent 独立给出证明和 std |
+| 完整 | 难题、特殊 Judge、精度或随机化问题，以及存在分歧的题目 | 普通模式基础上增加独立证明/参考实现审查和对抗审查 |
+
+详细选择、升级和交接规则见 [Agent 验证模式](references/verification-modes.md)。
+
 ## 环境要求
 
 ProbHub 已在 Windows 和 Ubuntu 上持续测试。macOS 通常可以运行，但目前不是发布 CI 的强制验证平台。
@@ -303,6 +315,7 @@ ProbHub 面向本地、单用户、可信的出题环境。它会限制时间、
 - [数据组与解法期望](references/data-groups-expectations.md)
 - [错解分类与数据强度](references/mistake-taxonomy.md)
 - [Stress 差分测试](references/stress.md)
+- [Agent 快速、普通与完整验证模式](references/verification-modes.md)
 - [Checker 与交互题](references/checker-interactor.md)
 - [进程和资源控制](references/process-control.md)
 - [Checkpoint、Seal 与 Generation](references/generations.md)
@@ -329,16 +342,6 @@ npm run pack:check
 - [CYaRon](https://github.com/luogu-dev/cyaron)：测试数据生成工具。
 - [olymp-in-typst](https://github.com/lihaoze123/olymp-in-typst)：算法竞赛 Typst 排版模板。
 - [testlib](https://github.com/MikeMirzayanov/testlib)：算法竞赛评测辅助库。
-
-## 下一版本计划：Agent 验证模式
-
-下一版本计划为 Agent 预设三种验证模式。模式只改变交叉验证深度；lint、样例核验、无缓存 Judge、解法宿命检查和最终构建仍是共同底线。用户未指定时默认使用普通模式；发现证明缺口、实现分歧或高风险 Judge 时必须自动升级，不能静默降级。
-
-- **快速**：只在题目较简单、算法确定、证明完整且没有特殊 Judge 风险时由 Agent 自动选择；用户也可以明确指定。该模式不运行 stress、不调用子 Agent，但必须完成共同底线，并明确报告省略的验证与剩余风险。
-- **普通（默认）**：运行经过吞吐校准、固定 seed 的 stress，并调用 1 个“盲审”子 Agent。盲审者最初只能看到冻结后的题面和约束，不能看到主解、代码或测试数据，需要独立给出证明、复杂度和 std；主 Agent 随后审查两份实现并实际交叉运行。出现结论不一致时自动升级到完整模式。
-- **完整**：用于高难度题、随机化或启发式解法、精度题、复杂 Checker/Interactor、时限余量紧张，或用户明确指定的场景。在普通模式基础上增加 1 个独立证明/参考实现审查者和 1 个对抗审查者：前者尝试不同算法或可信小范围 oracle，后者系统攻击证明、Validator、Checker、错解矩阵和数据覆盖，并为错解寻找可固化反例。主 Agent 必须逐份审查代码与结构化结果，解决所有分歧，确认 accepted 满足 AC 宿命、每个声明错解都被对应目标组稳定击杀。
-
-子 Agent 的模型档位本身不构成独立性证据；独立性来自上下文隔离、不同算法或关键实现以及对抗角色。无法运行 stress 的题型必须使用穷举、小范围 oracle、Checker/Interactor 多策略验证等替代证据，不能把“未发现问题”当作通过。该功能仍在规划中，当前版本尚未提供模式选择。
 
 ## License
 
