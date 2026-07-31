@@ -8,6 +8,7 @@ const vendorRoot = path.join(webuiRoot, 'vendor');
 const fontRoot = path.join(vendorRoot, 'fonts');
 const licenseRoot = path.join(vendorRoot, 'licenses');
 const manifestPath = path.join(webuiRoot, 'asset-manifest.json');
+const textAssetExtensions = new Set(['.cjs', '.css', '.html', '.js', '.json', '.txt']);
 
 const packageVersions = {
   '@alpinejs/collapse': '3.15.12',
@@ -71,8 +72,13 @@ function writeManifest() {
     if (!absolute.startsWith(path.resolve(webuiRoot) + path.sep)) {
       throw new Error(`manifest path escaped scripts/webui: ${relative}`);
     }
-    const data = fs.readFileSync(absolute);
-    files[relative] = `sha256:${crypto.createHash('sha256').update(data).digest('hex')}`;
+    let data = fs.readFileSync(absolute);
+    let algorithm = 'sha256';
+    if (textAssetExtensions.has(path.extname(relative).toLowerCase())) {
+      data = Buffer.from(data.toString('utf8').replace(/\r\n?/g, '\n'), 'utf8');
+      algorithm = 'sha256-text-lf';
+    }
+    files[relative] = `${algorithm}:${crypto.createHash('sha256').update(data).digest('hex')}`;
   }
   fs.writeFileSync(manifestPath, `${JSON.stringify({ schema_version: 1, files }, null, 2)}\n`, 'utf8');
 }

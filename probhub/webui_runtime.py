@@ -17,6 +17,18 @@ WEBUI_SOURCE_ONLY_FILES = {
 }
 
 
+def _webui_asset_digest(candidate, expected):
+    data = candidate.read_bytes()
+    if expected.startswith("sha256-text-lf:"):
+        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        prefix = "sha256-text-lf:"
+    elif expected.startswith("sha256:"):
+        prefix = "sha256:"
+    else:
+        return None
+    return prefix + hashlib.sha256(data).hexdigest()
+
+
 def _require_webui_assets(script):
     asset_root = script.parent / "webui"
     manifest_path = asset_root / WEBUI_ASSET_MANIFEST
@@ -58,8 +70,7 @@ def _require_webui_assets(script):
             )
         candidate = (asset_root / name).resolve()
         if (
-            not expected.startswith("sha256:")
-            or candidate == root
+            candidate == root
             or root not in candidate.parents
             or not candidate.is_file()
             or candidate.is_symlink()
@@ -68,8 +79,13 @@ def _require_webui_assets(script):
                 f"installed ProbHub WebUI asset is missing or invalid: {name}",
                 code="webui_runtime_missing",
             )
-        actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
-        if actual != expected.removeprefix("sha256:"):
+        actual = _webui_asset_digest(candidate, expected)
+        if actual is None:
+            raise ProbHubError(
+                f"installed ProbHub WebUI asset manifest is invalid: {name}",
+                code="webui_runtime_invalid",
+            )
+        if actual != expected:
             raise ProbHubError(
                 f"installed ProbHub WebUI asset hash mismatch: {name}",
                 code="webui_runtime_invalid",
