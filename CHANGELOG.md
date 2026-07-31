@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-31
+
+- WebUI 的关键 JavaScript、样式、数学排版资源与字体改为随 npm 包本地发布，移除运行时 CDN 依赖和 `unsafe-eval`，在断网环境中仍可保持原有界面与交互。
+- PDF 切页改用稳定题目 ID marker，严格拒绝 marker 缺失、重复、乱序以及 Legacy 题名冲突，覆盖重复题名和超过 26 题的组卷边界。
+- Unix 受限进程启动改用 fail-closed exec helper 设置资源限制，移除多线程环境中的 `preexec_fn`，降低并发评测和 WebUI 启动时的死锁风险。
+- WebUI 文本资源使用规范化 LF 哈希、二进制资源保留原始 SHA-256，使资源完整性检查在 Windows 与 Linux clean install 中保持一致。
+
 ## [0.6.1] - 2026-07-31
 
 - 新增已安装 Core 的 `probhub ui` 入口与依赖诊断；WebUI 的 HTML、CSS 和 JavaScript 拆分为包内静态资源，保留现有界面、主题、交互和 Schema v1 写入边界。
