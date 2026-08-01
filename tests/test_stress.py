@@ -3,7 +3,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import probhub.stressing as stressing
 from probhub.cli import build_parser
 from probhub.errors import ProbHubError
 from probhub.io import write_yaml
@@ -14,6 +16,22 @@ from probhub.workspace import load_problem, load_workspace, problem_entries
 
 
 class StressTests(unittest.TestCase):
+    @staticmethod
+    def artifact_size(path):
+        return sum(item.stat().st_size for item in Path(path).iterdir() if item.is_file())
+
+    def test_output_budget_enforcement_failure_is_infrastructure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.object(
+                stressing,
+                "run_managed_to_files",
+                side_effect=stressing.OutputBudgetError("cannot enforce output budget"),
+            ):
+                result = stressing._run(["unused"], None, 1, temp)
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["reason"], "output_control_error")
+        self.assertIn("cannot enforce", result["message"])
+
     def create_workspace(self, root, judge_type="standard"):
         write_yaml(root / ".probhub/workspace.yaml", {
             "schema_version": 1,
@@ -111,6 +129,11 @@ class StressTests(unittest.TestCase):
             self.assertTrue((artifact / "accepted.out").is_file())
             self.assertTrue((artifact / "brute.out").is_file())
             metadata = json.loads((artifact / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["schema_version"], 2)
+            self.assertTrue(metadata["replayable"])
+            self.assertFalse((artifact / "generator.out").exists())
+            self.assertEqual(metadata["files"]["generator.out"]["alias"], "input.in")
+            self.assertLessEqual(self.artifact_size(artifact), metadata["artifact_limit_bytes"])
             self.assertEqual(metadata["master_seed"], 1)
             self.assertEqual(metadata["generator_args"], ["2"])
             self.assertIn("--replay", result["replay_command"])
@@ -120,12 +143,19 @@ class StressTests(unittest.TestCase):
             self.assertTrue(replay["replay"])
             self.assertEqual(replay["reason"], "output_mismatch")
 
+            metadata["schema_version"] = 1
+            metadata.pop("replayable", None)
+            (artifact / "metadata.json").write_text(
+                json.dumps(metadata), encoding="utf-8"
+            )
+
             (problem / "code/brute.py").write_text(
                 "import sys\nprint(int(sys.stdin.read()))\n", encoding="utf-8"
             )
             replay = stress_problem(root, problem, config, replay=artifact)
             self.assertTrue(replay["ok"])
             self.assertEqual(replay["status"], "passed")
+            self.assertTrue(replay["replay"])
             self.assertNotIn("generator", [item["role"] for item in replay["compile"]])
 
 
@@ -182,14 +212,31 @@ class StressTests(unittest.TestCase):
             problem, config = self.create_workspace(root)
             config["limits"]["output"] = 1
             (problem / "code/generator.py").write_text(
-                "import sys\nsys.stdout.write('1\\n' * 1000000)\n", encoding="utf-8"
+                "import sys\n"
+                "sys.stdout.write('1\\n' * 1000000)\n"
+                "sys.stdout.flush()\n"
+                "sys.stderr.write('diagnostic' * 200000)\n"
+                "sys.stderr.flush()\n",
+                encoding="utf-8",
             )
             result = stress_problem(root, problem, config, rounds=1, master_seed=1)
             self.assertFalse(result["ok"])
             self.assertEqual(result["status"], "infrastructure")
             self.assertEqual(result["reason"], "generator_ole")
             artifact = root / result["counterexample"]
-            self.assertLessEqual((artifact / "generator.out").stat().st_size, 1024 * 1024)
+            metadata = json.loads((artifact / "metadata.json").read_text(encoding="utf-8"))
+            self.assertGreater(result["generator"]["output_bytes"], 1024 * 1024)
+            self.assertLessEqual(
+                result["generator"]["retained_output_bytes"], 1024 * 1024
+            )
+            self.assertFalse((artifact / "generator.out").exists())
+            self.assertFalse(metadata["input_complete"])
+            self.assertFalse(metadata["replayable"])
+            self.assertTrue(metadata["artifact_truncated"])
+            self.assertIsNone(result["replay_command"])
+            self.assertLessEqual(self.artifact_size(artifact), metadata["artifact_limit_bytes"])
+            with self.assertRaisesRegex(ProbHubError, "input is incomplete"):
+                stress_problem(root, problem, config, replay="latest")
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -203,6 +250,54 @@ class StressTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual(result["status"], "counterexample")
             self.assertEqual(result["reason"], "accepted_ole")
+            artifact = root / result["counterexample"]
+            metadata = json.loads((artifact / "metadata.json").read_text(encoding="utf-8"))
+            self.assertGreater(result["accepted"]["output_bytes"], 1024 * 1024)
+            self.assertLessEqual(self.artifact_size(artifact), metadata["artifact_limit_bytes"])
+
+    def test_custom_checker_feedback_is_bounded_and_classified_as_infrastructure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem, config = self.create_workspace(root, judge_type="custom")
+            config["limits"]["output"] = 1
+            (problem / "code/checker.py").write_text(
+                "import pathlib,sys\n"
+                "pathlib.Path(sys.argv[3], 'judgemessage.txt').write_text("
+                "'feedback' * 400000, encoding='utf-8')\n"
+                "raise SystemExit(42)\n",
+                encoding="utf-8",
+            )
+            result = stress_problem(root, problem, config, rounds=1, master_seed=1)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "infrastructure")
+            self.assertEqual(result["reason"], "checker_failed")
+            self.assertEqual(result["comparison"]["execution_status"], "OLE")
+            self.assertGreater(result["comparison"]["output_bytes"], 1024 * 1024)
+            artifact = root / result["counterexample"]
+            metadata = json.loads((artifact / "metadata.json").read_text(encoding="utf-8"))
+            self.assertTrue(metadata["message_truncated"])
+            self.assertLessEqual(self.artifact_size(artifact), metadata["artifact_limit_bytes"])
+
+    def test_non_regular_checker_feedback_stays_structured(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem, config = self.create_workspace(root, judge_type="custom")
+            config["limits"]["output"] = 1
+            (problem / "code/checker.py").write_text(
+                "import pathlib,sys\n"
+                "pathlib.Path(sys.argv[3], 'judgemessage.txt').mkdir()\n"
+                "raise SystemExit(42)\n",
+                encoding="utf-8",
+            )
+            result = stress_problem(root, problem, config, rounds=1, master_seed=1)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "infrastructure")
+            self.assertEqual(result["reason"], "checker_failed")
+            self.assertEqual(result["comparison"]["execution_status"], "FAIL")
+            artifact = root / result["counterexample"]
+            metadata = json.loads((artifact / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["schema_version"], 2)
+            self.assertLessEqual(self.artifact_size(artifact), metadata["artifact_limit_bytes"])
 
 
     def test_checker_timeout_kills_descendant_process(self):

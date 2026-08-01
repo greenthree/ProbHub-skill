@@ -17,14 +17,90 @@ import probhub.process_control as process_control
 from probhub.process_control import (
     CANCEL_FILE_ENV,
     ProcessCancelled,
+    allocate_shared_prefix_bytes,
     process_alive,
     run_managed_to_files,
     snapshot_process_tree,
     terminate_external_process_tree,
+    wait_managed,
 )
 
 
 class ProcessControlTests(unittest.TestCase):
+    def test_shared_prefix_budget_is_fair_and_deterministic(self):
+        self.assertEqual(allocate_shared_prefix_bytes([2000, 2000], 1025), [513, 512])
+        self.assertEqual(allocate_shared_prefix_bytes([100, 2000], 1024), [100, 924])
+        self.assertEqual(allocate_shared_prefix_bytes([0, 100, 2000], 1024), [0, 100, 924])
+        self.assertEqual(allocate_shared_prefix_bytes([10, 20], 100), [10, 20])
+
+    def test_output_budget_rejects_non_regular_capture_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            capture = root / "capture"
+            capture.mkdir()
+            with self.assertRaisesRegex(
+                process_control.OutputBudgetError, "not a regular file"
+            ):
+                process_control._truncate_paths((capture,), 1024)
+
+    def test_required_capture_path_cannot_disappear(self):
+        with tempfile.TemporaryDirectory() as temp:
+            missing = Path(temp) / "missing"
+            with self.assertRaisesRegex(
+                process_control.OutputBudgetError, "required captured output is missing"
+            ):
+                process_control._truncate_paths((missing,), 1024)
+
+    def test_wait_fails_closed_and_terminates_when_required_capture_disappears(self):
+        class FakeProcess:
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+        class FakeManaged:
+            memory_limit_mb = None
+            process_limit = None
+            memory_enforced = False
+            process_limit_enforced = False
+            peak_memory_mb = None
+
+            def __init__(self):
+                self.proc = FakeProcess()
+                self.terminated = False
+
+            def sample(self):
+                return None, None
+
+            def terminate(self):
+                self.terminated = True
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stderr = root / "stderr"
+            stderr.write_bytes(b"")
+            managed = FakeManaged()
+            with self.assertRaisesRegex(
+                process_control.OutputBudgetError, "required captured output is missing"
+            ):
+                wait_managed(
+                    managed,
+                    1,
+                    output_paths=(root / "missing-stdout", stderr),
+                    output_limit_bytes=1024,
+                )
+            self.assertTrue(managed.terminated)
+
+    def test_output_budget_truncation_failure_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            capture = Path(temp) / "capture"
+            capture.write_bytes(b"x" * 2048)
+            with mock.patch("builtins.open", side_effect=PermissionError("locked")):
+                with self.assertRaisesRegex(
+                    process_control.OutputBudgetError, "locked"
+                ):
+                    process_control._truncate_paths((capture,), 1024)
+
     def test_windows_virtualenv_python_redirector_is_replaced_with_base_executable(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -636,6 +712,74 @@ class ProcessControlTests(unittest.TestCase):
             self.assertEqual(result["reason"], "output_limit", result)
             self.assertGreater(result["output_bytes"], 1024)
             self.assertLessEqual((root / "stdout.txt").stat().st_size, 1024)
+
+    def test_fast_dual_stream_flood_shares_one_output_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = self.run_command(
+                root,
+                "import sys; "
+                "sys.stdout.buffer.write(b'o' * 100000); sys.stdout.flush(); "
+                "sys.stderr.buffer.write(b'e' * 100000); sys.stderr.flush()",
+                output_limit_bytes=1025,
+            )
+            stdout_size = (root / "stdout.txt").stat().st_size
+            stderr_size = (root / "stderr.txt").stat().st_size
+            self.assertEqual(result["reason"], "output_limit", result)
+            self.assertGreaterEqual(result["output_bytes"], 200000)
+            self.assertEqual((stdout_size, stderr_size), (513, 512))
+            self.assertEqual(result["retained_output_bytes"], 1025)
+            self.assertEqual(result["stdout_retained_bytes"], 513)
+            self.assertEqual(result["stderr_retained_bytes"], 512)
+            self.assertTrue(result["output_truncated"])
+
+    def test_terminal_race_output_is_truncated_without_overriding_timeout_or_cancel(self):
+        class FakeProcess:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        class FakeManaged:
+            memory_limit_mb = None
+            process_limit = None
+            memory_enforced = False
+            process_limit_enforced = False
+            peak_memory_mb = None
+
+            def __init__(self, paths):
+                self.proc = FakeProcess()
+                self.paths = paths
+
+            def sample(self):
+                return None, None
+
+            def terminate(self):
+                self.paths[0].write_bytes(b'o' * 1000)
+                self.paths[1].write_bytes(b'e' * 1000)
+                self.proc.returncode = 1
+
+        for cancelled, expected_reason in ((False, "time_limit"), (True, "cancelled")):
+            with self.subTest(reason=expected_reason), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                paths = (root / "stdout.txt", root / "stderr.txt")
+                for path in paths:
+                    path.write_bytes(b"")
+                with mock.patch.object(
+                    process_control,
+                    "cancellation_requested",
+                    return_value=cancelled,
+                ):
+                    result = wait_managed(
+                        FakeManaged(paths),
+                        0,
+                        output_paths=paths,
+                        output_limit_bytes=1024,
+                    )
+                self.assertEqual(result["reason"], expected_reason, result)
+                self.assertEqual(result["output_bytes"], 2000)
+                self.assertEqual(sum(path.stat().st_size for path in paths), 1024)
+                self.assertTrue(result["output_truncated"])
 
     def test_managed_quick_process_completes(self):
         with tempfile.TemporaryDirectory() as temp:

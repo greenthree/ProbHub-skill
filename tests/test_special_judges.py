@@ -44,6 +44,94 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
         def close(self):
             pass
 
+    def test_output_budget_enforcement_failure_is_infrastructure_fail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = str(Path(temp) / "output.txt")
+            with mock.patch.object(
+                JUDGE_MODULE,
+                "run_managed_to_files",
+                side_effect=JUDGE_MODULE.OutputBudgetError("cannot enforce output budget"),
+            ):
+                status, _, _, _, message, details = JUDGE_MODULE.run_program_to_file(
+                    "unused", "unused", output
+                )
+            self.assertEqual(status, "FAIL")
+            self.assertIn("cannot enforce", message)
+            self.assertEqual(details["termination_reason"], "output_control_error")
+
+    def test_custom_checker_output_control_failure_has_precise_reason(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            JUDGE_MODULE,
+            "run_program_to_file",
+            return_value=("AC", 0.01, 1, True, "", {"output_bytes": 0}),
+        ), mock.patch.object(
+            JUDGE_MODULE,
+            "run_managed_to_files",
+            side_effect=JUDGE_MODULE.OutputBudgetError("feedback is not regular"),
+        ):
+            root = Path(temp)
+            status, _, _, _, message, details = JUDGE_MODULE.run_custom_testcase(
+                str(root / "solution"),
+                str(root / "checker"),
+                str(root / "case.in"),
+                str(root / "case.ans"),
+            )
+        self.assertEqual(status, "FAIL")
+        self.assertIn("output control failed", message)
+        self.assertNotIn("failed to start", message)
+        self.assertEqual(details["checker_termination_reason"], "output_control_error")
+
+    def test_interactive_final_classification_follows_tree_termination(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO()
+                self.returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+        class FakeManaged:
+            memory_enforced = True
+            peak_memory_mb = 1
+
+            def __init__(self, stderr, flood):
+                self.proc = FakeProcess()
+                self.stderr = stderr
+                self.flood = flood
+                self.terminated = False
+
+            def sample(self):
+                return 1, 1
+
+            def terminate(self):
+                if not self.terminated and self.flood:
+                    self.stderr.write(b"x" * (2 * 1024 * 1024))
+                    self.stderr.flush()
+                self.terminated = True
+
+        spawned = []
+
+        def fake_spawn(*_args, **kwargs):
+            managed = FakeManaged(kwargs["stderr"], flood=not spawned)
+            spawned.append(managed)
+            return managed
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            JUDGE_MODULE, "spawn_managed", side_effect=fake_spawn
+        ):
+            root = Path(temp)
+            result = JUDGE_MODULE.run_interactive_testcase(
+                str(root / "solution"),
+                str(root / "interactor"),
+                str(root / "case.in"),
+                str(root / "case.ans"),
+                output_limit=1,
+            )
+
+        self.assertEqual(result[0], "OLE", result)
+        self.assertTrue(all(item.terminated for item in spawned))
+
     def test_interactive_transcript_decodes_utf8_across_chunks(self):
         lock = threading.RLock()
         transcript = {
@@ -179,6 +267,44 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
             )
             self.assertEqual(status, "OLE")
             self.assertIn("output limit", message)
+
+    def test_interactive_feedback_uses_bounded_diagnostic_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            solution_stderr = root / "solution.stderr"
+            interactor_stderr = root / "interactor.stderr"
+            feedback = root / "feedback"
+            feedback.mkdir()
+            solution_stderr.write_bytes(b"")
+            interactor_stderr.write_bytes(b"e" * 400)
+            (feedback / "judgemessage.txt").write_bytes(b"f" * 700)
+            traffic = {
+                "limit": 2000,
+                "solution_to_interactor": 0,
+                "interactor_to_solution": 0,
+            }
+            status, message = JUDGE_MODULE._interactive_output_status(
+                traffic,
+                solution_stderr,
+                interactor_stderr,
+                feedback,
+                diagnostic_limit_bytes=1000,
+            )
+            self.assertEqual(status, "FAIL")
+            self.assertIn("diagnostic output limit", message)
+
+            (feedback / "judgemessage.txt").unlink()
+            (feedback / "judgemessage.txt").mkdir()
+            with self.assertRaisesRegex(
+                JUDGE_MODULE.OutputBudgetError, "not a regular file"
+            ):
+                JUDGE_MODULE._interactive_output_status(
+                    traffic,
+                    solution_stderr,
+                    interactor_stderr,
+                    feedback,
+                    diagnostic_limit_bytes=1000,
+                )
 
     def test_interactive_temp_cleanup_retries_permission_error(self):
         with mock.patch.object(
@@ -359,6 +485,36 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
                 event for event in events if event.get("type") == "sample_check"
             )
             self.assertTrue(sample_check["matches"], sample_check)
+
+    def test_custom_checker_feedback_flood_is_infrastructure_fail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {"type": "custom", "checker": "code/checker.cpp"},
+                "int main(){ return 0; }",
+                "int main(){ return 0; }",
+                {
+                    "checker.cpp": r"""
+                    #include <fstream>
+                    #include <string>
+                    int main(int argc, char** argv) {
+                        std::ofstream out(std::string(argv[3]) + "/judgemessage.txt", std::ios::binary);
+                        out << std::string(2000000, 'x');
+                        out.close();
+                        return 42;
+                    }
+                    """,
+                },
+            )
+            result, events = self.run_judge(problem)
+            self.assertNotEqual(result.returncode, 0)
+            case = next(
+                event
+                for event in events
+                if event.get("type") == "case" and event.get("kind") == "std"
+            )
+            self.assertEqual(case["status"], "FAIL", case)
+            self.assertIn("output limit", case["message"])
 
     def test_custom_checker_ac_cannot_hide_sample_answer_mismatch(self):
         with tempfile.TemporaryDirectory() as temp:
