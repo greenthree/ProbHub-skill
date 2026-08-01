@@ -52,7 +52,7 @@ limits:
   processes: 32  # 默认 32
 ```
 
-Generator、Validator、accepted、brute、Checker 与编译器全部使用共享进程树控制。accepted/brute 使用 `stress.time_limit` 与题目资源限制；Generator、Validator、Checker 使用 `stress.tool_timeout` 及有界内部诊断输出。输出超限时会终止完整进程树并截断捕获文件；accepted/brute 记为 `OLE`，官方工具超限记为 `infrastructure`。即使某阶段的直接父进程已正常退出，其遗留后代仍会被清理。平台语义见 `references/process-control.md`。
+Generator、Validator、accepted、brute、Checker 与编译器全部使用共享进程树控制。accepted/brute 使用 `stress.time_limit` 与题目资源限制；Generator、Validator、Checker 使用 `stress.tool_timeout` 及有界内部诊断输出。一次执行的 stdout、stderr 与显式 Checker feedback 路径原子共享同一输出预算；完成、超时、取消和资源超限均在终止进程树后执行确定性前缀截断。accepted/brute 超限记为 `OLE`，官方工具超限或无法执行截断记为 `infrastructure`。即使某阶段的直接父进程已正常退出，其遗留后代仍会被清理。平台语义见 `references/process-control.md`。
 
 ### 自定义 Checker 配置
 
@@ -210,7 +210,6 @@ probhub stress L01 --replay "L01/.probhub/stress/20260710-120000-r37-s12381/inpu
 ├── latest.json
 └── <UTC时间>-r<round>-s<seed>/
     ├── input.in
-    ├── generator.out
     ├── generator.stderr
     ├── validator.out
     ├── validator.stderr
@@ -222,7 +221,19 @@ probhub stress L01 --replay "L01/.probhub/stress/20260710-120000-r37-s12381/inpu
     └── metadata.json
 ```
 
-只会写入失败发生前已经产生的文件，因此较早阶段失败时部分文件可能为空或不存在。`metadata.json` 记录题目 ID、master seed、本轮 seed、轮号、生成器参数、程序路径、Judge 类型、失败分类和各阶段状态；`latest.json` 指向最近一次保存的反例目录。
+只会写入失败发生前已经产生且获得持久化配额的文件，因此较早阶段失败或诊断配额耗尽时部分文件可能为空或不存在。Generator stdout 经过 LF 规范化后就是 `input.in`，不再重复保存 `generator.out`；metadata 以 alias 记录这层关系。
+
+单个 schema 2 反例使用以下持久化预算，其中 `E = limits.output`，`D = min(E, 8 MiB)`：
+
+- 总预算 `P = E + D`；
+- `input.in` 优先使用最多 `E`，保证正常完成的 Generator 输入完整；
+- metadata 在 `D` 中预留最多 `64 KiB`，其余诊断按确定性公平前缀配额保存；
+- `metadata.json` 记录进入反例持久化阶段时的逐文件 observed/stored/truncated，以及各阶段进程终止后、执行截断前的 `runs.*.output_bytes`、总预算、输入完整性与 `replayable`；
+- Generator 非 AC 或执行输出已截断时，`input.in` 仅是诊断前缀，`replayable: false`，结果不提供 replay command，显式 replay 返回 `stress_replay_incomplete`。
+
+`P` 只约束单个反例目录，不限制历史反例总数；`.probhub/stress/` 仍是应由 Git 忽略并按需人工清理的本地诊断目录。schema 1 旧反例继续兼容 replay。`latest.json` 是固定小型原子索引，不属于单反例 payload。
+
+`metadata.json` 还记录题目 ID、master seed、本轮 seed、轮号、生成器参数、程序路径、Judge 类型、失败分类和各阶段状态；`latest.json` 指向最近一次保存的反例目录。
 
 `.probhub/stress/` 是本地诊断产物，应由 Git 忽略，不得打进 DOMjudge 包或提交到仓库。需要长期保留某个反例时，建议把 `input.in` 整理为命名清晰的 `data/secret/*.in`，生成对应 `.ans`，并加入数据组或回归测试。
 
@@ -236,6 +247,7 @@ probhub stress L01 --replay "L01/.probhub/stress/20260710-120000-r37-s12381/inpu
 - `master_seed`、`seed`、`round`：随机序列和失败位置；
 - `reason`、`message`：机器分类和诊断信息；
 - `counterexample`、`replay_command`：保存位置和重放命令。
+- `generator`、`validator`、`accepted`、`brute`、`comparison`：已执行阶段的资源摘要，包括截断前 `output_bytes`、保留量与 `output_truncated`；未执行阶段为空。
 
 Replay 结果另外包含 `replay: true`、`artifact`、`input`、`seed` 和 `round`，但不包含普通运行的轮数统计或新的反例路径。
 

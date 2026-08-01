@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- 非交互 stdout/stderr 及 Checker feedback 改为原子共享单一输出预算，完成、超时、取消和资源超限均在进程树终止后执行确定性公平前缀截断；无法测量或截断时 fail closed，沙箱缓存 Schema 升至 6。stress schema 2 反例以 `E + min(E, 8 MiB)` 限制单次持久化，消除 `generator.out` 输入副本，记录逐文件预算与截断证据，并拒绝重放不完整的 Generator OLE 输入。
 - WebUI 完整沙箱与上传评测增加最多 8 个请求线程的有界 HTTP 接入、前置 admission gate、共享固定 worker pool、有界队列、同题进程内互斥与跨进程 Judge 锁，新增结构化 `429 queue_full`、单调排队/执行/整任务 deadline、完整沙箱取消，以及日志、协议输出、结构化结果和完成记录上限；取消与协议错误状态保持单调，上传准备与清理纳入任务生命周期，超时、清理失败与服务关闭不再虚报成功并继续回收完整进程树。
 - WebUI 沙箱改为检查已安装 Core 内的 `local_judge.py`，不再要求赛事仓库复制 Judge 运行时；点击运行会先通过当前写入队列完成题面保存，修复沙箱按钮被错误禁用以及旧 `_doSave` 调用导致任务无法入队的问题。
 - Windows 受控执行会绕过虚拟环境 `python.exe` 重定向器并保留其依赖路径，修复 Microsoft Store Python 下真正解释器及后代未进入 Job Object、可能绕过资源限制与清理的问题。

@@ -4,6 +4,7 @@ import os
 import platform
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,10 @@ UNIX_EXEC_STATUS_LIMIT = 64 * 1024
 
 class ProcessCancelled(Exception):
     """Raised when a supervising submission task requests cancellation."""
+
+
+class OutputBudgetError(OSError):
+    """Raised when captured output cannot be measured or bounded safely."""
 
 
 def cancellation_requested():
@@ -737,26 +742,106 @@ def spawn_managed(
     )
 
 
-def _files_size(paths):
+def output_path_size(path, *, required=False):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if required:
+            raise OutputBudgetError(f"required captured output is missing: {path}")
+        return 0, False
+    except OSError as exc:
+        raise OutputBudgetError(f"cannot inspect captured output {path}: {exc}") from exc
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if stat.S_ISLNK(info.st_mode) or (
+        reparse_flag and getattr(info, "st_file_attributes", 0) & reparse_flag
+    ):
+        raise OutputBudgetError(f"captured output path is a link or reparse point: {path}")
+    if not stat.S_ISREG(info.st_mode):
+        raise OutputBudgetError(f"captured output path is not a regular file: {path}")
+    return int(info.st_size), True
+
+
+def _files_size(required_paths, optional_paths=()):
     total = 0
-    for path in paths or ():
-        try:
-            total += os.path.getsize(path)
-        except OSError:
-            pass
+    for path in required_paths or ():
+        size, _ = output_path_size(path, required=True)
+        total += size
+    for path in optional_paths or ():
+        size, _ = output_path_size(path)
+        total += size
     return total
 
 
-def _truncate_paths(paths, limit_bytes):
+def allocate_shared_prefix_bytes(sizes, limit_bytes):
+    """Allocate a deterministic shared prefix budget across byte streams.
+
+    Each stream receives a prefix, with unused quota from short streams
+    redistributed before the remaining streams are split evenly. The input
+    order breaks odd-byte ties, so stdout/stderr retention is reproducible.
+    """
+    normalized = [max(int(size), 0) for size in sizes]
     if limit_bytes is None:
-        return
-    for path in paths or ():
+        return normalized
+    remaining = max(int(limit_bytes), 0)
+    allocations = [0] * len(normalized)
+    active = [index for index, size in enumerate(normalized) if size]
+    while active and remaining:
+        share = remaining // len(active)
+        if share <= 0:
+            break
+        short = [index for index in active if normalized[index] <= share]
+        if not short:
+            break
+        for index in short:
+            allocations[index] = normalized[index]
+            remaining -= normalized[index]
+            active.remove(index)
+    if active and remaining:
+        base, extra = divmod(remaining, len(active))
+        for position, index in enumerate(active):
+            allocations[index] = min(
+                normalized[index], base + (1 if position < extra else 0)
+            )
+    return allocations
+
+
+def _truncate_paths(paths, limit_bytes, *, required_count=None):
+    if limit_bytes is None:
+        return []
+    paths = tuple(paths or ())
+    if required_count is None:
+        required_count = len(paths)
+    required_count = max(0, min(int(required_count), len(paths)))
+    sizes = []
+    existed = []
+    for index, path in enumerate(paths):
+        size, present = output_path_size(path, required=index < required_count)
+        sizes.append(size)
+        existed.append(present)
+    allocations = allocate_shared_prefix_bytes(sizes, limit_bytes)
+    failures = []
+    for path, size, allocation in zip(paths, sizes, allocations):
+        if size <= allocation:
+            continue
         try:
-            if os.path.getsize(path) > int(limit_bytes):
-                with open(path, "r+b") as stream:
-                    stream.truncate(int(limit_bytes))
-        except OSError:
-            pass
+            with open(path, "r+b") as stream:
+                stream.truncate(allocation)
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    retained = []
+    for index, (path, was_present) in enumerate(zip(paths, existed)):
+        try:
+            size, _ = output_path_size(
+                path, required=was_present or index < required_count
+            )
+            retained.append(size)
+        except OutputBudgetError as exc:
+            failures.append(str(exc))
+            retained.append(0)
+    if failures or sum(retained) > int(limit_bytes):
+        detail = "; ".join(failures) or "shared output budget could not be enforced"
+        raise OutputBudgetError(detail)
+    return retained
 
 
 def wait_managed(
@@ -764,6 +849,7 @@ def wait_managed(
     timeout,
     *,
     output_paths=(),
+    optional_output_paths=(),
     output_limit_bytes=None,
     poll_interval=DEFAULT_POLL_INTERVAL,
 ):
@@ -776,6 +862,11 @@ def wait_managed(
     returncode = None
     elapsed = 0.0
     output_bytes = 0
+    retained_output_bytes = 0
+    retained_paths = []
+    output_paths = tuple(output_paths or ())
+    optional_output_paths = tuple(optional_output_paths or ())
+    all_output_paths = (*output_paths, *optional_output_paths)
     try:
         while managed.proc.poll() is None:
             now = time.perf_counter()
@@ -800,7 +891,9 @@ def wait_managed(
             ):
                 reason, message = "process_limit", "process limit exceeded"
                 break
-            if output_limit_bytes is not None and _files_size(output_paths) > int(output_limit_bytes):
+            if output_limit_bytes is not None and _files_size(
+                output_paths, optional_output_paths
+            ) > int(output_limit_bytes):
                 reason, message = "output_limit", "output limit exceeded"
                 break
             if now >= deadline:
@@ -811,10 +904,10 @@ def wait_managed(
         elapsed = time.perf_counter() - started
         # A short process can exit before the first polling iteration. Recheck
         # file size and deadline after exit so fast output floods cannot bypass OLE.
-        output_bytes = _files_size(output_paths)
+        observed_output_bytes = _files_size(output_paths, optional_output_paths)
         if cancellation_requested():
             reason, message = "cancelled", "execution cancelled"
-        elif output_limit_bytes is not None and output_bytes > int(output_limit_bytes):
+        elif output_limit_bytes is not None and observed_output_bytes > int(output_limit_bytes):
             reason, message = "output_limit", "output limit exceeded"
         elif elapsed > float(timeout) and reason == "completed":
             reason, message = "time_limit", "time limit exceeded"
@@ -823,8 +916,20 @@ def wait_managed(
         managed.terminate()
         if returncode is None:
             returncode = managed.proc.returncode
-        if reason == "output_limit":
-            _truncate_paths(output_paths, output_limit_bytes)
+        output_bytes = _files_size(output_paths, optional_output_paths)
+        if output_limit_bytes is not None:
+            retained_paths = _truncate_paths(
+                all_output_paths,
+                output_limit_bytes,
+                required_count=len(output_paths),
+            )
+            retained_output_bytes = sum(retained_paths)
+        else:
+            retained_paths = [
+                output_path_size(path, required=index < len(output_paths))[0]
+                for index, path in enumerate(all_output_paths)
+            ]
+            retained_output_bytes = sum(retained_paths)
 
     return {
         "reason": reason,
@@ -835,6 +940,10 @@ def wait_managed(
         "memory_enforced": managed.memory_enforced,
         "process_limit_enforced": managed.process_limit_enforced,
         "output_bytes": output_bytes,
+        "retained_output_bytes": retained_output_bytes,
+        "stdout_retained_bytes": retained_paths[0] if retained_paths else 0,
+        "stderr_retained_bytes": retained_paths[1] if len(retained_paths) > 1 else 0,
+        "output_truncated": retained_output_bytes < output_bytes,
     }
 
 
@@ -845,6 +954,7 @@ def run_managed_to_files(
     input_data=None,
     stdout_path,
     stderr_path,
+    additional_output_paths=(),
     timeout,
     memory_limit_mb=None,
     output_limit_bytes=None,
@@ -879,6 +989,7 @@ def run_managed_to_files(
                 managed,
                 timeout,
                 output_paths=(stdout_path, stderr_path),
+                optional_output_paths=tuple(additional_output_paths or ()),
                 output_limit_bytes=output_limit_bytes,
             )
             if result.get("reason") == "cancelled":

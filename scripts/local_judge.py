@@ -27,11 +27,14 @@ from probhub.calibration import (
 )
 from probhub.build_lock import workspace_file_lock
 from probhub.errors import ProbHubError
+from probhub.io import read_bounded_text
 from probhub.output_compare import compare_standard_output
 from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
+    OutputBudgetError,
     ProcessCancelled,
     cancellation_requested,
+    output_path_size,
     run_managed_to_files,
     spawn_managed,
 )
@@ -51,6 +54,7 @@ REFERENCES_DIR = os.path.join(PACKAGE_ROOT, "references")
 DEFAULT_TIME_LIMIT = 1.0
 DEFAULT_MEMORY_LIMIT = 256
 DEFAULT_OUTPUT_LIMIT = 64
+MAX_TOOL_DIAGNOSTIC_BYTES = 8 * 1024 * 1024
 PROTOCOL_NAME = "probhub.local_judge"
 PROTOCOL_VERSION = 1
 CACHE_SCHEMA_VERSION = SANDBOX_CACHE_SCHEMA_VERSION
@@ -789,6 +793,11 @@ def run_program_to_file(
                 details["termination_reason"] = "inferred_memory_limit"
             return status, result["time"], result["memory"], result["memory_enforced"], stderr, details
         return "AC", result["time"], result["memory"], result["memory_enforced"], "", details
+    except OutputBudgetError as exc:
+        return "FAIL", 0.0, None, False, str(exc), {
+            "output_bytes": 0,
+            "termination_reason": "output_control_error",
+        }
     except OSError as exc:
         return "RE", 0.0, None, False, str(exc), {"output_bytes": 0}
     finally:
@@ -984,17 +993,18 @@ def _checker_result(returncode, message):
     return "FAIL", message or f"checker exited with code {returncode}"
 
 
-def _feedback_message(feedback_dir, fallback=""):
+def _feedback_message(feedback_dir, fallback="", limit_bytes=MAX_TOOL_DIAGNOSTIC_BYTES):
     for name in ("judgemessage.txt", "teammessage.txt"):
         path = os.path.join(feedback_dir, name)
-        if os.path.isfile(path):
-            try:
-                message = open(path, "r", encoding="utf-8", errors="replace").read().strip()
-                if message:
-                    return message
-            except OSError:
-                pass
-    return (fallback or "").strip()
+        try:
+            result = read_bounded_text(path, limit_bytes)
+        except OSError:
+            continue
+        message = result["text"].strip()
+        if message:
+            return message
+    encoded = (fallback or "").encode("utf-8", errors="replace")
+    return encoded[: max(int(limit_bytes), 0)].decode("utf-8", errors="replace").strip()
 
 
 def run_custom_testcase(
@@ -1026,11 +1036,19 @@ def run_custom_testcase(
         checker_stdout = output_file + ".checker.out"
         checker_stderr = output_file + ".checker.stderr"
         try:
+            diagnostic_limit_bytes = min(
+                int(output_limit * 1024 * 1024), MAX_TOOL_DIAGNOSTIC_BYTES
+            )
+            feedback_paths = tuple(
+                os.path.join(feedback_dir, name)
+                for name in ("judgemessage.txt", "teammessage.txt")
+            )
             checker = run_managed_to_files(
                 [checker_bin, in_file, ans_file, feedback_dir],
                 input_path=output_file,
                 stdout_path=checker_stdout,
                 stderr_path=checker_stderr,
+                additional_output_paths=feedback_paths,
                 timeout=max(5.0, float(time_limit)),
                 memory_limit_mb=memory_limit,
                 output_limit_bytes=min(int(output_limit * 1024 * 1024), 8 * 1024 * 1024),
@@ -1040,7 +1058,9 @@ def run_custom_testcase(
                 stderr = open(checker_stderr, "r", encoding="utf-8", errors="replace").read()
             except OSError:
                 stderr = ""
-            checker_message = _feedback_message(feedback_dir, stderr)
+            checker_message = _feedback_message(
+                feedback_dir, stderr, diagnostic_limit_bytes
+            )
             if checker["reason"] != "completed":
                 detail = checker["message"] or checker["reason"].replace("_", " ")
                 return "FAIL", elapsed, memory, memory_enforced, f"checker {detail}", details
@@ -1048,6 +1068,17 @@ def run_custom_testcase(
                 checker["returncode"], checker_message
             )
             return checker_status, elapsed, memory, memory_enforced, checker_message, details
+        except OutputBudgetError as exc:
+            details = dict(details)
+            details["checker_termination_reason"] = "output_control_error"
+            return (
+                "FAIL",
+                elapsed,
+                memory,
+                memory_enforced,
+                f"checker output control failed: {exc}",
+                details,
+            )
         except OSError as exc:
             return "FAIL", elapsed, memory, memory_enforced, f"checker failed to start: {exc}", details
         finally:
@@ -1157,16 +1188,22 @@ def _interactive_result(
     return status, elapsed, memory, memory_enforced, message, details
 
 
-def _interactive_output_status(traffic, solution_stderr, interactor_stderr):
+def _interactive_output_status(
+    traffic,
+    solution_stderr,
+    interactor_stderr,
+    feedback_dir=None,
+    diagnostic_limit_bytes=MAX_TOOL_DIAGNOSTIC_BYTES,
+):
     """Classify combined protocol/stderr output after every lifecycle edge."""
-    try:
-        solution_stderr_size = os.path.getsize(solution_stderr)
-    except OSError:
-        solution_stderr_size = 0
-    try:
-        interactor_stderr_size = os.path.getsize(interactor_stderr)
-    except OSError:
-        interactor_stderr_size = 0
+    solution_stderr_size = output_path_size(solution_stderr, required=True)[0]
+    interactor_stderr_size = output_path_size(interactor_stderr, required=True)[0]
+    feedback_size = 0
+    if feedback_dir:
+        for name in ("judgemessage.txt", "teammessage.txt"):
+            feedback_size += output_path_size(
+                os.path.join(feedback_dir, name)
+            )[0]
 
     lock = traffic.get("_lock")
     if lock is None:
@@ -1178,10 +1215,12 @@ def _interactive_output_status(traffic, solution_stderr, interactor_stderr):
             limit = int(traffic["limit"])
             interactor_protocol_bytes = traffic.get("interactor_to_solution", 0)
             solution_protocol_bytes = traffic.get("solution_to_interactor", 0)
-    interactor_bytes = interactor_protocol_bytes + interactor_stderr_size
+    interactor_diagnostic_bytes = interactor_stderr_size + feedback_size
     solution_bytes = solution_protocol_bytes + solution_stderr_size
-    if interactor_bytes > limit:
+    if interactor_protocol_bytes > limit:
         return "FAIL", "interactor output limit exceeded"
+    if interactor_diagnostic_bytes > int(diagnostic_limit_bytes):
+        return "FAIL", "interactor diagnostic output limit exceeded"
     if solution_bytes > limit:
         return "OLE", "interactive output limit exceeded"
     return None, ""
@@ -1240,6 +1279,9 @@ def run_interactive_testcase(
     interactor_stderr = os.path.join(runtime_dir, "interactor.stderr")
     feedback_dir = os.path.join(runtime_dir, "feedback")
     os.mkdir(feedback_dir)
+    diagnostic_limit_bytes = min(
+        int(output_limit * 1024 * 1024), MAX_TOOL_DIAGNOSTIC_BYTES
+    )
     try:
         with open(solution_stderr, "wb") as solution_err, open(interactor_stderr, "wb") as interactor_err:
             solution_managed = spawn_managed(
@@ -1293,7 +1335,11 @@ def run_interactive_testcase(
                     raise ProcessCancelled("execution cancelled")
                 now = time.monotonic()
                 resource_status, resource_message = _interactive_output_status(
-                    traffic, solution_stderr, interactor_stderr
+                    traffic,
+                    solution_stderr,
+                    interactor_stderr,
+                    feedback_dir,
+                    diagnostic_limit_bytes,
                 )
                 if now - last_resource_sample >= 0.05:
                     last_resource_sample = now
@@ -1374,19 +1420,24 @@ def run_interactive_testcase(
                     )
                 time.sleep(0.005)
 
-            for thread in threads:
-                thread.join(timeout=1)
-
-            # Both direct processes may exit before the monitor observes a final
-            # output burst. Sample and classify once more while Job telemetry and
-            # stderr files are still available.
+            # Both direct processes may exit while descendants keep their pipes
+            # or diagnostic files open. Preserve telemetry, terminate both full
+            # trees, then classify the stable final byte counts.
             solution_managed.sample()
             peak_memory_mb = solution_managed.peak_memory_mb
             interactor_managed.sample()
-            resource_status, resource_message = _interactive_output_status(
-                traffic, solution_stderr, interactor_stderr
-            )
             interactor_peak_memory = interactor_managed.peak_memory_mb
+            solution_managed.terminate()
+            interactor_managed.terminate()
+            for thread in threads:
+                thread.join(timeout=1)
+            resource_status, resource_message = _interactive_output_status(
+                traffic,
+                solution_stderr,
+                interactor_stderr,
+                feedback_dir,
+                diagnostic_limit_bytes,
+            )
             if (
                 interactor.returncode != 0
                 and interactor_managed.memory_enforced
@@ -1400,14 +1451,20 @@ def run_interactive_testcase(
         solution_message = ""
         interactor_message = ""
         try:
-            solution_message = open(solution_stderr, "r", encoding="utf-8", errors="replace").read().strip()
+            solution_message = read_bounded_text(
+                solution_stderr, int(output_limit * 1024 * 1024)
+            )["text"].strip()
         except OSError:
             pass
         try:
-            interactor_message = open(interactor_stderr, "r", encoding="utf-8", errors="replace").read().strip()
+            interactor_message = read_bounded_text(
+                interactor_stderr, diagnostic_limit_bytes
+            )["text"].strip()
         except OSError:
             pass
-        interactor_message = _feedback_message(feedback_dir, interactor_message)
+        interactor_message = _feedback_message(
+            feedback_dir, interactor_message, diagnostic_limit_bytes
+        )
 
         if resource_status:
             return _interactive_result(

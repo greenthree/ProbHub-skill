@@ -15,9 +15,14 @@ from pathlib import Path
 
 from .build_lock import workspace_build_lock
 from .errors import ProbHubError
-from .io import normalize_newlines, read_yaml, write_json, write_yaml
+from .io import normalize_newlines, read_bounded_text, read_yaml, write_json, write_yaml
 from .output_compare import compare_standard_output
-from .process_control import DEFAULT_PROCESS_LIMIT, run_managed_to_files
+from .process_control import (
+    DEFAULT_PROCESS_LIMIT,
+    OutputBudgetError,
+    allocate_shared_prefix_bytes,
+    run_managed_to_files,
+)
 from .transactions import (
     TRANSACTION_PHASE_COMMITTED,
     TRANSACTION_PHASE_PREPARED,
@@ -34,6 +39,9 @@ DEFAULT_ROUNDS = 1000
 # Keep in sync with datagen.CASE_NAME_PATTERN (importing datagen here would cycle).
 _CASE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 DEFAULT_TOOL_TIMEOUT = 5.0
+MIB = 1024 * 1024
+MAX_CHECKER_DIAGNOSTIC_BYTES = 8 * MIB
+STRESS_METADATA_BUDGET_BYTES = 64 * 1024
 
 
 def _is_int(value):
@@ -240,6 +248,7 @@ def _run(
     memory_limit=256,
     output_limit=64,
     process_limit=DEFAULT_PROCESS_LIMIT,
+    additional_output_paths=(),
 ):
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -252,6 +261,7 @@ def _run(
                 input_data=input_data,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
+                additional_output_paths=additional_output_paths,
                 timeout=timeout,
                 memory_limit_mb=memory_limit,
                 output_limit_bytes=int(output_limit * 1024 * 1024),
@@ -292,9 +302,32 @@ def _run(
             "memory": result["memory"],
             "memory_enforced": result["memory_enforced"],
             "process_limit_enforced": result["process_limit_enforced"],
+            "output_bytes": result["output_bytes"],
+            "retained_output_bytes": result["retained_output_bytes"],
+            "stdout_retained_bytes": result["stdout_retained_bytes"],
+            "stderr_retained_bytes": result["stderr_retained_bytes"],
+            "output_truncated": result["output_truncated"],
             "stdout": stdout,
             "stderr": stderr,
             "message": message or "",
+        }
+    except OutputBudgetError as exc:
+        return {
+            "status": "FAIL",
+            "reason": "output_control_error",
+            "returncode": None,
+            "time": 0.0,
+            "memory": None,
+            "memory_enforced": False,
+            "process_limit_enforced": False,
+            "output_bytes": 0,
+            "retained_output_bytes": 0,
+            "stdout_retained_bytes": 0,
+            "stderr_retained_bytes": 0,
+            "output_truncated": False,
+            "stdout": b"",
+            "stderr": str(exc).encode("utf-8", errors="replace"),
+            "message": str(exc),
         }
     except OSError as exc:
         return {
@@ -305,20 +338,37 @@ def _run(
             "memory": None,
             "memory_enforced": False,
             "process_limit_enforced": False,
+            "output_bytes": 0,
+            "retained_output_bytes": 0,
+            "stdout_retained_bytes": 0,
+            "stderr_retained_bytes": 0,
+            "output_truncated": False,
             "stdout": b"",
             "stderr": str(exc).encode("utf-8", errors="replace"),
             "message": str(exc),
         }
 
 
-def _feedback_message(feedback_dir, fallback=""):
+def _feedback_message(feedback_dir, fallback="", limit_bytes=MAX_CHECKER_DIAGNOSTIC_BYTES):
     for name in ("judgemessage.txt", "teammessage.txt"):
         path = Path(feedback_dir) / name
-        if path.is_file():
-            message = path.read_text(encoding="utf-8", errors="replace").strip()
-            if message:
-                return message
-    return (fallback or "").strip()
+        try:
+            result = read_bounded_text(path, limit_bytes)
+        except OSError:
+            continue
+        message = result["text"].strip()
+        if message:
+            result["source"] = name
+            return message, result
+    encoded = (fallback or "").encode("utf-8", errors="replace")
+    retained = encoded[: max(int(limit_bytes), 0)]
+    return retained.decode("utf-8", errors="replace").strip(), {
+        "source": "stderr",
+        "observed_bytes": len(encoded),
+        "retained_bytes": len(retained),
+        "truncated": len(retained) < len(encoded),
+        "exists": bool(encoded),
+    }
 
 
 def _compare_custom(
@@ -334,6 +384,10 @@ def _compare_custom(
 ):
     feedback_dir = Path(tempfile.mkdtemp(prefix="feedback-", dir=cwd))
     try:
+        diagnostic_limit_bytes = min(int(output_limit * MIB), MAX_CHECKER_DIAGNOSTIC_BYTES)
+        feedback_paths = tuple(
+            feedback_dir / name for name in ("judgemessage.txt", "teammessage.txt")
+        )
         result = _run(
             [*checker_command, str(input_path), str(answer_path), str(feedback_dir)],
             brute_output,
@@ -342,11 +396,24 @@ def _compare_custom(
             memory_limit,
             min(output_limit, 8),
             process_limit,
+            additional_output_paths=feedback_paths,
         )
         stderr = result.get("stderr") or b""
-        message = _feedback_message(
-            feedback_dir, stderr.decode("utf-8", errors="replace")
+        message, feedback = _feedback_message(
+            feedback_dir,
+            stderr.decode("utf-8", errors="replace"),
+            diagnostic_limit_bytes,
         )
+        output_details = {
+            key: result.get(key)
+            for key in (
+                "output_bytes",
+                "retained_output_bytes",
+                "stdout_retained_bytes",
+                "stderr_retained_bytes",
+                "output_truncated",
+            )
+        }
         if result.get("reason") != "completed":
             return {
                 "status": "FAIL",
@@ -354,16 +421,34 @@ def _compare_custom(
                 "match": False,
                 "message": message or f"checker {result.get('message') or result.get('reason')}",
                 "stderr": stderr,
+                "feedback": feedback,
+                **output_details,
             }
         if result["returncode"] in {0, 42}:
-            return {"status": "AC", "match": True, "message": message, "stderr": stderr}
+            return {
+                "status": "AC",
+                "match": True,
+                "message": message,
+                "stderr": stderr,
+                "feedback": feedback,
+                **output_details,
+            }
         if result["returncode"] in {1, 2, 43}:
-            return {"status": "WA", "match": False, "message": message, "stderr": stderr}
+            return {
+                "status": "WA",
+                "match": False,
+                "message": message,
+                "stderr": stderr,
+                "feedback": feedback,
+                **output_details,
+            }
         return {
             "status": "FAIL",
             "match": False,
             "message": message or f"checker exited with code {result['returncode']}",
             "stderr": stderr,
+            "feedback": feedback,
+            **output_details,
         }
     finally:
         shutil.rmtree(feedback_dir, ignore_errors=True)
@@ -448,8 +533,12 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
     if accepted["status"] != "AC":
         return {
             "ok": False,
-            "kind": "counterexample",
-            "reason": f"accepted_{accepted['status'].lower()}",
+            "kind": "infrastructure" if accepted["status"] == "FAIL" else "counterexample",
+            "reason": (
+                "accepted_output_control_failed"
+                if accepted["status"] == "FAIL"
+                else f"accepted_{accepted['status'].lower()}"
+            ),
             "message": accepted["message"],
             "input": input_data,
             "generator": generator,
@@ -465,8 +554,12 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
     if brute["status"] != "AC":
         return {
             "ok": False,
-            "kind": "counterexample",
-            "reason": f"brute_{brute['status'].lower()}",
+            "kind": "infrastructure" if brute["status"] == "FAIL" else "counterexample",
+            "reason": (
+                "brute_output_control_failed"
+                if brute["status"] == "FAIL"
+                else f"brute_{brute['status'].lower()}"
+            ),
             "message": brute["message"],
             "input": input_data,
             "generator": generator,
@@ -522,9 +615,78 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
     }
 
 
-def _write_optional_bytes(directory, name, value):
-    if value is not None:
-        (Path(directory) / name).write_bytes(value)
+def _utf8_prefix(value, limit_bytes):
+    encoded = str(value or "").encode("utf-8", errors="replace")
+    retained = encoded[: max(int(limit_bytes), 0)]
+    return retained.decode("utf-8", errors="ignore"), len(encoded) > len(retained), len(encoded)
+
+
+def _bounded_generator_args(values, limit_bytes=8192):
+    retained = []
+    remaining = max(int(limit_bytes), 0)
+    truncated = False
+    for value in values or ():
+        text, item_truncated, observed = _utf8_prefix(value, remaining)
+        retained.append(text)
+        used = len(text.encode("utf-8"))
+        remaining -= used
+        if item_truncated or observed > used:
+            truncated = True
+        if remaining <= 0:
+            truncated = truncated or len(retained) < len(values or ())
+            break
+    return retained, truncated
+
+
+def _artifact_payloads(outcome):
+    payloads = {}
+    for role, output_name, stderr_name in (
+        ("generator", None, "generator.stderr"),
+        ("validator", "validator.out", "validator.stderr"),
+        ("accepted", "accepted.out", "accepted.stderr"),
+        ("brute", "brute.out", "brute.stderr"),
+    ):
+        result = outcome.get(role)
+        if not result:
+            continue
+        if output_name is not None:
+            payloads[output_name] = result.get("stdout", b"")
+        payloads[stderr_name] = result.get("stderr", b"")
+    comparison = outcome.get("comparison") or {}
+    if comparison:
+        payloads["checker.stderr"] = comparison.get("stderr", b"")
+
+    failure_role = str(outcome.get("reason", "")).split("_", 1)[0]
+    preferred = [
+        f"{failure_role}.stderr",
+        f"{failure_role}.out",
+        "accepted.out",
+        "brute.out",
+        "checker.stderr",
+        "generator.stderr",
+        "validator.stderr",
+        "accepted.stderr",
+        "brute.stderr",
+        "validator.out",
+    ]
+    ordered = []
+    for name in preferred:
+        if name in payloads and name not in ordered:
+            ordered.append(name)
+    for name in sorted(payloads):
+        if name not in ordered:
+            ordered.append(name)
+    return [(name, payloads[name]) for name in ordered]
+
+
+def _metadata_bytes(metadata, limit_bytes):
+    payload = json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    if len(payload) > int(limit_bytes):
+        raise ProbHubError(
+            "stress counterexample metadata exceeds its bounded diagnostic reserve",
+            code="stress_artifact_metadata_limit",
+        )
+    return payload
 
 
 def _save_counterexample(root, problem_dir, problem_id, configured, master_seed, seed, round_number, outcome):
@@ -537,44 +699,112 @@ def _save_counterexample(root, problem_dir, problem_id, configured, master_seed,
     temporary = stress_root / f".tmp-{uuid.uuid4().hex}"
     temporary.mkdir(parents=True)
     try:
-        _write_optional_bytes(temporary, "input.in", outcome.get("input", b""))
-        for role, output_name, stderr_name in (
-            ("generator", "generator.out", "generator.stderr"),
-            ("validator", "validator.out", "validator.stderr"),
-            ("accepted", "accepted.out", "accepted.stderr"),
-            ("brute", "brute.out", "brute.stderr"),
-        ):
-            result = outcome.get(role)
-            if result:
-                _write_optional_bytes(temporary, output_name, result.get("stdout", b""))
-                _write_optional_bytes(temporary, stderr_name, result.get("stderr", b""))
-        comparison = outcome.get("comparison") or {}
-        _write_optional_bytes(temporary, "checker.stderr", comparison.get("stderr", b""))
+        execution_budget = int(configured["output_limit"] * MIB)
+        diagnostic_budget = min(execution_budget, MAX_CHECKER_DIAGNOSTIC_BYTES)
+        metadata_budget = min(STRESS_METADATA_BUDGET_BYTES, diagnostic_budget)
+        payload_budget = diagnostic_budget - metadata_budget
+        artifact_budget = execution_budget + diagnostic_budget
+        input_payload = outcome.get("input", b"") or b""
+        if len(input_payload) > execution_budget:
+            raise ProbHubError(
+                "stress counterexample input exceeds the execution output budget",
+                code="stress_artifact_input_limit",
+            )
+        (temporary / "input.in").write_bytes(input_payload)
+
+        payloads = _artifact_payloads(outcome)
+        allocations = allocate_shared_prefix_bytes(
+            [len(payload) for _, payload in payloads], payload_budget
+        )
+        file_records = {
+            "input.in": {
+                "observed_bytes": len(input_payload),
+                "stored_bytes": len(input_payload),
+                "truncated": False,
+            },
+            "generator.out": {
+                "alias": "input.in",
+                "normalization": "LF",
+                "stored_bytes": 0,
+            },
+        }
+        for (name, payload), allocation in zip(payloads, allocations):
+            retained = payload[:allocation]
+            if retained:
+                (temporary / name).write_bytes(retained)
+            file_records[name] = {
+                "observed_bytes": len(payload),
+                "stored_bytes": len(retained),
+                "truncated": len(retained) < len(payload),
+            }
+
         created_at = datetime.now(timezone.utc).isoformat()
+        message, message_truncated, message_observed = _utf8_prefix(
+            outcome.get("message", ""), min(8192, metadata_budget // 4)
+        )
+        generator_args, generator_args_truncated = _bounded_generator_args(
+            outcome.get("generator_args", [])
+        )
+        generator = outcome.get("generator") or {}
+        input_complete = not generator or (
+            generator.get("status") == "AC" and not generator.get("output_truncated")
+        )
+        runs = {}
+        for name in ("generator", "validator", "accepted", "brute", "comparison"):
+            public = _public_run(outcome.get(name))
+            if public:
+                public.pop("message", None)
+                runs[name] = public
         metadata = {
-            "schema_version": 1,
+            "schema_version": 2,
             "problem_id": problem_id,
             "created_at": created_at,
             "kind": outcome.get("kind"),
             "reason": outcome.get("reason"),
-            "message": outcome.get("message", ""),
+            "message": message,
+            "message_observed_bytes": message_observed,
+            "message_truncated": message_truncated,
             "master_seed": master_seed,
             "seed": seed,
             "round": round_number,
             "generator": configured["generator_rel"],
-            "generator_args": outcome.get("generator_args", []),
+            "generator_args": generator_args,
+            "generator_args_truncated": generator_args_truncated,
             "validator": configured["validator_rel"],
             "accepted": configured["accepted_rel"],
             "brute": configured["brute_rel"],
             "checker": configured["checker_rel"],
             "judge_type": configured["judge_type"],
+            "input_complete": input_complete,
+            "replayable": input_complete,
+            "artifact_limit_bytes": artifact_budget,
+            "execution_output_limit_bytes": execution_budget,
+            "diagnostic_limit_bytes": diagnostic_budget,
+            "metadata_limit_bytes": metadata_budget,
+            "stored_payload_bytes": len(input_payload) + sum(allocations),
+            "artifact_truncated": any(
+                record.get("truncated") for record in file_records.values()
+            ) or any(
+                run.get("output_truncated") for run in runs.values()
+            ) or message_truncated or generator_args_truncated,
+            "files": file_records,
+            "runs": runs,
             "statuses": {
                 name: (outcome.get(name) or {}).get("status")
                 for name in ("generator", "validator", "accepted", "brute", "comparison")
                 if outcome.get(name)
             },
         }
-        write_json(temporary / "metadata.json", metadata)
+        metadata_payload = _metadata_bytes(metadata, metadata_budget)
+        (temporary / "metadata.json").write_bytes(metadata_payload)
+        stored_bytes = sum(
+            path.stat().st_size for path in temporary.iterdir() if path.is_file()
+        )
+        if stored_bytes > artifact_budget:
+            raise ProbHubError(
+                "stress counterexample exceeded its total persistence budget",
+                code="stress_artifact_limit",
+            )
         try:
             temporary.replace(final)
         except OSError:
@@ -643,6 +873,11 @@ def _resolve_replay(root, problem_dir, replay, problem_id=None):
     if not input_path.is_file():
         raise ProbHubError(f"stress replay input not found: {input_path}")
     metadata = _read_json_object(metadata_path, "stress replay metadata") if metadata_path.is_file() else {}
+    if metadata.get("schema_version") == 2 and metadata.get("replayable") is False:
+        raise ProbHubError(
+            f"stress replay input is incomplete and cannot be replayed: {input_path}",
+            code="stress_replay_incomplete",
+        )
     metadata_problem_id = metadata.get("problem_id")
     if problem_id and metadata_problem_id and str(metadata_problem_id) != str(problem_id):
         raise ProbHubError(
@@ -664,7 +899,18 @@ def _public_run(result):
         public["time"] = round(float(result.get("time", 0)), 6)
     if "match" in result:
         public["match"] = bool(result.get("match"))
-    for key in ("reason", "memory", "memory_enforced", "process_limit_enforced", "execution_status"):
+    for key in (
+        "reason",
+        "memory",
+        "memory_enforced",
+        "process_limit_enforced",
+        "execution_status",
+        "output_bytes",
+        "retained_output_bytes",
+        "stdout_retained_bytes",
+        "stderr_retained_bytes",
+        "output_truncated",
+    ):
         if key in result:
             public[key] = result.get(key)
     return public
@@ -1335,6 +1581,8 @@ def stress_problem(
                 "round": round_number,
                 "reason": outcome["reason"],
                 "message": outcome.get("message", ""),
+                "generator": _public_run(outcome.get("generator")),
+                "validator": _public_run(outcome.get("validator")),
                 "accepted": _public_run(outcome.get("accepted")),
                 "brute": _public_run(outcome.get("brute")),
                 "comparison": _public_run(outcome.get("comparison")),
@@ -1377,11 +1625,17 @@ def stress_problem(
                     "reason": outcome["reason"],
                     "message": outcome.get("message", ""),
                     "counterexample": relative,
-                    "replay_command": _replay_command(
-                        problem_id,
-                        relative,
-                        configured["brute_rel"] if against is not None else None,
+                    "replay_command": (
+                        _replay_command(
+                            problem_id,
+                            relative,
+                            configured["brute_rel"] if against is not None else None,
+                        )
+                        if metadata.get("replayable", True)
+                        else None
                     ),
+                    "generator": _public_run(outcome.get("generator")),
+                    "validator": _public_run(outcome.get("validator")),
                     "accepted": _public_run(outcome.get("accepted")),
                     "brute": _public_run(outcome.get("brute")),
                     "comparison": _public_run(outcome.get("comparison")),

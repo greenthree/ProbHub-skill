@@ -56,16 +56,17 @@ limits:
 
 1. 大于 `limits.output` 后立即判定输出超限；
 2. 终止完整进程树；
-3. 把捕获文件截断到配置预算以内；
-4. 选手程序返回 `OLE`，官方工具返回基础设施失败。
+3. 再次测量终止期间写入的字节，并让全部受控输出路径原子共享同一配置预算；
+4. 按稳定路径顺序公平保留各文件前缀，短流未用配额转移给长流，奇数字节由前一条路径优先；
+5. 选手程序返回 `OLE`，官方工具返回基础设施失败。
 
-共享进程控制会在截断前记录 stdout 与 stderr 的总字节数为 `output_bytes`。该值用于 OLE 校准下界；正式保存文件仍被截断到预算内，不能用截断后的文件大小代替实际观测值。
+默认路径顺序为 stdout、stderr；Checker feedback 等显式受控诊断路径排在其后。`output_bytes` 记录进程树终止后、截断前的总观测字节数，`retained_output_bytes` 记录实际保留总量，`stdout_retained_bytes`、`stderr_retained_bytes` 与 `output_truncated` 公开前两条流的保留量和是否发生截断。`output_bytes` 继续用于 OLE 校准下界，不能用截断后的文件大小代替。
 
-进程可能在一次轮询间隔内多写少量内容，因此判定依据是“观测到超限”，而最终保存文件会被截断。快速大量输出并立即退出也会在结束后的最终检查中被识别，不能绕过 OLE。
+完成、超时、取消、资源超限和快速退出都在完整进程树终止后执行相同的共享截断；原有终止原因不会被后到的输出覆盖。进程可能在一次轮询间隔内多写少量内容，因此判定依据是“观测到超限”，而最终保存文件仍不超过预算。捕获路径不是普通文件、无法测量或无法截断时 fail closed，作为沙箱基础设施失败，不会把失去约束的执行误报为选手 `RE` 或正常结果。
 
-交互题同时限制选手到 Interactor 的通信流量以及 stderr；选手超限为 `OLE`，Interactor 自身输出洪泛为 `FAIL`。Transcript 仍受 `judge.interactive.transcript_limit` 单独限制，两个通信方向原子共享这份原始字节预算，并分别使用 UTF-8 增量解码保留跨读取块字符；Transcript 截断不等于 OLE。
+交互题使用流式泵送而不是非交互捕获文件。选手到 Interactor 的协议字节与选手 stderr 共享题目执行输出预算，超限为 `OLE`；Interactor 协议输出使用同额官方工具预算，Interactor stderr 与 feedback 使用独立诊断预算 `min(limits.output, 8 MiB)`，超限为 `FAIL`。进入事件和缓存的诊断文本只读取有界 UTF-8 前缀。Transcript 仍受 `judge.interactive.transcript_limit` 单独限制，两个通信方向原子共享这份原始字节预算，并分别使用 UTF-8 增量解码保留跨读取块字符；Transcript 截断不等于 OLE。
 
-编译器、Validator、Checker 和其他官方工具使用内部诊断输出上限，避免错误工具耗尽内存或磁盘；内部上限不改变 DOMjudge 正式题目限制。
+编译器、Validator、Checker 和其他官方工具使用内部诊断输出上限，Checker 的 stdout、stderr、`judgemessage.txt` 与 `teammessage.txt` 纳入同一受控执行预算，避免 feedback 文件绕过限制。内部上限不改变 DOMjudge 正式题目限制。
 
 ## 5. Windows
 
@@ -114,14 +115,14 @@ Generator → Validator → accepted → brute → Checker/standard compare
 
 - accepted/brute 的 OLE、MLE、TLE 或 RE 作为 `counterexample` 保存；
 - Generator、Validator、Checker 或编译器的资源错误作为 `infrastructure` 保存；
-- 反例中的 stdout/stderr 已受上限保护并可能被截断；
+- 反例中的 stdout/stderr 已受共享上限保护并可能被截断，单个反例另有明确总持久化预算；
 - Replay 重新运行当前程序时继续应用当前资源限制。
 
 Stress 不读取或写入普通沙箱缓存。完整反例和 replay 协议见 `references/stress.md`。
 
 ## 9. 缓存
 
-逐点缓存键包含时间、内存、输出、进程数、平台和沙箱策略。进程控制或资源状态语义变化时会提升缓存 Schema，因此旧版本缓存不会继续返回缺少 OLE 或旧进程树行为的结果。
+逐点缓存键包含时间、内存、输出、进程数、平台和沙箱策略。共享输出截断与 Checker feedback 受控后缓存 Schema 为 6；进程控制或资源状态语义变化时会继续提升 Schema，因此旧版本缓存不会返回缺少 OLE、旧 feedback 或旧进程树行为的结果。
 
 要强制完整执行并刷新缓存：
 
