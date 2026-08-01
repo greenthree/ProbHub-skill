@@ -94,6 +94,8 @@ class UiSecurityTests(unittest.TestCase):
         self.assertNotRegex(html, r'@keydown\.backspace="\s*if\b')
         self.assertIn("openSandbox() {", app)
         self.assertIn("removeLastTag() {", app)
+        self.assertIn("if (!(await this.doSave())) return;", app)
+        self.assertNotIn("this._doSave()", app)
 
     def test_only_declared_package_assets_are_served(self):
         expected_types = {

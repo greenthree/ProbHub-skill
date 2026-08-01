@@ -16,6 +16,7 @@ DEFAULT_PROCESS_LIMIT = 32
 DEFAULT_POLL_INTERVAL = 0.005
 CANCEL_FILE_ENV = "PROBHUB_CANCEL_FILE"
 WINDOWS_CREATE_SUSPENDED = 0x00000004
+PYTHON_OPTIONS_WITH_ARGUMENT = frozenset(("-W", "-X", "--check-hash-based-pycs"))
 UNIX_EXEC_START_TIMEOUT_SECONDS = 10.0
 UNIX_EXEC_READY = b"PROBHUB_UNIX_EXEC_READY_V1\n"
 UNIX_EXEC_STATUS_LIMIT = 64 * 1024
@@ -33,6 +34,71 @@ def cancellation_requested():
         return Path(path).is_file()
     except OSError:
         return False
+
+
+def _same_executable(left, right):
+    try:
+        return os.path.samefile(left, right)
+    except (OSError, TypeError, ValueError):
+        try:
+            return os.path.normcase(os.path.abspath(os.fspath(left))) == os.path.normcase(
+                os.path.abspath(os.fspath(right))
+            )
+        except (TypeError, ValueError):
+            return False
+
+
+def _prepare_windows_python_command(command, env):
+    """Bypass Windows venv redirectors so Job Object containment reaches Python."""
+    if platform.system() != "Windows" or isinstance(command, (str, bytes, os.PathLike)):
+        return command, env
+    command = list(command)
+    if not command or sys.prefix == sys.base_prefix:
+        return command, env
+    if not _same_executable(command[0], sys.executable):
+        return command, env
+
+    base_executable = Path(sys.base_prefix) / Path(sys.executable).name
+    helper = Path(__file__).with_name("_windows_python_exec.py")
+    if not base_executable.is_file():
+        raise OSError(f"Windows virtualenv base interpreter is missing: {base_executable}")
+    if not helper.is_file():
+        raise OSError(f"Windows Python containment helper is missing: {helper}")
+
+    arguments = command[1:]
+    interpreter_options = []
+    while arguments:
+        option = arguments[0]
+        if option == "--":
+            arguments = arguments[1:]
+            break
+        if option in ("-", "-c", "-m") or not str(option).startswith("-"):
+            break
+        interpreter_options.append(option)
+        arguments = arguments[1:]
+        if option in PYTHON_OPTIONS_WITH_ARGUMENT:
+            if not arguments:
+                raise ValueError(f"Python option requires an argument: {option}")
+            interpreter_options.append(arguments[0])
+            arguments = arguments[1:]
+
+    # A Windows venv python.exe can be a redirector whose Popen handle belongs
+    # to a launcher instead of the real interpreter. Assigning only that handle
+    # to a Job lets the interpreter and its descendants escape all limits.
+    original_executable = str(command[0])
+    command = [
+        str(base_executable),
+        *interpreter_options,
+        str(helper),
+        str(base_executable),
+        *arguments,
+    ]
+    child_env = dict(os.environ if env is None else env)
+    # CPython uses this path to discover pyvenv.cfg before the helper starts.
+    # The helper then points descendants at the base executable while the root
+    # process keeps its original venv prefix and processed site-packages.
+    child_env["__PYVENV_LAUNCHER__"] = original_executable
+    return command, child_env
 
 
 def _prepare_unix_memory_limited_command(command, memory_limit_mb):
@@ -593,6 +659,9 @@ def spawn_managed(
         raise ValueError("preexec_fn is not supported; use managed process limits")
     unix_status_fds = None
     if platform.system() == "Windows":
+        command, kwargs["env"] = _prepare_windows_python_command(
+            command, kwargs.get("env")
+        )
         kwargs["creationflags"] = int(kwargs.get("creationflags", 0)) | WINDOWS_CREATE_SUSPENDED
     else:
         kwargs.setdefault("start_new_session", True)

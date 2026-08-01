@@ -76,6 +76,8 @@ Windows 使用 Job Object：
 - Active Process Limit 实施 `limits.processes`；
 - 可查询 Job 峰值内存用于诊断和 MLE 判断。
 
+Windows 虚拟环境的 `python.exe` 可能是一个重定向启动器，尤其是 Microsoft Store Python。ProbHub 会在受控执行时直接启动对应的 base 解释器，并显式保留虚拟环境依赖路径，避免 Job 只约束启动器而真正的 Python 进程和后代逃逸。
+
 若 Job Object 创建、配置或分配失败，ProbHub 会 **fail closed**：立即结束刚启动的进程并返回基础设施错误，不会退化成只能杀直接父进程的无保护执行。
 
 ## 6. Linux 与其他 Unix

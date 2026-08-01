@@ -784,7 +784,6 @@ def _sandbox_problem_info(subtitle, index):
     else:
         name_to_dir = find_problem_dirs()
         prob_dir = name_to_dir.get(display_name)
-    script_path = os.path.join("scripts", "local_judge.py")
     info = {
         "name": display_name,
         "matched": bool(prob_dir),
@@ -797,7 +796,9 @@ def _sandbox_problem_info(subtitle, index):
         "files": {"validator": False, "std": [], "brute": [], "wrong": [], "other": []},
         "file_counts": {"std": 0, "brute": 0, "wrong": 0, "other": 0},
         "files_truncated": False,
-        "script_exists": os.path.exists(script_path),
+        # The installed Core owns local_judge.py; the workspace may only keep
+        # thin launchers and must not need a copied runtime script.
+        "script_exists": LOCAL_JUDGE_SCRIPT.is_file(),
     }
     if not prob_dir:
         info["reason"] = "no matching directory"

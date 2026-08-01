@@ -472,7 +472,7 @@
                 async runSandbox() {
                     if (!this.currentSubtitle || this.selectedIdx === null) return;
                     clearTimeout(this._saveTimer);
-                    await this._doSave();
+                    if (!(await this.doSave())) return;
                     const jobKey = this.sandboxKey();
                     this.sandboxRunning = true;
                     this.sandboxCancelling = false;
