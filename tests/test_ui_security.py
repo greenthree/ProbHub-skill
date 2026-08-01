@@ -62,6 +62,10 @@ class UiSecurityTests(unittest.TestCase):
         cls.ui = load_ui()
         cls.client = cls.ui.app.test_client()
 
+    @classmethod
+    def tearDownClass(cls):
+        cls.ui.shutdown_webui_tasks()
+
     @property
     def csrf_headers(self):
         return {"X-ProbHub-CSRF": self.ui.WEBUI_CSRF_TOKEN}
@@ -121,6 +125,7 @@ class UiSecurityTests(unittest.TestCase):
             ("/api/compile", {}),
             ("/api/distribute", {}),
             ("/api/sandbox/run", {}),
+            ("/api/sandbox/job/" + "0" * 32 + "/cancel", None),
             ("/api/config/Contest", {}),
             ("/api/submission/job/" + "0" * 32 + "/cancel", None),
         ]

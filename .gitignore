@@ -43,6 +43,7 @@ __pycache__/
 **/.probhub/judge-evidence-v2.json
 **/.probhub/judge-evidence-v2.json.*.tmp
 **/.probhub/judge-evidence.lock
+**/.probhub/judge.lock
 
 # Local WebUI submission workspaces
 **/.probhub/submissions/

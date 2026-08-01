@@ -65,6 +65,7 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(problem_entries(workspace)[0]["id"], "A")
             gitignore = (root / ".gitignore").read_text(encoding="utf-8")
             self.assertIn("**/.probhub/build.lock", gitignore)
+            self.assertIn("**/.probhub/judge.lock", gitignore)
             self.assertIn("**/.probhub/checkpoints/", gitignore)
             self.assertIn("**/.probhub/generations/", gitignore)
             self.assertIn("**/.probhub/stress/", gitignore)

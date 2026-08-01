@@ -124,6 +124,9 @@ def _load_webui_module():
 
 
 def _cleanup_webui_module(module):
+    shutdown = getattr(module, "shutdown_webui_tasks", None)
+    if callable(shutdown):
+        shutdown()
     preview = getattr(module, "WEBUI_PREVIEW_TEMP", None)
     if preview is not None:
         preview.cleanup()

@@ -37,7 +37,7 @@ description: 当用户需要创作或维护算法竞赛题目、选择快速/普
 - `problem.pdf`、全卷 PDF、`<ID>.zip`
 - `.probhub/build-manifest.json`
 
-`.probhub/build.lock` 与 `.probhub/generation.lock` 是可保留的 OS 文件锁载体，不能用“文件是否存在”判断是否占用；`.probhub/sandbox-cache-v1.json` 是本地缓存，`.probhub/stress/` 保存可重放差分反例，`.probhub/checkpoints/` 与 `.probhub/generations/` 保存并行出题期间的不可变本地版本。这些路径都应被 Git 忽略，禁止提交或手工维护。
+`.probhub/build.lock` 与 `.probhub/generation.lock` 是可保留的工作区 OS 文件锁载体，`<problem>/.probhub/judge.lock` 是单题 Judge OS 文件锁载体；不能用“文件是否存在”判断是否占用。这些锁、`.probhub/sandbox-cache-v1.json`、`.probhub/stress/`、`.probhub/checkpoints/` 与 `.probhub/generations/` 都应被 Git 忽略，禁止提交或手工维护。
 
 `<problem>/.probhub/judge-evidence-v2.json` 是最近一次完整成功 Judge 的本地校准证据，`judge-evidence.lock` 是其 OS 发布锁。lint/status 先按 schema、source/data hash 与平台判断 evidence 是否过期，再验证测量策略、结构和每个解法的运行域；失败 Judge 不覆盖上一份成功证据，较旧的 build 快照也不能覆盖较新的本地测量。它们不进入 Manifest 或 ZIP，也不得提交；旧 `judge-evidence-v1.json` 继续被 Git 忽略，但不会作为当前证据读取。
 
@@ -249,6 +249,7 @@ probhub build L01 --skip-judge
 - Schema v1 WebUI 的临时提交评测只接受 UTF-8 `.cpp`，源码必须进入 `.probhub/submissions/<task-id>/` 独立目录；评测结束后清理，不得覆盖或修改题目原有 `code/`、数据、配置、答案和构建产物。
 - WebUI 上传提交时直接使用“沙箱评测”页；以编译事件、逐测试点事件和最终 verdict 为准，不得把上传代码加入 `solutions.accepted` 或写回 `probhub.yaml`。
 - 需要停止排队中或运行中的上传任务时使用页面“取消”按钮，并等待状态从 `CANCELLING` 进入 `CANCELLED`；不要手工删除仍在运行的任务目录。Core 会协作取消并在必要时强杀完整进程树。
+- 本地 WebUI 最多同时处理 8 个 HTTP 请求；完整沙箱与上传评测共用有界任务队列。`429` / `queue_full` 表示本机 worker 已满，应按 `retry_after` 稍后重试，不得把它冒充 Judge 失败或通过。完整沙箱同样支持取消，任务 deadline、日志截断或上传清理失败必须按结构化状态报告；清理失败时不得用 `cancelled` 或成功结果掩盖 `submission_cleanup_failed`。
 - WebUI 启动和接受新提交时会清理超过 24 小时且名称合法的遗留任务目录；陌生目录、符号链接和活动任务不得自动删除。
 - Legacy 工作区仍保留原编辑兼容路径；不得把 Legacy 生成物编辑语义带入 Schema v1。
 - 不得手工增量修改旧 ZIP；必须由 Core 完整重建并验证。

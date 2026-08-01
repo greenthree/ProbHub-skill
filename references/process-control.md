@@ -137,13 +137,18 @@ probhub build L01 --no-cache
 WebUI“沙箱评测”页支持上传单个 UTF-8 `.cpp` 并只评测该提交：
 
 1. 请求限制源码扩展名、UTF-8 编码和 `1 MiB` 大小；
-2. 每次提交生成唯一 task ID，源码写入 `.probhub/submissions/<task-id>/problem/code/submission.cpp`；
-3. 临时配置只保留上传解法，并以绝对只读路径引用题目现有测试数据；
-4. Custom Checker 或 Interactor 源码会复制到临时工作区后编译，原题 `code/` 不产生新的 `.exe`；
-5. 评测复用 `local_judge.py` 与共享进程控制，返回 CE/AC/WA/TLE/MLE/OLE/RE/FAIL 和逐测试点信息；
-6. 任务由后台线程监督独立子进程，HTTP 请求不会同步阻塞到评测结束；
-7. 排队中和运行中的任务均可取消：先创建取消标记并通知监督进程，3 秒后仍未退出则强制终止已知进程组与后代进程树；
-8. `local_judge.py --cancellable` 会在编译、普通运行和交互循环中检查取消标记，交互题取消时同时清理选手与 Interactor；
-9. 任务结束或取消后删除源码、临时配置、可执行文件、输出和缓存；启动服务及接受新任务时清理超过 24 小时的 UUID 遗留目录。
+2. 本地 WSGI 服务最多同时使用 8 个请求线程；完整沙箱与上传评测在读取题目或上传正文前先经过非阻塞 admission gate，随后共用固定 worker pool；默认 worker 数为 `min(4, CPU)`，等待队列最多 16 项，不会按请求无限创建 HTTP 或评测线程，也不会无界保留源码；
+3. admission 或队列饱和返回 HTTP `429`、`code: queue_full`、`retryable: true` 与 `retry_after`，被拒绝的上传不创建任务目录；
+4. WebUI 进程内先按题目目录互斥，`local_judge.py` 再取得 `<problem>/.probhub/judge.lock` 的 OS 排他锁；因此同题的 CLI、多个 WebUI 进程与完整沙箱不会并发改写编译产物和缓存，不同题目仍可占用不同 worker 并行运行，上传提交始终使用各自的隔离目录；
+5. 每次提交生成唯一 task ID，真正开始执行后才把源码写入 `.probhub/submissions/<task-id>/problem/code/submission.cpp`；
+6. 临时配置只保留上传解法，并以绝对只读路径引用题目现有测试数据；
+7. Custom Checker 或 Interactor 源码会复制到临时工作区后编译，原题 `code/` 不产生新的 `.exe`；
+8. 评测复用 `local_judge.py` 与共享进程控制，返回 CE/AC/WA/TLE/MLE/OLE/RE/FAIL 和逐测试点信息；
+9. 默认排队 deadline 为 5 分钟、单次执行 deadline 为 30 分钟、从接收到结束的整任务 deadline 为 35 分钟；源码准备、等待同题互斥锁、Judge 执行和清理都属于任务生命周期，超时返回稳定 `queue_timeout` 或 `task_deadline_exceeded`；
+10. 排队中和运行中的完整沙箱、上传任务均可取消；取消状态单调且优先于同时到达的成功终态，运行任务先通过独立取消标记协作停止，3 秒后仍未退出则强制终止已知进程组与后代进程树；
+11. `local_judge.py --cancellable` 会在编译、普通运行和交互循环中检查取消标记，交互题取消时同时清理选手与 Interactor；
+12. 每项任务的可见日志最多保留 `256 KiB`，结构化明细事件原始预算为 `2 MiB`，最终事件另限 `64 KiB`；WebUI 使用固定 drainer 线程从 PIPE 持续读取 Judge JSONL，最多保留 `16 MiB` 前缀，超额数据继续排空并终止完整进程树，不会先写入无界临时文件；截断会明确标记，不改变题目 `limits.output` 的 OLE 语义；
+13. 完整沙箱和上传评测分别最多保留 32 条完成记录，TTL 为 1 小时；新任务、状态读取和任务结束时清理过期记录，任务结果不是持久审计日志；
+14. 上传任务结束、取消或超时后删除源码、临时配置、可执行文件、输出和缓存；删除失败返回 `submission_cleanup_failed` 与 `workspace_cleaned: false`，不得宣称已经清理；启动服务及接受新任务时清理超过 24 小时的 UUID 遗留目录。
 
 遗留清理只处理 `.probhub/submissions/` 内名称严格为 32 位小写十六进制的非符号链接目录，并跳过活动任务、陌生名称和符号链接。上传流程不得覆盖、重命名或修改题目原有 `code/std.cpp`、`code/brute.cpp`、`code/wrong*.cpp`、Checker、Interactor、数据、答案或生成物。任务字典只保存文件名、结构化结果和日志，不保存源码正文。

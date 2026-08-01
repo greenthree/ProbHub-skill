@@ -175,6 +175,8 @@ probhub --json ui --check
 
 `--check` 会定位 workspace、从当前安装包绝对路径导入 WebUI 和 Core，然后立即退出；不会启动服务器或写入赛事规范源与正式产物。缺少打包文件、Python 依赖或入口契约不兼容时，分别返回稳定的 `webui_runtime_missing`、`webui_dependency_missing` 或 `webui_runtime_incompatible`。赛事仓库可以保留调用该命令的薄入口，但不得复制整套 Core/WebUI 后静默回退。
 
+WebUI 的本地 WSGI 服务最多同时使用 8 个请求线程，使同步编译或分发进行时仍可处理任务轮询和取消，并避免默认每请求创建无界线程。完整沙箱和上传评测在解析任务前经过有界 admission gate，再进入共享固定 worker pool 与有界等待队列。任务被接受后先返回 `queued`，随后进入 `running`；入口或队列饱和时 HTTP 返回 `429`，JSON 包含 `code: "queue_full"`、`retryable: true` 和 `retry_after`，不会创建上传临时工作区。`local_judge.py` 在每个题目目录取得 OS 文件锁，同题的 CLI 与任意 WebUI 进程不会同时改写编译产物或缓存；不同题及隔离上传仍可并行。排队和运行中的任务都支持取消，运行任务还受单次执行与整任务 deadline 约束。可见日志、结构化事件、完成记录数量和 TTL 均有上限，旧结果不能作为长期持久记录使用。
+
 ## 7. `lint`
 
 ```powershell

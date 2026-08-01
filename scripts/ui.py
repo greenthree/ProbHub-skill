@@ -5,20 +5,21 @@ import json
 import hmac
 import re
 import secrets
-import signal
 import subprocess
 import shutil
 import tempfile
 import webbrowser
 import uuid
 import time
+import copy
 from pathlib import Path
-from threading import BoundedSemaphore, Lock, Thread, Timer
+from threading import BoundedSemaphore, Lock, Timer
 from urllib.parse import urlsplit
 
 import yaml
-from flask import Flask, jsonify, request, render_template_string, send_file
+from flask import Flask, g, jsonify, request, render_template_string, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.serving import ThreadedWSGIServer
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PACKAGE_ROOT = next(
@@ -37,11 +38,14 @@ from probhub.building import build_workspace, create_build_plan, create_build_sn
 from probhub.errors import ProbHubError
 from probhub.process_control import (
     run_managed_to_files,
+    spawn_managed,
     snapshot_process_tree,
     terminate_external_process_tree,
 )
 from probhub.submissions import (
     MAX_SOURCE_BYTES,
+    SubmissionPreparationCancelled,
+    SubmissionPreparationDeadlineExceeded,
     cleanup_stale_submission_workspaces,
     temporary_submission_workspace,
     validate_cpp_upload,
@@ -56,6 +60,7 @@ from probhub.webui_workspace import (
     statement_asset_path,
 )
 from probhub.workspace import load_workspace, problem_entries
+from probhub.webui_tasks import BoundedPipeCapture, BoundedTaskExecutor, BoundedUtf8Log
 
 app = Flask(__name__)
 MAX_SUBMISSION_REQUEST_BYTES = MAX_SOURCE_BYTES + 64 * 1024
@@ -68,14 +73,35 @@ _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 BASE_DIR = "typst-statement"
 SANDBOX_JOBS = {}
 SANDBOX_LOCK = Lock()
+SANDBOX_PROCESSES = {}
+SANDBOX_CANCEL_FILES = {}
+SANDBOX_PROBLEM_LOCKS = {}
+SANDBOX_PROBLEM_LOCKS_GUARD = Lock()
 SUBMISSION_JOBS = {}
 SUBMISSION_PROCESSES = {}
 SUBMISSION_CANCEL_FILES = {}
 SUBMISSION_LOCK = Lock()
-SUBMISSION_RESULT_TTL = 60 * 60
+WEBUI_TASK_RESULT_TTL = 60 * 60
 SUBMISSION_FORCE_CANCEL_AFTER = 3.0
-MAX_CONCURRENT_SUBMISSIONS = max(1, min(4, os.cpu_count() or 2))
-SUBMISSION_SLOTS = BoundedSemaphore(MAX_CONCURRENT_SUBMISSIONS)
+WEBUI_TASK_WORKERS = max(1, min(4, os.cpu_count() or 2))
+WEBUI_TASK_QUEUE_SIZE = 16
+WEBUI_TASK_QUEUE_DEADLINE = 5 * 60
+WEBUI_TASK_EXECUTION_DEADLINE = 30 * 60
+WEBUI_TASK_TOTAL_DEADLINE = 35 * 60
+WEBUI_TASK_LOG_BYTES = 256 * 1024
+WEBUI_TASK_EVENT_BYTES = 2 * 1024 * 1024
+WEBUI_TASK_FINAL_EVENT_BYTES = 64 * 1024
+WEBUI_TASK_PROCESS_OUTPUT_BYTES = 16 * 1024 * 1024
+WEBUI_TASK_ERROR_BYTES = 64 * 1024
+WEBUI_TASK_MAX_COMPLETED = 32
+WEBUI_TASK_INFO_FILES_PER_ROLE = 64
+WEBUI_HTTP_REQUEST_THREADS = 8
+WEBUI_TASK_EXECUTOR = BoundedTaskExecutor(
+    max_workers=WEBUI_TASK_WORKERS,
+    max_queued=WEBUI_TASK_QUEUE_SIZE,
+    name="probhub-webui",
+)
+WEBUI_REQUEST_SLOTS = BoundedSemaphore(WEBUI_TASK_EXECUTOR.capacity)
 WEBUI_PREVIEW_TEMP = tempfile.TemporaryDirectory(prefix="probhub-webui-preview-")
 WEBUI_PREVIEW_ROOT = Path(WEBUI_PREVIEW_TEMP.name)
 
@@ -116,6 +142,46 @@ def _security_error(code, message):
     return jsonify({"success": False, "error": message, "code": code}), 403
 
 
+def _reserve_task_request():
+    task_slot = WEBUI_REQUEST_SLOTS
+    if not task_slot.acquire(blocking=False):
+        return _queue_full_response()
+    g.webui_task_slot = task_slot
+
+
+def _transfer_task_request():
+    task_slot = getattr(g, "webui_task_slot", None)
+    g.webui_task_slot = None
+    return task_slot
+
+
+def _release_task_request_slot(task_slot):
+    if task_slot is not None:
+        task_slot.release()
+
+
+def _run_with_task_slot(task_slot, callback):
+    try:
+        return callback()
+    finally:
+        task_slot.release()
+
+
+def _discard_with_task_slot(task_slot, callback, reason):
+    try:
+        return callback(reason)
+    finally:
+        task_slot.release()
+
+
+@app.teardown_request
+def release_task_request(_error=None):
+    task_slot = getattr(g, "webui_task_slot", None)
+    if task_slot is not None:
+        g.webui_task_slot = None
+        task_slot.release()
+
+
 @app.before_request
 def protect_local_webui():
     if request.path == "/api/submission/run" and request.method == "POST":
@@ -136,6 +202,8 @@ def protect_local_webui():
         token = request.headers.get("X-ProbHub-CSRF", "")
         if not hmac.compare_digest(token, WEBUI_CSRF_TOKEN):
             return _security_error("csrf_failed", "missing or invalid WebUI request token")
+    if request.path in {"/api/sandbox/run", "/api/submission/run"} and request.method == "POST":
+        return _reserve_task_request()
 
 
 @app.errorhandler(RequestEntityTooLarge)
@@ -726,8 +794,9 @@ def _sandbox_problem_info(subtitle, index):
         "data_count": 0,
         "sample_count": 0,
         "secret_count": 0,
-        "cases": [],
         "files": {"validator": False, "std": [], "brute": [], "wrong": [], "other": []},
+        "file_counts": {"std": 0, "brute": 0, "wrong": 0, "other": 0},
+        "files_truncated": False,
         "script_exists": os.path.exists(script_path),
     }
     if not prob_dir:
@@ -737,10 +806,18 @@ def _sandbox_problem_info(subtitle, index):
     for suite in ("sample", "secret"):
         data_dir = os.path.join(prob_dir, "data", suite)
         if os.path.isdir(data_dir):
-            suite_cases = [f"{suite}/{f[:-3]}" for f in os.listdir(data_dir) if f.endswith(".in")]
-            info["cases"].extend(sorted(suite_cases))
-            info[f"{suite}_count"] = len(suite_cases)
-    info["data_count"] = len(info["cases"])
+            with os.scandir(data_dir) as entries:
+                info[f"{suite}_count"] = sum(
+                    1 for entry in entries if entry.is_file() and entry.name.endswith(".in")
+                )
+    info["data_count"] = info["sample_count"] + info["secret_count"]
+
+    def add_file(role, source):
+        info["file_counts"][role] += 1
+        if len(info["files"][role]) < WEBUI_TASK_INFO_FILES_PER_ROLE:
+            info["files"][role].append(source)
+        else:
+            info["files_truncated"] = True
 
     config = read_probhub_config_from_dir(prob_dir)
     if config is not None:
@@ -750,33 +827,36 @@ def _sandbox_problem_info(subtitle, index):
             info["files"]["validator"] = validator
 
         solutions = config.get("solutions") or {}
+        configured = set()
         for config_key, display_key in (("accepted", "std"), ("brute", "brute"), ("wrong", "wrong")):
             for entry in _config_entries(solutions.get(config_key)):
                 source = _normalized_config_path(entry)
                 if source and os.path.isfile(os.path.join(prob_dir, source)):
-                    info["files"][display_key].append(source)
+                    configured.add(source)
+                    add_file(display_key, source)
 
-        configured = set(sum((info["files"][key] for key in ("std", "brute", "wrong")), []))
         if info["files"]["validator"]:
             configured.add(info["files"]["validator"])
         for entry in _config_entries(config.get("generators")):
             source = _normalized_config_path(entry)
             if source and source not in configured and os.path.isfile(os.path.join(prob_dir, source)):
-                info["files"]["other"].append(source)
+                add_file("other", source)
     else:
-        for file in sorted(os.listdir(prob_dir)):
-            if not file.endswith(".cpp"):
-                continue
-            if file == "validator.cpp":
-                info["files"]["validator"] = file
-            elif file.startswith("std"):
-                info["files"]["std"].append(file)
-            elif file.startswith("brute"):
-                info["files"]["brute"].append(file)
-            elif file.startswith("wrong"):
-                info["files"]["wrong"].append(file)
-            else:
-                info["files"]["other"].append(file)
+        with os.scandir(prob_dir) as entries:
+            for entry in entries:
+                file = entry.name
+                if not entry.is_file() or not file.endswith(".cpp"):
+                    continue
+                if file == "validator.cpp":
+                    info["files"]["validator"] = file
+                elif file.startswith("std"):
+                    add_file("std", file)
+                elif file.startswith("brute"):
+                    add_file("brute", file)
+                elif file.startswith("wrong"):
+                    add_file("wrong", file)
+                else:
+                    add_file("other", file)
 
     info["runnable"] = info["script_exists"] and info["data_count"] > 0
     return info
@@ -933,57 +1013,516 @@ def _sandbox_log_line(event):
     return json.dumps(event, ensure_ascii=False)
 
 
-def _run_sandbox_job(job_id, subtitle, index):
-    try:
-        info = _sandbox_problem_info(subtitle, index)
-        result = _empty_sandbox_result(info)
-        with SANDBOX_LOCK:
-            SANDBOX_JOBS[job_id]["result"] = result
-            SANDBOX_JOBS[job_id]["logs"] = ""
+ACTIVE_TASK_STATUSES = {"queued", "running", "cancelling"}
 
-        if not info.get("runnable"):
-            message = info.get("reason") or "problem is not runnable"
-            result["final"] = {"ok": False, "message": message}
-            with SANDBOX_LOCK:
-                SANDBOX_JOBS[job_id].update(status="failed", result=result, logs=message)
+
+def _prune_job_registry(jobs):
+    now = time.time()
+    expired = [
+        job_id for job_id, job in jobs.items()
+        if job.get("status") not in ACTIVE_TASK_STATUSES
+        and now - float(job.get("finished_at") or job.get("created_at") or now) >= WEBUI_TASK_RESULT_TTL
+    ]
+    for job_id in expired:
+        jobs.pop(job_id, None)
+    finished = sorted(
+        (
+            (job_id, job)
+            for job_id, job in jobs.items()
+            if job.get("status") not in ACTIVE_TASK_STATUSES
+        ),
+        key=lambda item: float(item[1].get("finished_at") or item[1].get("created_at") or 0),
+    )
+    for job_id, _ in finished[: max(0, len(finished) - WEBUI_TASK_MAX_COMPLETED)]:
+        jobs.pop(job_id, None)
+
+
+def _prune_sandbox_jobs():
+    _prune_job_registry(SANDBOX_JOBS)
+
+
+def _prune_submission_jobs():
+    _prune_job_registry(SUBMISSION_JOBS)
+
+
+def _task_failure_result(result, code, message, *, status="failed"):
+    if result is None:
+        result = {}
+    result["final"] = {
+        "ok": False,
+        "status": status,
+        "code": code,
+        "message": message,
+    }
+    return result
+
+
+def _bounded_error_text(value):
+    log = BoundedUtf8Log(WEBUI_TASK_ERROR_BYTES)
+    log.append(str(value))
+    return log.text
+
+
+def _public_job_payload(job):
+    payload = copy.deepcopy(job)
+    for key in list(payload):
+        if key.startswith("_"):
+            payload.pop(key, None)
+    return payload
+
+
+def _queue_full_response():
+    response = jsonify({
+        "success": False,
+        "code": "queue_full",
+        "error": "WebUI task queue is full; retry later",
+        "retryable": True,
+        "retry_after": 2,
+        "capacity": WEBUI_TASK_EXECUTOR.capacity,
+    })
+    response.status_code = 429
+    response.headers["Retry-After"] = "2"
+    return response
+
+
+def _discard_queued_job(jobs, lock, job_id, reason, *, submission=False):
+    with lock:
+        job = jobs.get(job_id)
+        if not job or job.get("status") not in {"queued", "cancelling"}:
             return
+        cancelled = reason in {"cancelled", "shutdown"} or bool(job.get("cancel_requested"))
+        code = "cancelled" if cancelled else "queue_timeout"
+        message = "task cancelled before execution" if cancelled else "task exceeded its queue deadline"
+        result = _task_failure_result(job.get("result"), code, message, status=code)
+        if submission:
+            result.setdefault("submission", {}).update(
+                task_id=job_id,
+                filename=job.get("filename", ""),
+                verdict="CANCELLED" if cancelled else "FAIL",
+                workspace_cleaned=True,
+            )
+        job.update(
+            status="cancelled" if cancelled else "failed",
+            verdict=("CANCELLED" if cancelled else "FAIL") if submission else job.get("verdict"),
+            result=result,
+            logs=message,
+            finished_at=time.time(),
+            failure_code=code,
+        )
+        _prune_job_registry(jobs)
 
-        script_path = os.path.join("scripts", "local_judge.py")
-        proc = subprocess.Popen(
-            [sys.executable, script_path, info["dir"], "--jsonl"],
+
+def _task_executor_error(jobs, lock, job_id, exc, *, submission=False):
+    with lock:
+        job = jobs.get(job_id)
+        if not job or job.get("status") not in ACTIVE_TASK_STATUSES:
+            return
+        message = _bounded_error_text(f"WebUI task worker failed: {exc}")
+        failure_code = "task_worker_failed"
+        result = job.get("result") or {}
+        if submission:
+            workspace_cleaned = not (Path.cwd() / ".probhub" / "submissions" / job_id).exists()
+            submission_result = result.setdefault("submission", {})
+            submission_result.update(
+                task_id=job_id,
+                filename=job.get("filename", ""),
+                verdict="FAIL",
+                workspace_cleaned=workspace_cleaned,
+            )
+            if not workspace_cleaned:
+                failure_code = "submission_cleanup_failed"
+                submission_result.update(
+                    cleanup_error="submission workspace still exists after worker failure",
+                    original_failure_code="task_worker_failed",
+                )
+        result = _task_failure_result(
+            result,
+            failure_code,
+            "submission workspace cleanup failed" if failure_code == "submission_cleanup_failed" else message,
+        )
+        job.update(
+            status="failed",
+            verdict="FAIL" if submission else job.get("verdict"),
+            result=result,
+            logs=message,
+            finished_at=time.time(),
+            failure_code=failure_code,
+        )
+        _prune_job_registry(jobs)
+
+
+def _task_cancel_requested(jobs, lock, job_id):
+    with lock:
+        return bool(jobs.get(job_id, {}).get("cancel_requested"))
+
+
+def _claim_task_execution(jobs, lock, job_id):
+    with lock:
+        job = jobs.get(job_id)
+        if not job:
+            return None, "missing"
+        if job.get("cancel_requested"):
+            return None, "cancelled"
+        now = time.time()
+        now_monotonic = time.monotonic()
+        deadline_monotonic = job.get("_deadline_monotonic")
+        if deadline_monotonic is None:
+            remaining_wall = max(0.0, float(job.get("deadline_at") or now) - now)
+            deadline_monotonic = now_monotonic + remaining_wall
+            job["_deadline_monotonic"] = deadline_monotonic
+        remaining_total = float(deadline_monotonic) - now_monotonic
+        if remaining_total <= 0:
+            return None, "deadline"
+        execution_seconds = min(WEBUI_TASK_EXECUTION_DEADLINE, remaining_total)
+        job.update(
+            status="running",
+            started_at=now,
+            execution_deadline_at=now + execution_seconds,
+        )
+        return now_monotonic + execution_seconds, None
+
+
+def _sandbox_problem_lock(problem_dir):
+    key = str(Path(problem_dir).resolve())
+    with SANDBOX_PROBLEM_LOCKS_GUARD:
+        return SANDBOX_PROBLEM_LOCKS.setdefault(key, Lock())
+
+
+def _acquire_problem_lock(lock, jobs, jobs_lock, job_id, execution_deadline):
+    while time.monotonic() < execution_deadline:
+        if _task_cancel_requested(jobs, jobs_lock, job_id):
+            return "cancelled"
+        if lock.acquire(timeout=min(0.05, max(0.001, execution_deadline - time.monotonic()))):
+            return "acquired"
+    return "deadline"
+
+
+def _publish_task_progress(jobs, lock, job_id, result, log):
+    with lock:
+        job = jobs.get(job_id)
+        if job is not None:
+            job["logs"] = log.text
+            job["logs_truncated"] = log.truncated
+            # The worker keeps mutating its local result between polls. Publish
+            # an immutable snapshot so Flask never deep-copies a changing dict.
+            job["result"] = copy.deepcopy(result)
+
+
+def _consume_jsonl_chunk(result, log, state, chunk, *, final=False):
+    state["buffer"] += chunk
+    lines = state["buffer"].split(b"\n")
+    state["buffer"] = b"" if final else lines.pop()
+    if final and lines and not lines[-1]:
+        lines.pop()
+    for raw_line in lines:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        text = raw_line.decode("utf-8", errors="replace")
+        try:
+            event = json.loads(text)
+        except json.JSONDecodeError:
+            log.append(text)
+            continue
+        event_size = len(raw_line) + 1
+        if event.get("type") == "final":
+            if state.get("protocol_error"):
+                continue
+            if state.get("final_seen"):
+                state["protocol_error"] = "duplicate_final_event"
+                _task_failure_result(
+                    result,
+                    "judge_protocol_error",
+                    "judge emitted more than one final event",
+                )
+                log.append("[final:FAIL] judge emitted more than one final event")
+                continue
+            state["final_seen"] = True
+            if event_size > WEBUI_TASK_FINAL_EVENT_BYTES:
+                state["protocol_error"] = "task_event_limit"
+                result["details_truncated"] = True
+                _task_failure_result(
+                    result,
+                    "task_event_limit",
+                    "judge final event exceeded its limit",
+                )
+                log.append("[final:FAIL] judge final event exceeded its limit")
+                continue
+            _apply_sandbox_event(result, event)
+            log.append(_sandbox_log_line(event))
+            continue
+        if state["event_bytes"] + event_size <= WEBUI_TASK_EVENT_BYTES:
+            _apply_sandbox_event(result, event)
+            state["event_bytes"] += event_size
+            log.append(_sandbox_log_line(event))
+        else:
+            result["details_truncated"] = True
+            if not state.get("detail_limit_reported"):
+                state["detail_limit_reported"] = True
+                log.append("[details truncated: event budget exceeded]")
+
+
+def _touch_cancel_file(cancel_file):
+    try:
+        Path(cancel_file).touch(exist_ok=True)
+    except OSError:
+        pass
+
+
+def _supervise_judge_process(
+    job_id,
+    command,
+    env,
+    cancel_file,
+    result,
+    *,
+    jobs,
+    lock,
+    processes,
+    cancel_files,
+    execution_deadline,
+):
+    log = BoundedUtf8Log(WEBUI_TASK_LOG_BYTES)
+    parse_state = {
+        "buffer": b"",
+        "event_bytes": 0,
+        "final_seen": False,
+        "protocol_error": None,
+    }
+    return_code = None
+    stop_reason = None
+    stop_started = None
+    known_pids = set()
+    managed = None
+    capture = None
+    if _task_cancel_requested(jobs, lock, job_id):
+        _task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
+        _publish_task_progress(jobs, lock, job_id, result, log)
+        return {"returncode": None, "stop_reason": "cancelled", "logs": log.text}
+    if time.monotonic() >= execution_deadline:
+        _task_failure_result(result, "task_deadline_exceeded", "task exceeded its total deadline")
+        _publish_task_progress(jobs, lock, job_id, result, log)
+        return {"returncode": None, "stop_reason": "deadline", "logs": log.text}
+
+    try:
+        managed = spawn_managed(
+            command,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            cwd=Path.cwd(),
+            env=env,
+            memory_limit_mb=None,
+            process_limit=64,
         )
+        proc = managed.proc
+        capture = BoundedPipeCapture(
+            proc.stdout,
+            WEBUI_TASK_PROCESS_OUTPUT_BYTES,
+            name=f"probhub-webui-pipe-{job_id[:8]}",
+        ).start()
+        with lock:
+            processes[job_id] = proc
+            cancel_files[job_id] = Path(cancel_file)
+        while True:
+            published = False
+            for chunk in capture.drain_chunks():
+                _consume_jsonl_chunk(result, log, parse_state, chunk)
+                published = True
+            if published:
+                _publish_task_progress(jobs, lock, job_id, result, log)
 
-        logs = []
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            raw = line.strip()
-            if not raw:
-                continue
+            now_mono = time.monotonic()
+            if capture.overflow and stop_reason is None:
+                stop_reason = "output_limit"
+                stop_started = now_mono
+                known_pids = snapshot_process_tree(proc.pid)
+            elif _task_cancel_requested(jobs, lock, job_id) and stop_reason is None:
+                stop_reason = "cancelled"
+                stop_started = now_mono
+                known_pids = snapshot_process_tree(proc.pid)
+                _touch_cancel_file(cancel_file)
+            elif now_mono >= execution_deadline and stop_reason is None:
+                stop_reason = "deadline"
+                stop_started = now_mono
+                known_pids = snapshot_process_tree(proc.pid)
+                _touch_cancel_file(cancel_file)
+
+            if stop_reason == "output_limit" and proc.poll() is None:
+                terminate_external_process_tree(proc, known_pids)
+            elif (
+                stop_reason is not None
+                and proc.poll() is None
+                and now_mono - float(stop_started or now_mono) >= SUBMISSION_FORCE_CANCEL_AFTER
+            ):
+                terminate_external_process_tree(proc, known_pids)
+
+            return_code = proc.poll()
+            if return_code is not None:
+                break
+            time.sleep(0.05)
+    finally:
+        if managed is not None:
+            if managed.proc.poll() is None:
+                terminate_external_process_tree(managed.proc, known_pids)
+            managed.terminate()
+            managed.close()
+        if capture is not None:
+            if not capture.join(timeout=2.0):
+                try:
+                    capture.stream.close()
+                except (OSError, ValueError):
+                    pass
+                capture.join(timeout=1.0)
+            for chunk in capture.drain_chunks():
+                _consume_jsonl_chunk(result, log, parse_state, chunk)
+            _consume_jsonl_chunk(result, log, parse_state, b"", final=True)
+            # A short-lived process can exit before the supervisor observes
+            # the reader's overflow flag. Re-check after the pipe is fully
+            # drained so fast output floods cannot bypass the task budget.
+            if capture.overflow and stop_reason is None:
+                stop_reason = "output_limit"
             try:
-                event = json.loads(raw)
-                _apply_sandbox_event(result, event)
-                logs.append(_sandbox_log_line(event))
-            except json.JSONDecodeError:
-                logs.append(raw)
-            with SANDBOX_LOCK:
-                SANDBOX_JOBS[job_id]["logs"] = "\n".join(logs)
-                SANDBOX_JOBS[job_id]["result"] = result
+                capture.stream.close()
+            except (OSError, ValueError):
+                pass
+        with lock:
+            processes.pop(job_id, None)
+            cancel_files.pop(job_id, None)
 
-        return_code = proc.wait()
+    if stop_reason is None and _task_cancel_requested(jobs, lock, job_id):
+        stop_reason = "cancelled"
+    if stop_reason == "cancelled":
+        _task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
+    elif stop_reason == "deadline":
+        _task_failure_result(result, "task_deadline_exceeded", "task exceeded its execution deadline")
+    elif stop_reason == "output_limit":
+        _task_failure_result(result, "task_output_limit", "task protocol output exceeded its limit")
+    elif capture is not None and capture.error is not None:
+        _task_failure_result(result, "judge_protocol_error", "failed to read judge protocol output")
+        stop_reason = "protocol_error"
+    elif parse_state.get("protocol_error"):
+        stop_reason = "protocol_error"
+    elif result.get("final") is None:
+        _task_failure_result(result, "missing_final_event", "judge exited without a final event")
+        stop_reason = "protocol_error"
+    elif result["final"].get("code") == "task_event_limit":
+        stop_reason = "protocol_error"
+    elif bool(result["final"].get("ok")) != (return_code == 0):
+        _task_failure_result(result, "judge_protocol_error", "judge final event disagreed with its exit code")
+        stop_reason = "protocol_error"
+    _publish_task_progress(jobs, lock, job_id, result, log)
+    return {"returncode": return_code, "stop_reason": stop_reason, "logs": log.text}
+
+
+def _run_sandbox_job(job_id, info):
+    result = _empty_sandbox_result(info)
+    problem_lock = None
+    problem_lock_acquired = False
+    try:
+        execution_deadline, start_failure = _claim_task_execution(
+            SANDBOX_JOBS, SANDBOX_LOCK, job_id
+        )
+        if start_failure == "cancelled":
+            _discard_queued_job(SANDBOX_JOBS, SANDBOX_LOCK, job_id, "cancelled")
+            return
+        if start_failure is not None:
+            code = "task_deadline_exceeded" if start_failure == "deadline" else "task_worker_failed"
+            message = "task exceeded its total deadline" if start_failure == "deadline" else "task is unavailable"
+            result = _task_failure_result(result, code, message)
+            with SANDBOX_LOCK:
+                if job_id in SANDBOX_JOBS:
+                    SANDBOX_JOBS[job_id].update(
+                        status="failed",
+                        result=result,
+                        logs=message,
+                        finished_at=time.time(),
+                        failure_code=code,
+                    )
+                    _prune_sandbox_jobs()
+            return
+        problem_lock = _sandbox_problem_lock(info["dir"])
+        lock_status = _acquire_problem_lock(
+            problem_lock,
+            SANDBOX_JOBS,
+            SANDBOX_LOCK,
+            job_id,
+            execution_deadline,
+        )
+        if lock_status != "acquired":
+            code = "cancelled" if lock_status == "cancelled" else "task_deadline_exceeded"
+            message = "task cancelled" if lock_status == "cancelled" else "task exceeded its total deadline"
+            result = _task_failure_result(result, code, message, status=code)
+            with SANDBOX_LOCK:
+                if job_id in SANDBOX_JOBS:
+                    SANDBOX_JOBS[job_id].update(
+                        status="cancelled" if lock_status == "cancelled" else "failed",
+                        result=result,
+                        logs=message,
+                        finished_at=time.time(),
+                        failure_code=code,
+                    )
+                    _prune_sandbox_jobs()
+            return
+        problem_lock_acquired = True
+        with tempfile.TemporaryDirectory(prefix="probhub-webui-sandbox-control-") as temp:
+            cancel_file = Path(temp) / "cancel.requested"
+            env = os.environ.copy()
+            env["PYTHONUTF8"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PROBHUB_CANCEL_FILE"] = str(cancel_file)
+            run = _supervise_judge_process(
+                job_id,
+                [sys.executable, str(LOCAL_JUDGE_SCRIPT), info["dir"], "--jsonl", "--cancellable"],
+                env,
+                cancel_file,
+                result,
+                jobs=SANDBOX_JOBS,
+                lock=SANDBOX_LOCK,
+                processes=SANDBOX_PROCESSES,
+                cancel_files=SANDBOX_CANCEL_FILES,
+                execution_deadline=execution_deadline,
+            )
         final = result.get("final") or {}
-        final_ok = bool(final.get("ok")) and return_code == 0
         with SANDBOX_LOCK:
-            SANDBOX_JOBS[job_id]["status"] = "success" if final_ok else "failed"
-            SANDBOX_JOBS[job_id]["logs"] = "\n".join(logs)
-            SANDBOX_JOBS[job_id]["result"] = result
-    except Exception as e:
+            job = SANDBOX_JOBS.get(job_id)
+            if job is not None:
+                cancelled = (
+                    bool(job.get("cancel_requested"))
+                    or run["stop_reason"] == "cancelled"
+                    or final.get("status") == "cancelled"
+                )
+                if cancelled:
+                    _task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
+                    final = result["final"]
+                final_ok = bool(final.get("ok")) and run["returncode"] == 0
+                job.update(
+                    status="cancelled" if cancelled else ("success" if final_ok else "failed"),
+                    returncode=run["returncode"],
+                    result=result,
+                    logs=run["logs"],
+                    finished_at=time.time(),
+                    failure_code=None if final_ok else final.get("code"),
+                )
+                _prune_sandbox_jobs()
+    except Exception as exc:
+        cancelled = _task_cancel_requested(SANDBOX_JOBS, SANDBOX_LOCK, job_id)
+        code = "cancelled" if cancelled else "task_worker_failed"
+        message = "task cancelled" if cancelled else _bounded_error_text(exc)
+        result = _task_failure_result(result, code, message, status=code)
         with SANDBOX_LOCK:
-            SANDBOX_JOBS[job_id].update(status="failed", logs=str(e), result={"final": {"ok": False, "message": str(e)}})
+            if job_id in SANDBOX_JOBS:
+                SANDBOX_JOBS[job_id].update(
+                    status="cancelled" if cancelled else "failed",
+                    result=result,
+                    logs=message,
+                    finished_at=time.time(),
+                    failure_code=code,
+                )
+                _prune_sandbox_jobs()
+    finally:
+        if problem_lock_acquired:
+            problem_lock.release()
 
 
 @app.route('/api/sandbox/problem')
@@ -1006,11 +1545,56 @@ def sandbox_run():
         index = int(payload.get("index", -1))
         if not subtitle:
             return jsonify({"success": False, "error": "Missing subtitle"})
+        info = _sandbox_problem_info(subtitle, index)
+        if not info.get("runnable"):
+            return jsonify({"success": False, "error": info.get("reason") or "problem is not runnable"}), 400
         job_id = uuid.uuid4().hex
+        now = time.time()
+        now_monotonic = time.monotonic()
         with SANDBOX_LOCK:
-            SANDBOX_JOBS[job_id] = {"status": "running", "logs": "", "result": None}
-        Thread(target=_run_sandbox_job, args=(job_id, subtitle, index), daemon=True).start()
-        return jsonify({"success": True, "job_id": job_id})
+            _prune_sandbox_jobs()
+            SANDBOX_JOBS[job_id] = {
+                "status": "queued",
+                "logs": "",
+                "logs_truncated": False,
+                "result": _empty_sandbox_result(info),
+                "created_at": now,
+                "queue_deadline_at": now + WEBUI_TASK_QUEUE_DEADLINE,
+                "deadline_at": now + WEBUI_TASK_TOTAL_DEADLINE,
+                "_deadline_monotonic": now_monotonic + WEBUI_TASK_TOTAL_DEADLINE,
+                "cancel_requested": False,
+            }
+        task_slot = _transfer_task_request()
+        try:
+            accepted = WEBUI_TASK_EXECUTOR.submit(
+                job_id,
+                lambda: _run_with_task_slot(task_slot, lambda: _run_sandbox_job(job_id, info)),
+                queue_timeout=WEBUI_TASK_QUEUE_DEADLINE,
+                on_discard=lambda reason: _discard_with_task_slot(
+                    task_slot,
+                    lambda discard_reason: _discard_queued_job(
+                        SANDBOX_JOBS,
+                        SANDBOX_LOCK,
+                        job_id,
+                        discard_reason,
+                    ),
+                    reason,
+                ),
+                on_error=lambda exc: _task_executor_error(
+                    SANDBOX_JOBS, SANDBOX_LOCK, job_id, exc
+                ),
+            )
+        except BaseException:
+            _release_task_request_slot(task_slot)
+            with SANDBOX_LOCK:
+                SANDBOX_JOBS.pop(job_id, None)
+            raise
+        if not accepted:
+            _release_task_request_slot(task_slot)
+            with SANDBOX_LOCK:
+                SANDBOX_JOBS.pop(job_id, None)
+            return _queue_full_response()
+        return jsonify({"success": True, "job_id": job_id, "status": "queued"})
     except RequestEntityTooLarge:
         raise
     except Exception as e:
@@ -1019,11 +1603,37 @@ def sandbox_run():
 
 @app.route('/api/sandbox/job/<job_id>')
 def sandbox_job(job_id):
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        return jsonify({"success": False, "error": "invalid job id"}), 400
+    WEBUI_TASK_EXECUTOR.expire_pending()
+    with SANDBOX_LOCK:
+        _prune_sandbox_jobs()
+        job = SANDBOX_JOBS.get(job_id)
+        if not job:
+            return jsonify({"success": False, "error": "job not found"}), 404
+        payload = _public_job_payload(job)
+    return jsonify({"success": True, **payload})
+
+
+@app.route('/api/sandbox/job/<job_id>/cancel', methods=['POST'])
+def sandbox_cancel(job_id):
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        return jsonify({"success": False, "error": "invalid job id"}), 400
     with SANDBOX_LOCK:
         job = SANDBOX_JOBS.get(job_id)
         if not job:
             return jsonify({"success": False, "error": "job not found"}), 404
-        return jsonify({"success": True, **job})
+        if job.get("status") not in ACTIVE_TASK_STATUSES:
+            return jsonify({"success": True, "status": job.get("status")})
+        job["cancel_requested"] = True
+        job["status"] = "cancelling"
+        cancel_file = SANDBOX_CANCEL_FILES.get(job_id)
+    if cancel_file is not None:
+        _touch_cancel_file(cancel_file)
+    WEBUI_TASK_EXECUTOR.cancel_pending(job_id)
+    with SANDBOX_LOCK:
+        status = SANDBOX_JOBS.get(job_id, {}).get("status", "cancelling")
+    return jsonify({"success": True, "status": status})
 
 
 def _submission_verdict(result):
@@ -1039,192 +1649,211 @@ def _submission_verdict(result):
     return "FAIL" if result.get("final") else "PENDING"
 
 
-def _prune_submission_jobs():
-    now = time.time()
-    expired = [
-        job_id for job_id, job in SUBMISSION_JOBS.items()
-        if job.get("status") not in {"queued", "running", "cancelling"}
-        and now - float(job.get("finished_at") or job.get("created_at") or now) >= SUBMISSION_RESULT_TTL
-    ]
-    for job_id in expired:
-        SUBMISSION_JOBS.pop(job_id, None)
-    if len(SUBMISSION_JOBS) < 100:
-        return
-    finished = sorted(
-        (
-            (job_id, job)
-            for job_id, job in SUBMISSION_JOBS.items()
-            if job.get("status") not in {"queued", "running", "cancelling"}
-        ),
-        key=lambda item: item[1].get("created_at", 0),
-    )
-    for job_id, _ in finished[: max(1, len(SUBMISSION_JOBS) - 99)]:
-        SUBMISSION_JOBS.pop(job_id, None)
-
-
-def _force_cancel_submission(job_id, proc, known_pids):
-    time.sleep(SUBMISSION_FORCE_CANCEL_AFTER)
-    with SUBMISSION_LOCK:
-        job = SUBMISSION_JOBS.get(job_id)
-        still_cancelling = bool(job and job.get("status") in {"running", "cancelling"})
-    if still_cancelling and proc.poll() is None:
-        terminate_external_process_tree(proc, known_pids)
-
-
-def _request_submission_cancel(job_id, proc, cancel_file):
-    if cancel_file is not None:
-        try:
-            Path(cancel_file).touch(exist_ok=True)
-        except OSError:
-            pass
-    if proc is None or proc.poll() is not None:
-        return
-    known_pids = snapshot_process_tree(proc.pid)
+def _run_submission_job(job_id, info, filename, source):
+    result = _empty_sandbox_result(info)
+    result["submission"] = {
+        "task_id": job_id,
+        "filename": filename,
+        "workspace_cleaned": False,
+    }
+    prepared = None
+    task_root = Path.cwd() / ".probhub" / "submissions" / job_id
     try:
-        if os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-        else:
-            proc.terminate()
-    except (OSError, ValueError):
-        pass
-    Thread(
-        target=_force_cancel_submission,
-        args=(job_id, proc, known_pids),
-        daemon=True,
-    ).start()
-
-
-def _run_submission_job(job_id, subtitle, index, filename, source):
-    with SUBMISSION_SLOTS:
-        with SUBMISSION_LOCK:
-            job = SUBMISSION_JOBS.get(job_id)
-            if not job:
-                return
-            if job.get("cancel_requested"):
-                job.update(status="cancelled", verdict="CANCELLED", finished_at=time.time())
-                return
-            job["status"] = "running"
-        result = None
-        logs = []
-        return_code = None
-        try:
-            info = _sandbox_problem_info(subtitle, index)
-            result = _empty_sandbox_result(info)
-            result["submission"] = {
-                "task_id": job_id,
-                "filename": filename,
-                "workspace_cleaned": False,
-            }
+        execution_deadline, start_failure = _claim_task_execution(
+            SUBMISSION_JOBS, SUBMISSION_LOCK, job_id
+        )
+        if start_failure == "cancelled":
+            _discard_queued_job(SUBMISSION_JOBS, SUBMISSION_LOCK, job_id, "cancelled", submission=True)
+            return
+        if start_failure is not None:
+            code = "task_deadline_exceeded" if start_failure == "deadline" else "task_worker_failed"
+            message = "task exceeded its total deadline" if start_failure == "deadline" else "task is unavailable"
+            result["submission"].update(workspace_cleaned=not task_root.exists(), verdict="FAIL")
+            _task_failure_result(result, code, message)
             with SUBMISSION_LOCK:
-                SUBMISSION_JOBS[job_id]["result"] = result
-
-            if not info.get("runnable"):
-                raise ValueError(info.get("reason") or "problem is not runnable")
-
-            with SUBMISSION_LOCK:
-                if SUBMISSION_JOBS[job_id].get("cancel_requested"):
-                    result["submission"].update(workspace_cleaned=True, verdict="CANCELLED")
+                if job_id in SUBMISSION_JOBS:
                     SUBMISSION_JOBS[job_id].update(
-                        status="cancelled",
-                        verdict="CANCELLED",
+                        status="failed",
+                        verdict="FAIL",
                         result=result,
+                        logs=message,
                         finished_at=time.time(),
+                        failure_code=code,
                     )
-                    return
-
-            with temporary_submission_workspace(Path.cwd(), info["dir"], job_id, filename, source) as prepared:
-                cancel_file = prepared.root / "cancel.requested"
-                with SUBMISSION_LOCK:
-                    if SUBMISSION_JOBS[job_id].get("cancel_requested"):
-                        raise RuntimeError("submission cancelled before judge startup")
-                command = [
+                    _prune_submission_jobs()
+            return
+        with temporary_submission_workspace(
+            Path.cwd(),
+            info["dir"],
+            job_id,
+            filename,
+            source,
+            cancel_requested=lambda: _task_cancel_requested(
+                SUBMISSION_JOBS, SUBMISSION_LOCK, job_id
+            ),
+            deadline_monotonic=execution_deadline,
+        ) as prepared:
+            cancel_file = prepared.root / "cancel.requested"
+            env = os.environ.copy()
+            env["PYTHONUTF8"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PROBHUB_CANCEL_FILE"] = str(cancel_file)
+            run = _supervise_judge_process(
+                job_id,
+                [
                     sys.executable,
                     str(LOCAL_JUDGE_SCRIPT),
                     str(prepared.problem_dir),
                     "--jsonl",
                     "--no-cache",
                     "--cancellable",
-                ]
-                env = os.environ.copy()
-                env["PYTHONUTF8"] = "1"
-                env["PYTHONIOENCODING"] = "utf-8"
-                env["PROBHUB_CANCEL_FILE"] = str(cancel_file)
-                popen_options = {
-                    "stdout": subprocess.PIPE,
-                    "stderr": subprocess.STDOUT,
-                    "text": True,
-                    "encoding": "utf-8",
-                    "errors": "replace",
-                    "cwd": str(Path.cwd()),
-                    "env": env,
+                ],
+                env,
+                cancel_file,
+                result,
+                jobs=SUBMISSION_JOBS,
+                lock=SUBMISSION_LOCK,
+                processes=SUBMISSION_PROCESSES,
+                cancel_files=SUBMISSION_CANCEL_FILES,
+                execution_deadline=execution_deadline,
+            )
+        workspace_cleaned = bool(prepared.cleanup_succeeded)
+        result["submission"]["workspace_cleaned"] = workspace_cleaned
+        if prepared.cleanup_error:
+            result["submission"]["cleanup_error"] = _bounded_error_text(prepared.cleanup_error)
+        with SUBMISSION_LOCK:
+            job = SUBMISSION_JOBS.get(job_id)
+            if job is not None:
+                cancelled = (
+                    bool(job.get("cancel_requested"))
+                    or run["stop_reason"] == "cancelled"
+                    or (result.get("final") or {}).get("status") == "cancelled"
+                )
+                deadline_failed = (
+                    run["stop_reason"] == "deadline"
+                    or time.monotonic() >= execution_deadline
+                )
+                infrastructure_failed = run["stop_reason"] in {
+                    "deadline", "output_limit", "missing", "protocol_error"
                 }
-                if os.name == "nt":
-                    popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                if not workspace_cleaned:
+                    verdict = "FAIL"
+                    original_failure_code = None
+                    if cancelled:
+                        original_failure_code = "cancelled"
+                    elif deadline_failed:
+                        original_failure_code = "task_deadline_exceeded"
+                    elif (result.get("final") or {}).get("code"):
+                        original_failure_code = result["final"]["code"]
+                    if original_failure_code:
+                        result["submission"]["original_failure_code"] = original_failure_code
+                    _task_failure_result(
+                        result,
+                        "submission_cleanup_failed",
+                        "submission workspace cleanup failed",
+                    )
+                    infrastructure_failed = True
+                    cancelled = False
+                elif cancelled:
+                    verdict = "CANCELLED"
+                    _task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
+                elif deadline_failed:
+                    verdict = "FAIL"
+                    _task_failure_result(result, "task_deadline_exceeded", "task exceeded its total deadline")
+                    infrastructure_failed = True
                 else:
-                    popen_options["start_new_session"] = True
-                proc = subprocess.Popen(command, **popen_options)
-                with SUBMISSION_LOCK:
-                    SUBMISSION_PROCESSES[job_id] = proc
-                    SUBMISSION_CANCEL_FILES[job_id] = cancel_file
-                    cancel_requested = bool(SUBMISSION_JOBS[job_id].get("cancel_requested"))
-                if cancel_requested:
-                    _request_submission_cancel(job_id, proc, cancel_file)
-
-                assert proc.stdout is not None
-                try:
-                    for line in proc.stdout:
-                        raw = line.strip()
-                        if not raw:
-                            continue
-                        try:
-                            event = json.loads(raw)
-                            _apply_sandbox_event(result, event)
-                            logs.append(_sandbox_log_line(event))
-                        except json.JSONDecodeError:
-                            logs.append(raw)
-                        with SUBMISSION_LOCK:
-                            SUBMISSION_JOBS[job_id]["logs"] = "\n".join(logs)
-                            SUBMISSION_JOBS[job_id]["result"] = result
-                finally:
-                    proc.stdout.close()
-                return_code = proc.wait()
-
-            result["submission"]["workspace_cleaned"] = True
-            with SUBMISSION_LOCK:
-                cancel_requested = bool(SUBMISSION_JOBS[job_id].get("cancel_requested"))
-            cancelled = cancel_requested or (result.get("final") or {}).get("status") == "cancelled"
-            verdict = "CANCELLED" if cancelled else _submission_verdict(result)
-            result["submission"]["verdict"] = verdict
-            with SUBMISSION_LOCK:
-                SUBMISSION_JOBS[job_id].update(
-                    status="cancelled" if cancelled else "completed",
+                    verdict = _submission_verdict(result)
+                result["submission"]["verdict"] = verdict
+                status = "cancelled" if cancelled else ("failed" if infrastructure_failed else "completed")
+                job.update(
+                    status=status,
                     verdict=verdict,
-                    returncode=return_code,
-                    logs="\n".join(logs),
+                    returncode=run["returncode"],
+                    logs=run["logs"],
                     result=result,
                     finished_at=time.time(),
+                    failure_code=(result.get("final") or {}).get("code") or None,
                 )
-        except Exception as exc:
-            with SUBMISSION_LOCK:
-                cancel_requested = bool(SUBMISSION_JOBS.get(job_id, {}).get("cancel_requested"))
-            status = "cancelled" if cancel_requested else "failed"
-            verdict = "CANCELLED" if cancel_requested else "FAIL"
-            if result is not None and result.get("submission"):
-                result["submission"]["workspace_cleaned"] = True
-                result["submission"]["verdict"] = verdict
-            with SUBMISSION_LOCK:
-                if job_id in SUBMISSION_JOBS:
-                    SUBMISSION_JOBS[job_id].update(
-                        status=status,
-                        verdict=verdict,
-                        logs=("\n".join(logs + ([] if cancel_requested else [str(exc)]))).strip(),
-                        result=result or {"final": {"ok": False, "message": str(exc)}},
-                        finished_at=time.time(),
-                    )
-        finally:
-            with SUBMISSION_LOCK:
-                SUBMISSION_PROCESSES.pop(job_id, None)
-                SUBMISSION_CANCEL_FILES.pop(job_id, None)
+                _prune_submission_jobs()
+    except SubmissionPreparationCancelled as exc:
+        workspace_cleaned = not task_root.exists()
+        verdict = "CANCELLED" if workspace_cleaned else "FAIL"
+        code = "cancelled" if workspace_cleaned else "submission_cleanup_failed"
+        result["submission"].update(workspace_cleaned=workspace_cleaned, verdict=verdict)
+        if not workspace_cleaned:
+            result["submission"].update(
+                cleanup_error="submission workspace still exists after cancellation",
+                original_failure_code="cancelled",
+            )
+        _task_failure_result(
+            result,
+            code,
+            "task cancelled" if workspace_cleaned else "submission workspace cleanup failed",
+            status="cancelled" if workspace_cleaned else "failed",
+        )
+        with SUBMISSION_LOCK:
+            if job_id in SUBMISSION_JOBS:
+                SUBMISSION_JOBS[job_id].update(
+                    status="cancelled" if workspace_cleaned else "failed",
+                    verdict=verdict,
+                    logs=_bounded_error_text(exc),
+                    result=result,
+                    finished_at=time.time(),
+                    failure_code=code,
+                )
+                _prune_submission_jobs()
+    except SubmissionPreparationDeadlineExceeded as exc:
+        workspace_cleaned = not task_root.exists()
+        result["submission"].update(workspace_cleaned=workspace_cleaned, verdict="FAIL")
+        code = "task_deadline_exceeded" if workspace_cleaned else "submission_cleanup_failed"
+        if not workspace_cleaned:
+            result["submission"].update(
+                cleanup_error="submission workspace still exists after deadline",
+                original_failure_code="task_deadline_exceeded",
+            )
+        _task_failure_result(
+            result,
+            code,
+            "task exceeded its total deadline" if workspace_cleaned else "submission workspace cleanup failed",
+        )
+        with SUBMISSION_LOCK:
+            if job_id in SUBMISSION_JOBS:
+                SUBMISSION_JOBS[job_id].update(
+                    status="failed",
+                    verdict="FAIL",
+                    logs=_bounded_error_text(exc),
+                    result=result,
+                    finished_at=time.time(),
+                    failure_code=code,
+                )
+                _prune_submission_jobs()
+    except Exception as exc:
+        cancelled = _task_cancel_requested(SUBMISSION_JOBS, SUBMISSION_LOCK, job_id)
+        verdict = "CANCELLED" if cancelled else "FAIL"
+        code = "cancelled" if cancelled else "task_worker_failed"
+        message = "task cancelled" if cancelled else _bounded_error_text(exc)
+        workspace_cleaned = not task_root.exists()
+        if not workspace_cleaned:
+            result["submission"]["original_failure_code"] = code
+            code = "submission_cleanup_failed"
+            verdict = "FAIL"
+            message = "submission workspace cleanup failed"
+            cancelled = False
+        result["submission"].update(workspace_cleaned=workspace_cleaned, verdict=verdict)
+        if not workspace_cleaned:
+            result["submission"]["cleanup_error"] = "submission workspace still exists after failure"
+        _task_failure_result(result, code, message, status=code)
+        with SUBMISSION_LOCK:
+            if job_id in SUBMISSION_JOBS:
+                SUBMISSION_JOBS[job_id].update(
+                    status="cancelled" if cancelled else "failed",
+                    verdict=verdict,
+                    logs=message,
+                    result=result,
+                    finished_at=time.time(),
+                    failure_code=code,
+                )
+                _prune_submission_jobs()
 
 
 @app.route('/api/submission/run', methods=['POST'])
@@ -1247,6 +1876,8 @@ def submission_run():
             return jsonify({"success": False, "error": info.get("reason") or "problem is not runnable"}), 400
 
         job_id = uuid.uuid4().hex
+        now = time.time()
+        now_monotonic = time.monotonic()
         with SUBMISSION_LOCK:
             _prune_submission_jobs()
             protected = [
@@ -1260,14 +1891,47 @@ def submission_run():
                 "logs": "",
                 "result": None,
                 "filename": filename,
-                "created_at": time.time(),
+                "created_at": now,
+                "queue_deadline_at": now + WEBUI_TASK_QUEUE_DEADLINE,
+                "deadline_at": now + WEBUI_TASK_TOTAL_DEADLINE,
+                "_deadline_monotonic": now_monotonic + WEBUI_TASK_TOTAL_DEADLINE,
                 "cancel_requested": False,
+                "logs_truncated": False,
             }
-        Thread(
-            target=_run_submission_job,
-            args=(job_id, subtitle, index, filename, source),
-            daemon=True,
-        ).start()
+        task_slot = _transfer_task_request()
+        try:
+            accepted = WEBUI_TASK_EXECUTOR.submit(
+                job_id,
+                lambda: _run_with_task_slot(
+                    task_slot,
+                    lambda: _run_submission_job(job_id, info, filename, source),
+                ),
+                queue_timeout=WEBUI_TASK_QUEUE_DEADLINE,
+                on_discard=lambda reason: _discard_with_task_slot(
+                    task_slot,
+                    lambda discard_reason: _discard_queued_job(
+                        SUBMISSION_JOBS,
+                        SUBMISSION_LOCK,
+                        job_id,
+                        discard_reason,
+                        submission=True,
+                    ),
+                    reason,
+                ),
+                on_error=lambda exc: _task_executor_error(
+                    SUBMISSION_JOBS, SUBMISSION_LOCK, job_id, exc, submission=True
+                ),
+            )
+        except BaseException:
+            _release_task_request_slot(task_slot)
+            with SUBMISSION_LOCK:
+                SUBMISSION_JOBS.pop(job_id, None)
+            raise
+        if not accepted:
+            _release_task_request_slot(task_slot)
+            with SUBMISSION_LOCK:
+                SUBMISSION_JOBS.pop(job_id, None)
+            return _queue_full_response()
         return jsonify({"success": True, "job_id": job_id, "status": "queued"})
     except RequestEntityTooLarge:
         raise
@@ -1281,11 +1945,14 @@ def submission_run():
 def submission_job(job_id):
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         return jsonify({"success": False, "error": "invalid job id"}), 400
+    WEBUI_TASK_EXECUTOR.expire_pending()
     with SUBMISSION_LOCK:
+        _prune_submission_jobs()
         job = SUBMISSION_JOBS.get(job_id)
         if not job:
             return jsonify({"success": False, "error": "job not found"}), 404
-        return jsonify({"success": True, **job})
+        payload = _public_job_payload(job)
+    return jsonify({"success": True, **payload})
 
 
 @app.route('/api/submission/job/<job_id>/cancel', methods=['POST'])
@@ -1300,10 +1967,15 @@ def submission_cancel(job_id):
             return jsonify({"success": True, "status": job.get("status"), "verdict": job.get("verdict")})
         job["cancel_requested"] = True
         job["status"] = "cancelling"
-        proc = SUBMISSION_PROCESSES.get(job_id)
         cancel_file = SUBMISSION_CANCEL_FILES.get(job_id)
-    _request_submission_cancel(job_id, proc, cancel_file)
-    return jsonify({"success": True, "status": "cancelling"})
+    if cancel_file is not None:
+        _touch_cancel_file(cancel_file)
+    WEBUI_TASK_EXECUTOR.cancel_pending(job_id)
+    with SUBMISSION_LOCK:
+        current = SUBMISSION_JOBS.get(job_id, {})
+        status = current.get("status", "cancelling")
+        verdict = current.get("verdict")
+    return jsonify({"success": True, "status": status, "verdict": verdict})
 
 
 def inject_pdf_to_zip(pdf_path, prob_dir):
@@ -1579,6 +2251,85 @@ def open_browser(url="http://127.0.0.1:33933"):
     webbrowser.open_new(url)
 
 
+def shutdown_webui_tasks():
+    process_items = []
+    cancel_paths = []
+    for jobs, processes, cancel_files, lock in (
+        (SANDBOX_JOBS, SANDBOX_PROCESSES, SANDBOX_CANCEL_FILES, SANDBOX_LOCK),
+        (SUBMISSION_JOBS, SUBMISSION_PROCESSES, SUBMISSION_CANCEL_FILES, SUBMISSION_LOCK),
+    ):
+        with lock:
+            for job in jobs.values():
+                if job.get("status") in ACTIVE_TASK_STATUSES:
+                    job["cancel_requested"] = True
+                    job["status"] = "cancelling"
+            process_items.extend(processes.values())
+            cancel_paths.extend(cancel_files.values())
+    for cancel_path in cancel_paths:
+        _touch_cancel_file(cancel_path)
+    WEBUI_TASK_EXECUTOR.shutdown(wait=False, cancel_pending=True)
+    for proc in process_items:
+        if proc.poll() is None:
+            terminate_external_process_tree(proc, snapshot_process_tree(proc.pid))
+    WEBUI_TASK_EXECUTOR.shutdown(wait=True, cancel_pending=True)
+    WEBUI_PREVIEW_TEMP.cleanup()
+
+
+class BoundedThreadedWSGIServer(ThreadedWSGIServer):
+    """Werkzeug server with a hard cap on live request-handler threads."""
+
+    daemon_threads = True
+
+    def __init__(self, host, port, application, *, max_request_threads):
+        if isinstance(max_request_threads, bool) or int(max_request_threads) <= 0:
+            raise ValueError("max_request_threads must be a positive integer")
+        self.max_request_threads = int(max_request_threads)
+        self._request_slots = BoundedSemaphore(self.max_request_threads)
+        self._request_stats_lock = Lock()
+        self._active_request_threads = 0
+        self._peak_request_threads = 0
+        super().__init__(host, port, application)
+
+    def process_request(self, request_socket, client_address):
+        self._request_slots.acquire()
+        try:
+            super().process_request(request_socket, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request_socket, client_address):
+        with self._request_stats_lock:
+            self._active_request_threads += 1
+            self._peak_request_threads = max(
+                self._peak_request_threads,
+                self._active_request_threads,
+            )
+        try:
+            super().process_request_thread(request_socket, client_address)
+        finally:
+            with self._request_stats_lock:
+                self._active_request_threads -= 1
+            self._request_slots.release()
+
+    def request_thread_stats(self):
+        with self._request_stats_lock:
+            return {
+                "active": self._active_request_threads,
+                "peak": self._peak_request_threads,
+                "limit": self.max_request_threads,
+            }
+
+
+def _create_webui_server(port, *, max_request_threads=WEBUI_HTTP_REQUEST_THREADS):
+    return BoundedThreadedWSGIServer(
+        "127.0.0.1",
+        port,
+        app,
+        max_request_threads=max_request_threads,
+    )
+
+
 def run_server(*, port=33933, open_browser=True):
     url = f"http://127.0.0.1:{port}"
     print("\n" + "="*50)
@@ -1589,7 +2340,13 @@ def run_server(*, port=33933, open_browser=True):
     if open_browser:
         browser_opener = globals()["open_browser"]
         Timer(1, lambda: browser_opener(url)).start()
-    app.run(host="127.0.0.1", port=port, debug=False)
+    try:
+        server = _create_webui_server(port)
+        server.serve_forever()
+    finally:
+        if "server" in locals():
+            server.server_close()
+        shutdown_webui_tasks()
 
 if __name__ == '__main__':
     run_server()
