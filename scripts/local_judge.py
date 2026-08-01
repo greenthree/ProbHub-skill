@@ -25,6 +25,8 @@ from probhub.calibration import (
     SANDBOX_CACHE_SCHEMA_VERSION,
     calibration_policy,
 )
+from probhub.build_lock import workspace_file_lock
+from probhub.errors import ProbHubError
 from probhub.output_compare import compare_standard_output
 from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
@@ -2225,7 +2227,7 @@ def finish(reporter, ok, message, exit_code, result_code=None, **result_payload)
     sys.exit(exit_code)
 
 
-def main():
+def _main_unlocked():
     jsonl = "--jsonl" in sys.argv
     no_cache = "--no-cache" in sys.argv
     cancellable = "--cancellable" in sys.argv
@@ -2825,6 +2827,31 @@ def main():
 
     reporter.text("\n" + "=" * 50)
     finish(reporter, True, "[+] 恭喜！所有代码均符合预期宿命", 0)
+
+
+def main():
+    args = [
+        arg
+        for arg in sys.argv[1:]
+        if arg not in {"--jsonl", "--no-cache", "--cancellable", "--sample-check"}
+    ]
+    if len(args) != 1:
+        return _main_unlocked()
+    problem_dir = os.path.abspath(args[0])
+    if not os.path.isdir(problem_dir):
+        return _main_unlocked()
+    try:
+        with workspace_file_lock(
+            problem_dir,
+            ".probhub/judge.lock",
+            busy_code="judge_busy",
+            busy_message="another Judge is already running for this problem",
+            no_follow=True,
+        ):
+            return _main_unlocked()
+    except ProbHubError as exc:
+        reporter = Reporter("--jsonl" in sys.argv)
+        finish(reporter, False, str(exc), 1, exc.code)
 
 
 if __name__ == "__main__":

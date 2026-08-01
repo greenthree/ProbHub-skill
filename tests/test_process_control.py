@@ -1,4 +1,5 @@
 import ctypes
+import json
 import os
 import platform
 import signal
@@ -24,6 +25,175 @@ from probhub.process_control import (
 
 
 class ProcessControlTests(unittest.TestCase):
+    def test_windows_virtualenv_python_redirector_is_replaced_with_base_executable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            venv = root / "venv"
+            current = venv / "Scripts" / "python.exe"
+            site_packages = venv / "Lib" / "site-packages"
+            base = root / "base"
+            base_python = base / "python.exe"
+            helper = root / "_windows_python_exec.py"
+            current.parent.mkdir(parents=True)
+            site_packages.mkdir(parents=True)
+            base.mkdir()
+            current.touch()
+            base_python.touch()
+            helper.touch()
+
+            with (
+                mock.patch.object(process_control.platform, "system", return_value="Windows"),
+                mock.patch.object(process_control.sys, "executable", str(current)),
+                mock.patch.object(process_control.sys, "prefix", str(venv)),
+                mock.patch.object(process_control.sys, "base_prefix", str(base)),
+                mock.patch.object(
+                    process_control.Path,
+                    "with_name",
+                    return_value=helper,
+                ),
+            ):
+                command, env = process_control._prepare_windows_python_command(
+                    [str(current), "-c", "print('ok')"],
+                    {"PYTHONPATH": "existing"},
+                )
+
+            self.assertEqual(command[0], str(base_python))
+            self.assertEqual(
+                command[1:], [str(helper), str(base_python), "-c", "print('ok')"]
+            )
+            self.assertEqual(env["__PYVENV_LAUNCHER__"], str(current))
+            self.assertEqual(env["PYTHONPATH"], "existing")
+
+    def test_windows_virtualenv_python_options_precede_containment_helper(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            venv = root / "venv"
+            current = venv / "Scripts" / "python.exe"
+            base = root / "base"
+            base_python = base / "python.exe"
+            helper = root / "_windows_python_exec.py"
+            current.parent.mkdir(parents=True)
+            base.mkdir()
+            current.touch()
+            base_python.touch()
+            helper.touch()
+
+            with (
+                mock.patch.object(process_control.platform, "system", return_value="Windows"),
+                mock.patch.object(process_control.sys, "executable", str(current)),
+                mock.patch.object(process_control.sys, "prefix", str(venv)),
+                mock.patch.object(process_control.sys, "base_prefix", str(base)),
+                mock.patch.object(process_control.Path, "with_name", return_value=helper),
+            ):
+                command, _ = process_control._prepare_windows_python_command(
+                    [str(current), "-u", "-X", "utf8", "-c", "print('ok')"],
+                    None,
+                )
+
+            self.assertEqual(
+                command,
+                [
+                    str(base_python),
+                    "-u",
+                    "-X",
+                    "utf8",
+                    str(helper),
+                    str(base_python),
+                    "-c",
+                    "print('ok')",
+                ],
+            )
+
+    def test_windows_virtualenv_missing_helper_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            venv = root / "venv"
+            current = venv / "Scripts" / "python.exe"
+            base = root / "base"
+            base_python = base / "python.exe"
+            current.parent.mkdir(parents=True)
+            base.mkdir()
+            current.touch()
+            base_python.touch()
+
+            with (
+                mock.patch.object(process_control.platform, "system", return_value="Windows"),
+                mock.patch.object(process_control.sys, "executable", str(current)),
+                mock.patch.object(process_control.sys, "prefix", str(venv)),
+                mock.patch.object(process_control.sys, "base_prefix", str(base)),
+                mock.patch.object(
+                    process_control.Path,
+                    "with_name",
+                    return_value=root / "missing-helper.py",
+                ),
+                self.assertRaisesRegex(OSError, "containment helper is missing"),
+            ):
+                process_control._prepare_windows_python_command(
+                    [str(current), "-c", "print('unsafe')"], None
+                )
+
+    @unittest.skipUnless(
+        platform.system() == "Windows" and sys.prefix != sys.base_prefix,
+        "Windows virtualenv containment only",
+    )
+    def test_windows_virtualenv_python_keeps_prefix_inside_job(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "cwd_probe.py").write_text("VALUE = 'cwd-ok'\n", encoding="utf-8")
+            result = self.run_command(
+                root,
+                "import cwd_probe,json,sys; "
+                "print(json.dumps([sys.prefix, sys.executable, cwd_probe.VALUE]))",
+            )
+            prefix, executable, cwd_value = json.loads(
+                (root / "stdout.txt").read_text(encoding="utf-8")
+            )
+            self.assertEqual(result["reason"], "completed", result)
+            self.assertEqual(cwd_value, "cwd-ok")
+            self.assertTrue(os.path.samefile(prefix, sys.prefix))
+            self.assertTrue(
+                os.path.samefile(
+                    executable, Path(sys.base_prefix) / Path(sys.executable).name
+                )
+            )
+
+            (root / "cwd_probe_module.py").write_text(
+                "import json,sys; print(json.dumps(sys.argv))\n", encoding="utf-8"
+            )
+            module_result = run_managed_to_files(
+                [sys.executable, "-u", "-X", "utf8", "-m", "cwd_probe_module", "arg"],
+                stdout_path=root / "module-stdout.txt",
+                stderr_path=root / "module-stderr.txt",
+                timeout=5,
+                memory_limit_mb=256,
+                output_limit_bytes=1024 * 1024,
+                process_limit=8,
+                cwd=root,
+            )
+            self.assertEqual(module_result["reason"], "completed", module_result)
+            module_argv = json.loads(
+                (root / "module-stdout.txt").read_text(encoding="utf-8")
+            )
+            self.assertTrue(os.path.samefile(module_argv[0], root / "cwd_probe_module.py"))
+            self.assertEqual(module_argv[1:], ["arg"])
+
+            version_result = run_managed_to_files(
+                [sys.executable, "-V"],
+                stdout_path=root / "version-stdout.txt",
+                stderr_path=root / "version-stderr.txt",
+                timeout=5,
+                memory_limit_mb=256,
+                output_limit_bytes=1024 * 1024,
+                process_limit=8,
+                cwd=root,
+            )
+            self.assertEqual(version_result["reason"], "completed", version_result)
+            self.assertIn(
+                "Python ",
+                (root / "version-stdout.txt").read_text(encoding="utf-8")
+                + (root / "version-stderr.txt").read_text(encoding="utf-8"),
+            )
+
     def test_spawn_rejects_caller_preexec_fn(self):
         with self.assertRaisesRegex(ValueError, "preexec_fn is not supported"):
             process_control.spawn_managed(

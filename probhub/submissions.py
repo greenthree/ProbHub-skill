@@ -8,22 +8,34 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
 
 MAX_SOURCE_BYTES = 1024 * 1024
+MAX_FILENAME_BYTES = 255
 _TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _IGNORED_CODE_NAMES = {"__pycache__", ".probhub"}
 _IGNORED_CODE_SUFFIXES = {".exe", ".o", ".obj", ".out", ".class", ".pyc", ".pdb"}
 
 
-@dataclass(frozen=True)
+@dataclass
 class SubmissionWorkspace:
     task_id: str
     root: Path
     problem_dir: Path
     source_path: Path
+    cleanup_succeeded: bool | None = None
+    cleanup_error: str | None = None
+
+
+class SubmissionPreparationCancelled(RuntimeError):
+    pass
+
+
+class SubmissionPreparationDeadlineExceeded(TimeoutError):
+    pass
 
 
 def validate_cpp_upload(filename: str, source: bytes, max_bytes: int = MAX_SOURCE_BYTES) -> str:
@@ -32,6 +44,8 @@ def validate_cpp_upload(filename: str, source: bytes, max_bytes: int = MAX_SOURC
         raise ValueError("invalid source filename")
     if Path(filename).suffix.lower() != ".cpp":
         raise ValueError("only .cpp source files are accepted")
+    if len(filename.encode("utf-8", errors="replace")) > MAX_FILENAME_BYTES:
+        raise ValueError(f"source filename exceeds {MAX_FILENAME_BYTES} bytes")
     if not source:
         raise ValueError("source file is empty")
     if len(source) > int(max_bytes):
@@ -105,25 +119,59 @@ def _resolve_inside(base: Path, value: str | Path, label: str) -> Path:
     return candidate
 
 
-def _copy_code_tree(source: Path, destination: Path) -> None:
+def _check_preparation(
+    cancel_requested: Callable[[], bool] | None,
+    deadline_monotonic: float | None,
+) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise SubmissionPreparationCancelled("submission preparation cancelled")
+    if deadline_monotonic is not None and time.monotonic() >= float(deadline_monotonic):
+        raise SubmissionPreparationDeadlineExceeded("submission preparation exceeded its deadline")
+
+
+def _remove_submission_tree(path: Path) -> None:
+    shutil.rmtree(path)
+
+
+def _copy_code_tree(
+    source: Path,
+    destination: Path,
+    *,
+    cancel_requested: Callable[[], bool] | None = None,
+    deadline_monotonic: float | None = None,
+) -> None:
     if source.is_symlink():
         raise ValueError("code directory must not be a symbolic link")
     if not source.is_dir():
         destination.mkdir(parents=True, exist_ok=True)
         return
+    destination.mkdir(parents=True, exist_ok=False)
     for path in source.rglob("*"):
+        _check_preparation(cancel_requested, deadline_monotonic)
+        relative = path.relative_to(source)
         if path.is_symlink():
-            raise ValueError(f"code tree contains a symbolic link: {path.relative_to(source)}")
-
-    def ignore(_directory, names):
-        ignored = []
-        for name in names:
-            path = Path(name)
-            if name in _IGNORED_CODE_NAMES or path.suffix.lower() in _IGNORED_CODE_SUFFIXES:
-                ignored.append(name)
-        return ignored
-
-    shutil.copytree(source, destination, ignore=ignore)
+            raise ValueError(f"code tree contains a symbolic link: {relative}")
+        if any(
+            part in _IGNORED_CODE_NAMES or Path(part).suffix.lower() in _IGNORED_CODE_SUFFIXES
+            for part in relative.parts
+        ):
+            continue
+        target = destination / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if not path.is_file():
+            raise ValueError(f"code tree contains a non-file entry: {relative}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("rb") as source_stream, target.open("xb") as target_stream:
+            while True:
+                _check_preparation(cancel_requested, deadline_monotonic)
+                chunk = source_stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                target_stream.write(chunk)
+        shutil.copystat(path, target)
+    _check_preparation(cancel_requested, deadline_monotonic)
 
 
 def _load_problem_config(problem_dir: Path) -> dict:
@@ -191,6 +239,9 @@ def temporary_submission_workspace(
     task_id: str,
     filename: str,
     source: bytes,
+    *,
+    cancel_requested: Callable[[], bool] | None = None,
+    deadline_monotonic: float | None = None,
 ):
     """Create and later remove an isolated mirror used only for one submission."""
     if not _TASK_ID_RE.fullmatch(str(task_id)):
@@ -217,11 +268,25 @@ def temporary_submission_workspace(
 
     prepared_problem = task_root / "problem"
     source_path = prepared_problem / "code" / "submission.cpp"
+    prepared = SubmissionWorkspace(
+        task_id=task_id,
+        root=task_root,
+        problem_dir=prepared_problem,
+        source_path=source_path,
+    )
     submissions_root.mkdir(parents=True, exist_ok=True)
     try:
+        _check_preparation(cancel_requested, deadline_monotonic)
         config = _load_problem_config(problem_dir)
+        _check_preparation(cancel_requested, deadline_monotonic)
         prepared_problem.mkdir(parents=True)
-        _copy_code_tree(problem_dir / "code", prepared_problem / "code")
+        _copy_code_tree(
+            problem_dir / "code",
+            prepared_problem / "code",
+            cancel_requested=cancel_requested,
+            deadline_monotonic=deadline_monotonic,
+        )
+        _check_preparation(cancel_requested, deadline_monotonic)
         source_path.write_text(source_text, encoding="utf-8", newline="\n")
         prepared_config = _submission_config(problem_dir, config)
         (prepared_problem / "probhub.yaml").write_text(
@@ -229,21 +294,20 @@ def temporary_submission_workspace(
             encoding="utf-8",
             newline="\n",
         )
-        yield SubmissionWorkspace(
-            task_id=task_id,
-            root=task_root,
-            problem_dir=prepared_problem,
-            source_path=source_path,
-        )
+        _check_preparation(cancel_requested, deadline_monotonic)
+        yield prepared
     finally:
         # A delayed Windows handle release must not raise here and swallow
         # the in-flight judging result; stale directories are reclaimed by
         # cleanup_stale_submission_workspaces on the next startup.
         if task_root.exists():
             try:
-                shutil.rmtree(task_root)
-            except OSError:
-                pass
+                _remove_submission_tree(task_root)
+            except OSError as exc:
+                prepared.cleanup_error = str(exc)
+        prepared.cleanup_succeeded = not task_root.exists()
+        if not prepared.cleanup_succeeded and not prepared.cleanup_error:
+            prepared.cleanup_error = "submission workspace still exists after cleanup"
         try:
             submissions_root.rmdir()
         except OSError:

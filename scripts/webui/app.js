@@ -71,6 +71,7 @@
                 isCompiling: false,
                 isDistributing: false,
                 sandboxRunning: false,
+                sandboxCancelling: false,
                 sandboxInfo: null,
                 sandboxJobId: null,
                 sandboxJobKey: '',
@@ -164,6 +165,11 @@
 
                 submissionWorkspaceCleaned() {
                     return Boolean(this.submissionResult && this.submissionResult.submission && this.submissionResult.submission.workspace_cleaned);
+                },
+
+                submissionCleanupError() {
+                    const submission = this.submissionResult && this.submissionResult.submission;
+                    return submission && submission.cleanup_error ? submission.cleanup_error : '';
                 },
 
                 submissionCompileError() {
@@ -466,9 +472,12 @@
                 async runSandbox() {
                     if (!this.currentSubtitle || this.selectedIdx === null) return;
                     clearTimeout(this._saveTimer);
-                    await this._doSave();
+                    if (!(await this.doSave())) return;
                     const jobKey = this.sandboxKey();
                     this.sandboxRunning = true;
+                    this.sandboxCancelling = false;
+                    this.sandboxJobId = null;
+                    this.sandboxJobKey = jobKey;
                     this.sandboxLogOpen = true;
                     fetch('/api/sandbox/run', {
                         method: 'POST',
@@ -477,7 +486,11 @@
                     }).then(res => res.json()).then(data => {
                         if (!data.success) {
                             this.sandboxRunning = false;
-                            this.showToast(data.error || 'Sandbox failed to start', true);
+                            this.sandboxJobId = null;
+                            const message = data.code === 'queue_full'
+                                ? '评测队列已满，请稍后重试。'
+                                : (data.error || 'Sandbox failed to start');
+                            this.showToast(message, true);
                             return;
                         }
                         this.sandboxJobId = data.job_id;
@@ -485,8 +498,26 @@
                         this.pollSandboxJob(data.job_id, jobKey);
                     }).catch(() => {
                         this.sandboxRunning = false;
+                        this.sandboxJobId = null;
                         this.showToast('Sandbox failed to start', true);
                     });
+                },
+
+                cancelSandbox() {
+                    if (!this.sandboxJobId || !this.sandboxRunning || this.sandboxCancelling) return;
+                    this.sandboxCancelling = true;
+                    fetch(`/api/sandbox/job/${this.sandboxJobId}/cancel`, {
+                        method: 'POST',
+                        headers: { 'X-ProbHub-CSRF': PROBHUB_CSRF_TOKEN }
+                    })
+                        .then(res => res.json())
+                        .then(data => {
+                            if (!data.success) throw new Error(data.error || 'cancel failed');
+                        })
+                        .catch(error => {
+                            this.sandboxCancelling = false;
+                            this.showToast(error.message || '取消失败', true, 6000);
+                        });
                 },
 
                 pollSandboxJob(jobId = this.sandboxJobId, jobKey = this.sandboxJobKey) {
@@ -504,7 +535,8 @@
                                 this.sandboxResult = cacheEntry.result;
                                 this.sandboxLastRunAt = cacheEntry.finishedAt || '';
                             }
-                            if (data.status === 'running') {
+                            if (data.status === 'queued' || data.status === 'running' || data.status === 'cancelling') {
+                                this.sandboxCancelling = data.status === 'cancelling';
                                 this._sandboxPollTimer = setTimeout(() => this.pollSandboxJob(jobId, jobKey), 900);
                             } else {
                                 const finishedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -518,14 +550,21 @@
                                     this.sandboxLogs = this.sandboxCache[jobKey].logs;
                                     this.sandboxLastRunAt = finishedAt;
                                 }
-                                if (this.sandboxJobId === jobId) this.sandboxRunning = false;
+                                if (this.sandboxJobId === jobId) {
+                                    this.sandboxRunning = false;
+                                    this.sandboxCancelling = false;
+                                    this.sandboxJobId = null;
+                                }
                                 if (data.status === 'success') this.showToast('Sandbox finished');
+                                else if (data.status === 'cancelled') this.showToast('沙箱评测已取消');
                                 else this.showToast('Sandbox found issues', true);
                                 this.refreshSandboxInfo();
                             }
                         })
                         .catch(() => {
                             this.sandboxRunning = false;
+                            this.sandboxCancelling = false;
+                            this.sandboxJobId = null;
                             this.showToast('Sandbox job lost', true);
                         });
                 },
@@ -629,6 +668,8 @@
                     form.append('source', file, file.name);
                     const jobKey = this.sandboxKey();
                     this.submissionRunning = true;
+                    this.submissionJobId = null;
+                    this.submissionJobKey = jobKey;
                     this.submissionResult = null;
                     this.submissionLogs = '';
                     this.submissionVerdict = 'PENDING';
@@ -640,7 +681,12 @@
                     })
                         .then(async res => ({ ok: res.ok, data: await res.json() }))
                         .then(({ ok, data }) => {
-                            if (!ok || !data.success) throw new Error(data.error || 'submission failed to start');
+                            if (!ok || !data.success) {
+                                const message = data.code === 'queue_full'
+                                    ? '评测队列已满，请稍后重试。'
+                                    : (data.error || 'submission failed to start');
+                                throw new Error(message);
+                            }
                             this.submissionJobId = data.job_id;
                             this.submissionJobKey = jobKey;
                             this.submissionCache[jobKey] = { result: null, logs: '', verdict: 'PENDING', finishedAt: '' };
@@ -648,6 +694,7 @@
                         })
                         .catch(error => {
                             this.submissionRunning = false;
+                            this.submissionJobId = null;
                             this.submissionVerdict = 'FAIL';
                             this.showToast(error.message || '提交失败', true, 6000);
                         });
@@ -673,7 +720,13 @@
                         .then(res => res.json())
                         .then(data => {
                             if (!data.success) throw new Error(data.error || 'submission job missing');
-                            const verdict = data.status === 'cancelling' ? 'CANCELLING' : (data.verdict || data.result?.submission?.verdict || 'PENDING');
+                            const verdict = data.status === 'queued'
+                                ? 'QUEUED'
+                                : (data.status === 'running'
+                                    ? 'RUNNING'
+                                    : (data.status === 'cancelling'
+                                        ? 'CANCELLING'
+                                        : (data.verdict || data.result?.submission?.verdict || 'PENDING')));
                             const cacheEntry = {
                                 result: data.result || null,
                                 logs: data.logs || '',
@@ -691,6 +744,7 @@
                                 return;
                             }
                             this.submissionRunning = false;
+                            if (this.submissionJobId === jobId) this.submissionJobId = null;
                             const finishedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false });
                             this.submissionCache[jobKey].finishedAt = finishedAt;
                             if (this.sandboxKey() === jobKey) this.submissionLastRunAt = finishedAt;
@@ -700,6 +754,7 @@
                         })
                         .catch(error => {
                             this.submissionRunning = false;
+                            this.submissionJobId = null;
                             this.submissionVerdict = 'FAIL';
                             this.showToast(error.message || '提交任务丢失', true, 6000);
                         });

@@ -88,6 +88,7 @@ def _ensure_local_gitignore(root):
         "**/.probhub/generations/",
         "**/.probhub/generation-tmp/",
         "**/.probhub/judge-evidence.lock",
+        "**/.probhub/judge.lock",
         "**/.probhub/judge-evidence-v1.json",
         "**/.probhub/judge-evidence-v1.json.*.tmp",
         "**/.probhub/judge-evidence-v2.json",

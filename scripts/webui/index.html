@@ -497,11 +497,13 @@
                                 </template>
                             </p>
                         </div>
-                        <button @click="runSandbox()"
+                        <button @click="sandboxRunning ? cancelSandbox() : runSandbox()"
                                 class="primary-action px-5 py-2.5 text-[13px] font-semibold rounded-lg transition-all duration-200 disabled:opacity-40 disabled:shadow-none"
-                                :disabled="sandboxRunning || !sandboxInfo || !sandboxInfo.runnable">
+                                :disabled="sandboxCancelling || (sandboxRunning && !sandboxJobId) || (!sandboxRunning && (!sandboxInfo || !sandboxInfo.runnable))">
                             <span x-show="!sandboxRunning">▶ 运行沙箱评测</span>
-                            <span x-show="sandboxRunning" class="animate-pulse">● 评测中...</span>
+                            <span x-show="sandboxRunning && !sandboxJobId" class="animate-pulse">● 正在入队...</span>
+                            <span x-show="sandboxRunning && sandboxJobId && !sandboxCancelling" class="animate-pulse">■ 取消评测</span>
+                            <span x-show="sandboxCancelling" class="animate-pulse">● 正在取消...</span>
                         </button>
                     </div>
 
@@ -565,7 +567,7 @@
                                 </span>
                             </label>
                             <div class="flex items-center gap-2">
-                                <button @click="cancelSubmission()" x-show="submissionRunning"
+                                <button @click="cancelSubmission()" x-show="submissionRunning" :disabled="!submissionJobId"
                                         class="px-4 py-3 rounded-lg text-[12px] font-semibold border border-danger/30 text-danger hover:bg-danger/10 transition-colors">取消</button>
                                 <button @click="runSubmission()"
                                         :disabled="submissionRunning || !submissionFilename"
@@ -580,6 +582,9 @@
                                 <span class="px-3 py-1 rounded font-mono text-[12px] font-semibold" :class="sandboxStatusClass(submissionVerdict)" x-text="submissionVerdict"></span>
                                 <span class="text-[11px] text-cream-subtle" x-text="submissionRunning ? '已进入独立评测任务' : submissionStatsText()"></span>
                                 <span x-show="submissionWorkspaceCleaned()" class="text-[10px] text-success">临时工作区已清理</span>
+                            </div>
+                            <div x-show="submissionCleanupError()" class="rounded-lg bg-danger/10 border border-danger/20 p-3 text-[11px] text-danger">
+                                <span>临时工作区清理失败：</span><span x-text="submissionCleanupError()"></span>
                             </div>
                             <div x-show="submissionCompile() && submissionCompile().ok === false" class="rounded-lg bg-danger/10 border border-danger/20 p-3">
                                 <p class="text-[11px] font-medium text-danger mb-2">编译失败</p>

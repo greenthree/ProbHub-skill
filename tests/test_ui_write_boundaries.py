@@ -356,6 +356,8 @@ class UiWriteBoundaryTests(unittest.TestCase):
         self.assertTrue(info["matched"])
         self.assertTrue(os.path.samefile(info["dir"], self.root / "A"))
         self.assertEqual(info["name"], "Alpha")
+        self.assertTrue(info["script_exists"])
+        self.assertTrue(info["runnable"])
 
     def test_existing_visual_template_and_theme_markers_are_unchanged(self):
         html = self.ui.HTML_TEMPLATE

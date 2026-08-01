@@ -310,6 +310,7 @@ Schema v1 WebUI 遵循以下写入边界：
 - `<workspace>/.probhub/checkpoints/`：不可变题目 revision；
 - `<workspace>/.probhub/generations/`：不可变完整试卷预览；
 - `<workspace>/.probhub/generation.lock`：组卷 single-writer OS 锁。
+- `<problem>/.probhub/judge.lock`：单题 Judge 全程 OS 排他锁，避免 CLI 与多个 WebUI 进程并发改写编译产物或缓存。
 - `<problem>/.probhub/judge-evidence.lock`：单题校准证据发布 OS 锁。
 
 这些路径不属于 Schema 规范源，不得提交或手工编辑。generation 不替换正式 PDF、ZIP、metadata 或 Build Manifest。完整语义见 `references/generations.md`。

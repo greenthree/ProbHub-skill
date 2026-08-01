@@ -18,8 +18,7 @@ import yaml
 
 from probhub.process_control import (
     process_alive,
-    terminate_process,
-    windows_assign_job,
+    spawn_managed,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -749,21 +748,14 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
                 "time.sleep(30)\n",
                 encoding="utf-8",
             )
-            kwargs = {}
-            if os.name == "nt":
-                proc = subprocess.Popen([sys.executable, str(parent_script)])
-                job = windows_assign_job(proc)
-            else:
-                kwargs["start_new_session"] = True
-                proc = subprocess.Popen([sys.executable, str(parent_script)], **kwargs)
-                job = None
+            managed = spawn_managed([sys.executable, str(parent_script)])
             deadline = time.time() + 5
             while not pid_file.exists() and time.time() < deadline:
                 time.sleep(0.02)
             self.assertTrue(pid_file.exists(), "child process did not start")
             child_pid = int(pid_file.read_text(encoding="utf-8"))
             self.assertTrue(process_alive(child_pid))
-            terminate_process(proc, job)
+            managed.terminate()
             deadline = time.time() + 5
             while process_alive(child_pid) and time.time() < deadline:
                 time.sleep(0.05)
