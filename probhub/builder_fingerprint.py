@@ -173,7 +173,11 @@ def typst_template_paths(root, workspace):
             f"Typst directory must stay inside the workspace: {typst_dir}",
             code="builder_fingerprint_failed",
         ) from exc
-    typst_root = typst_dir.parent
+    # Keep the caller's spelling of the workspace path. On Windows runners,
+    # resolving a descendant can expand an 8.3 parent (RUNNER~1) while the
+    # workspace root remains short; paths returned by os.walk then cannot be
+    # made relative to the original root even though they name the same tree.
+    typst_root = candidate.parent
     if not typst_root.is_dir() or _is_link_like(typst_root):
         raise ProbHubError(
             f"Typst template directory is missing or unsafe: {typst_root}",
@@ -182,36 +186,32 @@ def typst_template_paths(root, workspace):
 
     paths = []
     generated = {
-        (typst_dir / "main.pdf").resolve(),
-        (typst_dir / "problems.json").resolve(),
+        (candidate / "main.pdf").resolve(),
+        (candidate / "problems.json").resolve(),
     }
 
-    def raise_walk_error(error):
-        raise error
-
     try:
-        for current, directories, filenames in os.walk(
-            typst_root,
-            topdown=True,
-            followlinks=False,
-            onerror=raise_walk_error,
-        ):
-            current = Path(current)
-            for name in [*directories, *filenames]:
-                path = current / name
+        pending = [typst_root]
+        while pending:
+            current = pending.pop()
+            with os.scandir(current) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+            for entry in entries:
+                path = current / entry.name
                 if _is_link_like(path):
                     raise ProbHubError(
                         f"Typst template tree must not contain links or reparse points: {path}",
                         code="builder_fingerprint_failed",
                     )
-            directories[:] = [name for name in directories if name != ".preview"]
-            for name in filenames:
-                path = current / name
+                info = os.lstat(path)
+                if stat.S_ISDIR(info.st_mode):
+                    if entry.name != ".preview":
+                        pending.append(path)
+                    continue
                 if path.resolve() in generated:
                     continue
                 if path.name.startswith(".probhub-") and path.suffix.lower() == ".typ":
                     continue
-                info = os.lstat(path)
                 if not stat.S_ISREG(info.st_mode):
                     raise ProbHubError(
                         f"Typst template input is not a regular file: {path}",
