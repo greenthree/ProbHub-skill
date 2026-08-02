@@ -214,6 +214,7 @@ def compute_source_hash(problem_dir, config):
 
 
 def compute_workspace_hash(root, workspace):
+    root = Path(root).resolve()
     paths = [root / ".probhub/workspace.yaml"]
     try:
         paths.extend(typst_template_paths(root, workspace))

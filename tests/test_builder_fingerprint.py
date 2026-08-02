@@ -84,6 +84,17 @@ class BuilderFingerprintTests(unittest.TestCase):
             (root / "typst/logo.png").write_bytes(b"png-two")
             self.assertNotEqual(second, compute_typst_template_hash(root, workspace))
 
+    def test_workspace_hash_normalizes_equivalent_root_spellings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = self.create_workspace(root)
+            aliased_root = root / ".." / root.name
+
+            self.assertEqual(
+                compute_workspace_hash(root, workspace),
+                compute_workspace_hash(aliased_root, workspace),
+            )
+
     def test_template_links_fail_closed(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
