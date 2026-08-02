@@ -3,7 +3,14 @@ import sys
 import os
 import json
 import subprocess
-from pypdf import PdfReader, PdfWriter
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PACKAGE_ROOT = SCRIPT_DIR.parent
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
+
+from probhub.pdf_processing import inspect_pdf, split_pdf
 
 BOILERPLATE_PAGES = 2  # cover + blank page
 
@@ -16,15 +23,7 @@ def get_page_count(pdf_path):
     """Return page count of a PDF, or 0 if file doesn't exist."""
     if not os.path.exists(pdf_path):
         return 0
-    return len(PdfReader(pdf_path).pages)
-
-def extract_text_from_page(reader, page_idx):
-    """Extract text from a single PDF page."""
-    try:
-        text = reader.pages[page_idx].extract_text()
-        return text if text else ""
-    except Exception:
-        return ""
+    return inspect_pdf(pdf_path)["pages"]
 
 def find_problem_boundaries(pdf_path):
     """
@@ -32,23 +31,7 @@ def find_problem_boundaries(pdf_path):
     for each problem found, ordered by page number.
     Problems are identified by the heading pattern "题目 X. NAME".
     """
-    reader = PdfReader(pdf_path)
-    found = []
-
-    for i in range(len(reader.pages)):
-        text = extract_text_from_page(reader, i)
-        if not text:
-            continue
-        for line in text.split('\n'):
-            line = line.strip()
-            if line.startswith("题目 ") and ". " in line:
-                dot_idx = line.index(". ")
-                display_name = line[dot_idx + 2:].strip()
-                if display_name:
-                    found.append({"display_name": display_name, "page": i + 1})
-                    break
-
-    return found
+    return inspect_pdf(pdf_path, scan_text=True)["legacy"]
 
 def is_last_problem(typst_dir, target_name):
     """Check if target problem is the last one in problems.json."""
@@ -84,14 +67,12 @@ def extract_by_page_count(main_pdf_path, output_pdf_path, prev_pages):
         print("[*] Page count unchanged, falling back to text-scan mode...")
         return False
 
-    reader = PdfReader(main_pdf_path)
-    writer = PdfWriter()
-    for i in range(new_pages - x, new_pages):
-        writer.add_page(reader.pages[i])
-
     os.makedirs(os.path.dirname(output_pdf_path) or ".", exist_ok=True)
-    with open(output_pdf_path, "wb") as f:
-        writer.write(f)
+    split_pdf(main_pdf_path, [{
+        "path": output_pdf_path,
+        "start": new_pages - x,
+        "end": new_pages,
+    }])
 
     print(f"[+] Extracted last {x} pages -> {output_pdf_path}")
     return True
@@ -123,18 +104,16 @@ def extract_by_text_scan(main_pdf_path, output_pdf_path, target_name):
         print(f"[-] Target problem '{target_name}' not found in PDF headings.")
         sys.exit(1)
 
-    reader = PdfReader(main_pdf_path)
-    total_pages = len(reader.pages)
+    total_pages = get_page_count(main_pdf_path)
     if end_page == -1:
         end_page = total_pages + 1
 
-    writer = PdfWriter()
-    for page_num in range(start_page - 1, end_page - 1):
-        writer.add_page(reader.pages[page_num])
-
     os.makedirs(os.path.dirname(output_pdf_path) or ".", exist_ok=True)
-    with open(output_pdf_path, "wb") as f:
-        writer.write(f)
+    split_pdf(main_pdf_path, [{
+        "path": output_pdf_path,
+        "start": start_page - 1,
+        "end": end_page - 1,
+    }])
 
     page_count = end_page - start_page
     print(f"[+] Extracted! ({page_count} pages, P{start_page} - P{end_page - 1}) -> {output_pdf_path}")

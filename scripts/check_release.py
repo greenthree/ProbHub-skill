@@ -212,6 +212,7 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         if (
             "__pycache__" in parts
             or ".probhub" in parts
+            or lowered == "scripts/audit_python_dependencies.py"
             or lowered.endswith((".pyc", ".pyo", ".exe", ".o", ".obj", ".zip"))
             or lowered.endswith("problem.pdf")
         ):
