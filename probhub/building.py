@@ -12,6 +12,10 @@ from pathlib import Path, PurePosixPath
 
 from . import __version__
 from .build_lock import workspace_build_lock
+from .builder_fingerprint import (
+    builder_fingerprint_stale_fields,
+    compute_builder_fingerprint,
+)
 from .calibration import (
     EVIDENCE_FILENAME,
     EVIDENCE_LOCK_FILENAME,
@@ -63,6 +67,7 @@ class BuildPlan:
     selected: tuple
     workspace_hash: str
     collection_hash: str
+    builder_fingerprint: dict
     batch_id: str
 
     @property
@@ -174,6 +179,7 @@ def create_build_plan(root, workspace, entries):
             workspace,
             loaded_problems=loaded_pairs,
         ),
+        builder_fingerprint=compute_builder_fingerprint(root, workspace),
         batch_id=uuid.uuid4().hex,
     )
 
@@ -395,13 +401,34 @@ def create_build_snapshot(plan):
                 + ", ".join(changed),
                 code="inputs_changed",
             )
+        assert_builder_fingerprint_unchanged(plan)
         yield snapshot
     finally:
         if temporary_root is not None:
             shutil.rmtree(temporary_root, ignore_errors=True)
 
 
+def assert_builder_fingerprint_unchanged(plan):
+    try:
+        current = compute_builder_fingerprint(plan.root, load_workspace(plan.root)[1])
+    except Exception as exc:
+        raise ProbHubError(
+            f"builder identity changed while validating the live workspace: {exc}",
+            code="builder_changed",
+        ) from exc
+    changed = builder_fingerprint_stale_fields(
+        plan.builder_fingerprint,
+        current,
+    )
+    if changed:
+        raise ProbHubError(
+            "builder identity changed during the run: " + ", ".join(changed),
+            code="builder_changed",
+        )
+
+
 def assert_build_inputs_unchanged(plan):
+    assert_builder_fingerprint_unchanged(plan)
     try:
         _, workspace = load_workspace(plan.root)
         workspace_hash = compute_workspace_hash(plan.root, workspace)
@@ -996,6 +1023,7 @@ def write_manifest(
     data_hash,
     workspace_hash,
     collection_hash,
+    builder_fingerprint,
     batch_id,
     sealed_revision_id,
 ):
@@ -1006,6 +1034,7 @@ def write_manifest(
         "data_hash": data_hash,
         "workspace_hash": workspace_hash,
         "collection_hash": collection_hash,
+        "builder_fingerprint": copy.deepcopy(builder_fingerprint),
         "batch_id": batch_id,
         "sealed_revision_id": sealed_revision_id,
         "pdf_hash": hash_file(problem_dir / "problem.pdf"),
@@ -1373,6 +1402,7 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
                     planned.data_hash,
                     plan.workspace_hash,
                     plan.collection_hash,
+                    plan.builder_fingerprint,
                     plan.batch_id,
                     sealed_checkpoints[problem_id]["revision_id"],
                 )

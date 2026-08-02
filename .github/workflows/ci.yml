@@ -16,7 +16,6 @@ env:
   TYPST_VERSION: v0.14.2
   TYPST_LINUX_SHA256: a6044cbad2a954deb921167e257e120ac0a16b20339ec01121194ff9d394996d
   TYPST_WINDOWS_SHA256: 51353994ac83218c3497052e89b2c432c53b9d4439cdc1b361e2ea4798ebfc13
-  CJK_FONT_COMMIT: 165c01b46ea533872e002e0785ff17e44f6d97d8
   CJK_FONT_SHA256: 2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b
   TYPST_IGNORE_SYSTEM_FONTS: "true"
   PROBHUB_RUN_TYPST_E2E: "1"
@@ -74,29 +73,7 @@ jobs:
           }
           Expand-Archive -Path $archive -DestinationPath "$env:RUNNER_TEMP"
           Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\typst-x86_64-pc-windows-msvc"
-      - name: Install pinned CJK font
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-          $fontDir = Join-Path $env:RUNNER_TEMP 'probhub-fonts'
-          New-Item -ItemType Directory -Force -Path $fontDir | Out-Null
-          $font = Join-Path $fontDir 'NotoSansCJKsc-Regular.otf'
-          $url = "https://raw.githubusercontent.com/notofonts/noto-cjk/$env:CJK_FONT_COMMIT/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
-            try {
-              Invoke-WebRequest -Uri $url -OutFile $font
-              break
-            } catch {
-              if ($attempt -eq 3) { throw }
-              Start-Sleep -Seconds (2 * $attempt)
-            }
-          }
-          $actual = (Get-FileHash -Algorithm SHA256 $font).Hash.ToLowerInvariant()
-          if ($actual -ne $env:CJK_FONT_SHA256) {
-            throw "CJK font checksum mismatch: $actual"
-          }
-          Add-Content -Path $env:GITHUB_ENV -Value "TYPST_FONT_PATHS=$fontDir"
-      - name: Typst smoke compile
+      - name: Verify bundled CJK font and Typst smoke compile
         shell: pwsh
         run: |
           $expected = "typst $($env:TYPST_VERSION.Substring(1))"
@@ -104,13 +81,19 @@ jobs:
           if (-not $actual.StartsWith($expected)) {
             throw "Unexpected Typst version: $actual"
           }
-          if (@(& typst fonts) -notcontains 'Noto Sans CJK SC') {
-            throw 'Pinned Noto Sans CJK SC font was not discovered'
+          $fontDir = (Resolve-Path 'probhub/assets/fonts').Path
+          $font = Join-Path $fontDir 'NotoSansCJKsc-Regular.otf'
+          $fontHash = (Get-FileHash -Algorithm SHA256 $font).Hash.ToLowerInvariant()
+          if ($fontHash -ne $env:CJK_FONT_SHA256) {
+            throw "Bundled CJK font checksum mismatch: $fontHash"
+          }
+          if (@(& typst fonts --font-path $fontDir --ignore-system-fonts) -notcontains 'Noto Sans CJK SC') {
+            throw 'Bundled Noto Sans CJK SC font was not discovered'
           }
           $source = Join-Path $env:RUNNER_TEMP 'smoke.typ'
           $output = Join-Path $env:RUNNER_TEMP 'smoke.pdf'
           Set-Content -LiteralPath $source -Encoding utf8NoBOM -Value "#set text(font: `"Noto Sans CJK SC`")`nProbHub 固定字体。"
-          & typst compile $source $output
+          & typst compile --font-path $fontDir --ignore-system-fonts $source $output
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path $output) -or (Get-Item $output).Length -eq 0) {
             throw 'Typst smoke compilation failed'
           }
@@ -176,30 +159,6 @@ jobs:
           }
           Expand-Archive -Path $archive -DestinationPath "$env:RUNNER_TEMP"
           Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\typst-x86_64-pc-windows-msvc"
-      - name: Install pinned CJK font
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-          $fontDir = Join-Path $env:RUNNER_TEMP 'probhub-fonts'
-          New-Item -ItemType Directory -Force -Path $fontDir | Out-Null
-          $font = Join-Path $fontDir 'NotoSansCJKsc-Regular.otf'
-          $url = "https://raw.githubusercontent.com/notofonts/noto-cjk/$env:CJK_FONT_COMMIT/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
-            try {
-              Invoke-WebRequest -Uri $url -OutFile $font
-              break
-            } catch {
-              if ($attempt -eq 3) { throw }
-              Start-Sleep -Seconds (2 * $attempt)
-            }
-          }
-          $actual = (Get-FileHash -Algorithm SHA256 $font).Hash.ToLowerInvariant()
-          if ($actual -ne $env:CJK_FONT_SHA256) {
-            throw "CJK font checksum mismatch: $actual"
-          }
-          $packageCache = Join-Path $env:RUNNER_TEMP 'typst-package-cache'
-          Add-Content -Path $env:GITHUB_ENV -Value "TYPST_FONT_PATHS=$fontDir"
-          Add-Content -Path $env:GITHUB_ENV -Value "TYPST_PACKAGE_CACHE_PATH=$packageCache"
       - name: Run clean npm and Python delivery flow
         run: python scripts/check_clean_install.py --json
 

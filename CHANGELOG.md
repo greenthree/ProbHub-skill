@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- Build Manifest 升至 schema v4、试卷 generation 升至 schema v3，统一记录 ProbHub/Core、Typst、pypdf、模板与固定字体的 `builder_fingerprint`；`status` 提供字段级 stale 原因，旧 schema 和不可探测工具链不再误报 `current`，build/seal/generation 在发布前以 `builder_changed` 阻断身份漂移。Noto Sans CJK SC 与许可证改为随 npm 包发布，Typst 正式编译只使用校验后的包内字体。
 - Python 运行时升级并锁定 Flask 3.1.3 与 pypdf 6.14.2；Windows/Ubuntu CI 使用固定 pip-audit 审计完整依赖闭包，临时例外必须绑定包名、原因、到期日和追踪链接。PDF 页数读取、文本边界扫描与切页迁入受 timeout、内存、输出和进程数限制的独立 worker，损坏或异常 PDF 不再无界占用构建进程或 WebUI 请求线程。
 - 非交互 stdout/stderr 及 Checker feedback 改为原子共享单一输出预算，完成、超时、取消和资源超限均在进程树终止后执行确定性公平前缀截断；无法测量或截断时 fail closed，沙箱缓存 Schema 升至 6。stress schema 2 反例以 `E + min(E, 8 MiB)` 限制单次持久化，消除 `generator.out` 输入副本，记录逐文件预算与截断证据，并拒绝重放不完整的 Generator OLE 输入。
 - WebUI 完整沙箱与上传评测增加最多 8 个请求线程的有界 HTTP 接入、前置 admission gate、共享固定 worker pool、有界队列、同题进程内互斥与跨进程 Judge 锁，新增结构化 `429 queue_full`、单调排队/执行/整任务 deadline、完整沙箱取消，以及日志、协议输出、结构化结果和完成记录上限；取消与协议错误状态保持单调，上传准备与清理纳入任务生命周期，超时、清理失败与服务关闭不再虚报成功并继续回收完整进程树。

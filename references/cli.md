@@ -221,7 +221,9 @@ probhub status [ID...]
 
 Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以及所有题目实际生成 Typst metadata 的输入计算。其他题的题面、题面图片、样例、展示配置或题序变化可能改变当前题的页码、总页数或单题 PDF，因此会使当前题变为 `stale`；其他题仅修改不参与排版的 secret 数据不会使当前题过期。
 
-正式 Build Manifest 使用 schema v3。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`，并分别记录其 `sealed_revision_id`；缺失时显示对应的 `stale_fields`。旧 v1/v2 Manifest 会以 `stale_fields: ["manifest_schema", ...]` 明确要求重建，不会被静默视为 `current`。
+正式 Build Manifest 使用 schema v4。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`，并分别记录其 `sealed_revision_id`；缺失时显示对应的 `stale_fields`。每份 Manifest 还记录同一规范化 `builder_fingerprint`：ProbHub/Core 版本、Manifest 与 generation schema、Typst、pypdf、LF 规范化模板 hash 和包内固定字体字节 hash。Node、g++、Flask、操作系统等不影响 PDF/ZIP 字节的诊断环境不进入该指纹。
+
+旧 v1/v2/v3 Manifest 会以 `stale_fields: ["manifest_schema"]` 明确要求重建，不会被静默视为 `current`。指纹变化按 `builder_fingerprint.<field>` 精确报告；当前机器无法确定 Typst、pypdf 或固定字体身份时报告 `builder_fingerprint.unavailable` 与 `builder_fingerprint_error`，已有产物不会被误报为 `current`。
 
 ## 8.1 `report`
 
@@ -664,6 +666,6 @@ probhub typeset L01
 
 或直接执行完整 `build L01`。
 
-### Typst 字体警告
+### `builder_fingerprint_failed` / `builder_changed`
 
-字体缺失警告不一定导致失败。以 Typst 退出码、PDF 是否生成和页码提取结果为准；正式发布前仍应在目标排版环境检查字体。
+正式 build、typeset、assemble 和 seal 需要确定的构建器身份。Typst 或 pypdf 缺失、包内固定字体缺失/损坏时以 `builder_fingerprint_failed` 阻断；运行期间工具版本、模板或字体身份变化时以 `builder_changed` 阻断发布。先运行 `probhub doctor` 修复环境，再重新执行原命令。只读 `status` / `generation-status` 会把无法探测身份报告为 stale，而不会把文件误判为损坏。

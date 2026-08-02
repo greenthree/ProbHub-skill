@@ -24,7 +24,7 @@ checkpoint 只复制 Schema v1 规范源，排除 PDF、ZIP、Manifest、metadat
     └── <ID>.pdf
 ```
 
-generation 使用内容寻址 ID，不覆盖正式 Typst `main.pdf`、单题 `problem.pdf`、ZIP 或 Build Manifest。相同工作区配置和 checkpoint 集合直接复用已有 generation。
+generation 使用内容寻址 ID，不覆盖正式 Typst `main.pdf`、单题 `problem.pdf`、ZIP 或 Build Manifest。ID 同时绑定工作区配置、checkpoint 集合和规范化 `builder_fingerprint`；Core、Typst、pypdf、模板或包内固定字体变化后生成新版本，不复用旧 generation。
 
 ## 2. 命令
 
@@ -68,7 +68,9 @@ probhub generation-status
 
 只有正式 `build` 才会生成或替换 DOMjudge ZIP、正式单题 PDF、共享 metadata 和 Build Manifest。不要把 `.probhub/generations/` 中的预览直接作为正式包发布。
 
-正式 `build` 会要求工作区 collection 中每道题的最新 checkpoint 都是与当前 live source/data 一致的 sealed revision，并在 Manifest v3 中记录所选题目的 `sealed_revision_id`。任一题仍是 draft、缺少 checkpoint 或 seal 后又被修改时，整批构建会在创建快照前以 `sealed_revision_required` 拒绝；构建期间 revision 变化则以 `sealed_revision_changed` 拒绝发布。
+generation manifest 使用 schema v3。旧 schema 的文件若内容哈希仍完整，`generation-status` 报告 `stale/generation_schema`；只有文件缺失、路径或内容哈希不一致时才报告 `invalid`。构建器不可探测时报告 `stale/builder_fingerprint.unavailable`，不会把已有 PDF 误报为损坏。
+
+正式 `build` 会要求工作区 collection 中每道题的最新 checkpoint 都是与当前 live source/data 一致的 sealed revision，并在 Manifest v4 中记录所选题目的 `sealed_revision_id` 与构建器指纹。任一题仍是 draft、缺少 checkpoint 或 seal 后又被修改时，整批构建会在创建快照前以 `sealed_revision_required` 拒绝；构建期间 revision 变化则以 `sealed_revision_changed` 拒绝发布，构建器身份变化则以 `builder_changed` 拒绝发布。
 
 ## 5. 当前性能模型
 

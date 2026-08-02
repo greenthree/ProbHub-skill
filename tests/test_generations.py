@@ -1,3 +1,4 @@
+import copy
 import io
 import json
 import shutil
@@ -11,10 +12,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from probhub.build_lock import workspace_file_lock
+from probhub.builder_fingerprint import BUILD_MANIFEST_SCHEMA_VERSION
 from probhub.cli import main as cli_main
 from probhub.errors import ProbHubError
 from probhub.generations import (
     CHECKPOINTS_DIR,
+    GENERATION_SCHEMA_VERSION,
     _problem_storage_key,
     assemble_exam_generation,
     create_problem_checkpoint,
@@ -28,6 +31,33 @@ from probhub.workspace import load_workspace, problem_entries
 
 
 class GenerationTests(unittest.TestCase):
+    def setUp(self):
+        self.builder_fingerprint = self.fingerprint("typst-0.14.2")
+        self._builder_patch = patch(
+            "probhub.generations.compute_builder_fingerprint",
+            side_effect=lambda *_args, **_kwargs: dict(self.builder_fingerprint),
+        )
+        self._builder_patch.start()
+        self.addCleanup(self._builder_patch.stop)
+
+    @staticmethod
+    def fingerprint(identity):
+        return {
+            "schema_version": 1,
+            "probhub_version": "0.6.2",
+            "build_manifest_schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
+            "generation_schema_version": GENERATION_SCHEMA_VERSION,
+            "typst_version": identity,
+            "pypdf_version": "6.14.2",
+            "template_hash": "template",
+            "font": {
+                "family": "Noto Sans CJK SC",
+                "policy": "bundled-only-v1",
+                "sha256": "font",
+            },
+            "digest": identity,
+        }
+
     def create_problem(self, root, problem_id, name):
         problem = root / problem_id
         (problem / "code").mkdir(parents=True)
@@ -264,6 +294,42 @@ class GenerationTests(unittest.TestCase):
             self.assertIn("Beta revision one", content)
             self.assertNotIn("UNPUBLISHED LIVE CHANGE", content)
 
+    def test_artifact_builder_changes_create_new_generations(self):
+        cases = (
+            (("probhub_version",), "0.6.3"),
+            (("typst_version",), "0.14.3"),
+            (("pypdf_version",), "6.15.0"),
+            (("template_hash",), "template-two"),
+            (("font", "sha256"), "font-two"),
+        )
+        for field_path, changed_value in cases:
+            with self.subTest(field=".".join(field_path)), tempfile.TemporaryDirectory() as temp:
+                self.builder_fingerprint = self.fingerprint("0.14.2")
+                root, workspace = self.create_workspace(Path(temp))
+                for entry in problem_entries(workspace):
+                    create_problem_checkpoint(root, workspace, entry)
+
+                with (
+                    patch("probhub.generations.compile_collection", side_effect=self.fake_compile) as compile_collection,
+                    patch("probhub.generations.extract_problem_pdfs", side_effect=self.fake_extract),
+                ):
+                    first = assemble_exam_generation(root)
+                    changed = copy.deepcopy(self.builder_fingerprint)
+                    target = changed
+                    for key in field_path[:-1]:
+                        target = target[key]
+                    target[field_path[-1]] = changed_value
+                    changed["digest"] = "changed-" + ".".join(field_path)
+                    self.builder_fingerprint = changed
+                    second = assemble_exam_generation(root)
+
+                self.assertNotEqual(first["generation_id"], second["generation_id"])
+                self.assertEqual(compile_collection.call_count, 2)
+                self.assertEqual(
+                    second["manifest"]["builder_fingerprint"],
+                    self.builder_fingerprint,
+                )
+
     def test_concurrent_generation_requests_singleflight(self):
         with tempfile.TemporaryDirectory() as temp:
             root, workspace = self.create_workspace(Path(temp))
@@ -442,6 +508,10 @@ class GenerationTests(unittest.TestCase):
                 patch(
                     "probhub.cli.assemble_exam_generation",
                     return_value={"ok": True, "generation_id": "fixture-generation"},
+                ) as assemble,
+                patch(
+                    "probhub.cli.compute_builder_fingerprint",
+                    return_value=self.builder_fingerprint,
                 ),
                 redirect_stdout(output),
             ):
@@ -466,6 +536,151 @@ class GenerationTests(unittest.TestCase):
             self.assertEqual(payload["generation"]["generation_id"], "fixture-generation")
             self.assertEqual(stress.call_args.kwargs["rounds"], 7)
             self.assertEqual(stress.call_args.kwargs["master_seed"], 99)
+            self.assertEqual(
+                assemble.call_args.kwargs["expected_builder_fingerprint"],
+                self.builder_fingerprint,
+            )
+
+    def test_generation_status_reports_schema_and_builder_staleness(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            for entry in problem_entries(workspace):
+                create_problem_checkpoint(root, workspace, entry)
+            with (
+                patch("probhub.generations.compile_collection", side_effect=self.fake_compile),
+                patch("probhub.generations.extract_problem_pdfs", side_effect=self.fake_extract),
+            ):
+                result = assemble_exam_generation(root)
+
+            manifest_path = Path(result["path"]) / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = 2
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            status = generation_status(root)
+            self.assertFalse(status["ok"])
+            self.assertEqual(status["state"], "stale")
+            self.assertEqual(status["stale_fields"], ["generation_schema"])
+
+            manifest["schema_version"] = GENERATION_SCHEMA_VERSION
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.builder_fingerprint = self.fingerprint("typst-0.14.3")
+            status = generation_status(root)
+            self.assertEqual(status["state"], "stale")
+            self.assertIn(
+                "builder_fingerprint.typst_version",
+                status["stale_fields"],
+            )
+
+    def test_generation_status_distinguishes_unavailable_builder_from_corruption(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            for entry in problem_entries(workspace):
+                create_problem_checkpoint(root, workspace, entry)
+            with (
+                patch("probhub.generations.compile_collection", side_effect=self.fake_compile),
+                patch("probhub.generations.extract_problem_pdfs", side_effect=self.fake_extract),
+            ):
+                assemble_exam_generation(root)
+
+            with patch(
+                "probhub.generations.compute_builder_fingerprint",
+                side_effect=ProbHubError(
+                    "typst was not found",
+                    code="builder_fingerprint_failed",
+                ),
+            ):
+                status = generation_status(root)
+
+            self.assertFalse(status["ok"])
+            self.assertEqual(status["state"], "stale")
+            self.assertEqual(
+                status["stale_fields"],
+                ["builder_fingerprint.unavailable"],
+            )
+            self.assertEqual(
+                status["builder_fingerprint_error"]["code"],
+                "builder_fingerprint_failed",
+            )
+
+    def test_expected_builder_probe_failure_is_builder_changed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            failure = ProbHubError(
+                "typst disappeared",
+                code="builder_fingerprint_failed",
+            )
+            with patch(
+                "probhub.generations.compute_builder_fingerprint",
+                side_effect=failure,
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    assemble_exam_generation(
+                        root,
+                        expected_builder_fingerprint=self.builder_fingerprint,
+                    )
+
+            self.assertEqual(raised.exception.code, "builder_changed")
+
+    def test_cached_generation_recheck_failure_is_builder_changed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            for entry in problem_entries(workspace):
+                create_problem_checkpoint(root, workspace, entry)
+            with (
+                patch("probhub.generations.compile_collection", side_effect=self.fake_compile),
+                patch("probhub.generations.extract_problem_pdfs", side_effect=self.fake_extract),
+            ):
+                assemble_exam_generation(root)
+
+            failure = ProbHubError(
+                "pypdf disappeared",
+                code="builder_fingerprint_failed",
+            )
+            with patch(
+                "probhub.generations.compute_builder_fingerprint",
+                side_effect=[self.builder_fingerprint, failure],
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    assemble_exam_generation(root)
+
+            self.assertEqual(raised.exception.code, "builder_changed")
+
+    def test_late_builder_probe_failure_does_not_publish_generation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            for entry in problem_entries(workspace):
+                create_problem_checkpoint(root, workspace, entry)
+            failure = ProbHubError(
+                "font disappeared",
+                code="builder_fingerprint_failed",
+            )
+            with (
+                patch("probhub.generations.compile_collection", side_effect=self.fake_compile),
+                patch("probhub.generations.extract_problem_pdfs", side_effect=self.fake_extract),
+                patch(
+                    "probhub.generations.compute_builder_fingerprint",
+                    side_effect=[
+                        self.builder_fingerprint,
+                        self.builder_fingerprint,
+                        failure,
+                    ],
+                ),
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    assemble_exam_generation(root)
+
+            self.assertEqual(raised.exception.code, "builder_changed")
+            self.assertFalse((root / ".probhub/generations/current.json").exists())
+            generation_root = root / ".probhub/generations"
+            self.assertEqual(
+                [] if not generation_root.is_dir() else list(generation_root.glob("*/manifest.json")),
+                [],
+            )
+            tmp_root = root / ".probhub/generation-tmp"
+            self.assertEqual(
+                [] if not tmp_root.is_dir() else list(tmp_root.iterdir()),
+                [],
+            )
 
     def test_generation_status_detects_pdf_tampering(self):
         with tempfile.TemporaryDirectory() as temp:

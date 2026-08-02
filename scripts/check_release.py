@@ -187,6 +187,8 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "probhub/install_skill.py", "probhub/process_control.py",
         "probhub/_unix_exec.py",
         "probhub/webui_runtime.py",
+        "probhub/assets/fonts/NotoSansCJKsc-Regular.otf",
+        "probhub/assets/fonts/OFL.txt",
         "scripts/probhub.py", "scripts/local_judge.py", "scripts/ui.py",
         "scripts/webui/index.html", "scripts/webui/app.css", "scripts/webui/app.js",
         "scripts/webui/theme.js", "scripts/webui/mathjax-config.js",

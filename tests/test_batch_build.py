@@ -7,6 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from probhub.build_lock import workspace_build_lock
+from probhub.builder_fingerprint import (
+    GENERATION_SCHEMA_VERSION,
+    compute_typst_template_hash,
+)
 from probhub.building import (
     _assert_publish_targets_available,
     _recover_build_publish_transactions,
@@ -19,11 +23,45 @@ from probhub.errors import ProbHubError
 from probhub.generations import checkpoint_revision, create_problem_checkpoint
 from probhub.hashing import hash_file
 from probhub.io import write_yaml
-from probhub.linting import compute_data_hash, compute_source_hash, problem_status
+from probhub.linting import (
+    BUILD_MANIFEST_SCHEMA_VERSION,
+    compute_data_hash,
+    compute_source_hash,
+    problem_status,
+)
 from probhub.workspace import load_problem, load_workspace, problem_entries
 
 
 class BatchBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.builder_fingerprint = {
+            "schema_version": 1,
+            "probhub_version": "0.6.2",
+            "build_manifest_schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
+            "generation_schema_version": GENERATION_SCHEMA_VERSION,
+            "typst_version": "0.14.2",
+            "pypdf_version": "6.14.2",
+            "template_hash": "fixture-template",
+            "font": {
+                "family": "Noto Sans CJK SC",
+                "policy": "bundled-only-v1",
+                "sha256": "fixture-font",
+            },
+            "digest": "fixture-builder",
+        }
+        self._builder_patch = patch(
+            "probhub.building.compute_builder_fingerprint",
+            side_effect=lambda *_args, **_kwargs: dict(self.builder_fingerprint),
+        )
+        self._status_builder_patch = patch(
+            "probhub.linting.compute_builder_fingerprint",
+            side_effect=lambda *_args, **_kwargs: dict(self.builder_fingerprint),
+        )
+        self._builder_patch.start()
+        self._status_builder_patch.start()
+        self.addCleanup(self._status_builder_patch.stop)
+        self.addCleanup(self._builder_patch.stop)
+
     def write_compiled_fixture(self, root, loaded):
         typst_dir = root / "typst/contest"
         for problem_dir, config in loaded:
@@ -353,7 +391,7 @@ class BatchBuildTests(unittest.TestCase):
             self.assertEqual(batch_ids, {result["batch_id"]})
             self.assertEqual(
                 {manifest["schema_version"] for manifest in result["manifests"].values()},
-                {3},
+                {BUILD_MANIFEST_SCHEMA_VERSION},
             )
             self.assertTrue(
                 all(manifest["sealed_revision_id"] for manifest in result["manifests"].values())
@@ -369,6 +407,91 @@ class BatchBuildTests(unittest.TestCase):
                         problem_status(problem_dir, config, root, workspace)["state"],
                         "current",
                     )
+
+    def test_build_rejects_builder_change_before_touching_live_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            main_pdf = root / "typst/contest/main.pdf"
+            main_pdf.write_bytes(b"known-good-main")
+            package = root / "A.zip"
+            package.write_bytes(b"known-good-package")
+
+            with (
+                patch(
+                    "probhub.building.compute_builder_fingerprint",
+                    side_effect=[{"digest": "before"}, {"digest": "after"}],
+                ),
+                patch("probhub.building.compile_collection") as compile_collection,
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, entries, run_judge=False)
+
+            self.assertEqual(raised.exception.code, "builder_changed")
+            compile_collection.assert_not_called()
+            self.assertEqual(main_pdf.read_bytes(), b"known-good-main")
+            self.assertEqual(package.read_bytes(), b"known-good-package")
+
+    def test_build_rejects_unlisted_template_input_change_before_publish(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            entries = problem_entries(workspace)
+            template_input = root / "typst/context.json"
+            template_input.write_text('{"value": 1}\n', encoding="utf-8")
+            live_artifacts = {
+                root / "typst/contest/main.pdf": b"known-good-main",
+                root / "A/problem.pdf": b"known-good-a-pdf",
+                root / "B/problem.pdf": b"known-good-b-pdf",
+                root / "A.zip": b"known-good-a-zip",
+                root / "B.zip": b"known-good-b-zip",
+            }
+            for path, payload in live_artifacts.items():
+                path.write_bytes(payload)
+
+            def template_fingerprint(check_root, check_workspace):
+                result = {
+                    **self.builder_fingerprint,
+                    "font": dict(self.builder_fingerprint["font"]),
+                    "template_hash": compute_typst_template_hash(
+                        check_root,
+                        check_workspace,
+                    ),
+                }
+                result["digest"] = result["template_hash"]
+                return result
+
+            def changing_compile(snapshot_root, snapshot_workspace, loaded):
+                template_input.write_text('{"value": 2}\n', encoding="utf-8")
+                return self.write_compiled_fixture(snapshot_root, loaded)
+
+            def fake_extract(main_pdf, loaded, only_ids=None):
+                outputs = {}
+                for problem_dir, config in loaded:
+                    if only_ids and config["id"] not in only_ids:
+                        continue
+                    output = problem_dir / "problem.pdf"
+                    output.write_bytes(b"staged-pdf")
+                    outputs[config["id"]] = {"path": str(output), "pages": 1}
+                return outputs
+
+            with (
+                patch(
+                    "probhub.building.compute_builder_fingerprint",
+                    side_effect=template_fingerprint,
+                ),
+                patch("probhub.building.compile_collection", side_effect=changing_compile),
+                patch("probhub.building.extract_problem_pdfs", side_effect=fake_extract),
+                patch(
+                    "probhub.building.package_problem",
+                    side_effect=self.write_package_fixture,
+                ),
+            ):
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, entries, run_judge=False)
+
+            self.assertEqual(raised.exception.code, "builder_changed")
+            for path, payload in live_artifacts.items():
+                self.assertEqual(path.read_bytes(), payload, path)
 
     def test_build_rechecks_inputs_and_seals_after_publish_payload_staging(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1085,6 +1208,10 @@ class BatchBuildTests(unittest.TestCase):
                 patch("probhub.cli.workspace_context", return_value=(root, workspace)),
                 patch("probhub.cli.compute_workspace_hash", return_value="workspace") as workspace_hash,
                 patch("probhub.cli.compute_collection_hash", return_value="collection") as collection_hash,
+                patch(
+                    "probhub.cli.compute_builder_fingerprint",
+                    return_value={"digest": "builder"},
+                ) as builder_fingerprint,
                 patch("probhub.cli.problem_status", return_value=current) as status,
             ):
                 result = command_status(args)
@@ -1092,10 +1219,50 @@ class BatchBuildTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             workspace_hash.assert_called_once_with(root, workspace)
             collection_hash.assert_called_once_with(root, workspace)
+            builder_fingerprint.assert_called_once_with(root, workspace)
             self.assertEqual(status.call_count, 2)
             for call in status.call_args_list:
                 self.assertEqual(call.kwargs["workspace_hash"], "workspace")
                 self.assertEqual(call.kwargs["collection_hash"], "collection")
+                self.assertEqual(
+                    call.kwargs["builder_fingerprint"],
+                    {"digest": "builder"},
+                )
+
+    def test_status_reports_one_shared_builder_probe_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp))
+            args = SimpleNamespace(problem=["A", "B"])
+            stale = {"state": "stale"}
+            failure = ProbHubError(
+                "typst was not found",
+                code="builder_fingerprint_failed",
+            )
+
+            with (
+                patch("probhub.cli.workspace_context", return_value=(root, workspace)),
+                patch("probhub.cli.compute_workspace_hash", return_value="workspace"),
+                patch("probhub.cli.compute_collection_hash", return_value="collection"),
+                patch(
+                    "probhub.cli.compute_builder_fingerprint",
+                    side_effect=failure,
+                ) as builder_fingerprint,
+                patch("probhub.cli.problem_status", return_value=stale) as status,
+            ):
+                result = command_status(args)
+
+            self.assertFalse(result["ok"])
+            builder_fingerprint.assert_called_once_with(root, workspace)
+            self.assertEqual(status.call_count, 2)
+            for call in status.call_args_list:
+                self.assertIsNone(call.kwargs["builder_fingerprint"])
+                self.assertEqual(
+                    call.kwargs["builder_fingerprint_error"],
+                    {
+                        "code": "builder_fingerprint_failed",
+                        "error": "typst was not found",
+                    },
+                )
 
 
 if __name__ == "__main__":

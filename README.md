@@ -106,10 +106,10 @@ ProbHub 已在 Windows 和 Ubuntu 上持续测试。macOS 通常可以运行，�
 | [Node.js](https://nodejs.org/) | 18 或更高 | 安装 `probhub` 命令和 Agent Skill |
 | `g++` | 支持 C++17 | 编译标程、Validator 和 Checker |
 | [Typst](https://github.com/typst/typst/releases/tag/v0.14.2) | 0.14.2 | 生成 PDF |
-| Noto Sans CJK SC | 固定中文字体 | 保证题面中文正常显示 |
+| Noto Sans CJK SC | 随 `probhub` 包内置 | 保证题面中文正常显示和跨平台一致性 |
 
 <details>
-<summary>g++、Typst 或中文字体安装提示</summary>
+<summary>g++ 与 Typst 安装提示</summary>
 
 Windows 推荐使用 [MSYS2](https://www.msys2.org/) 安装 `g++`，并把其 UCRT64 `bin` 目录加入 `PATH`。Typst 请下载 `typst-x86_64-pc-windows-msvc.zip`，解压后把 `typst.exe` 所在目录加入 `PATH`。
 
@@ -120,13 +120,7 @@ sudo apt update
 sudo apt install -y g++
 ```
 
-Typst 请使用上方链接中的 0.14.2 固定版本。Noto Sans CJK SC 固定字体可从下列地址下载：
-
-```text
-https://raw.githubusercontent.com/notofonts/noto-cjk/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf
-```
-
-Windows 可以双击字体文件安装；Linux 可以把它放入 `~/.local/share/fonts/` 后执行 `fc-cache -f`。如果不想安装到系统，也可以把字体所在目录设置为 `TYPST_FONT_PATHS`。
+Typst 请使用上方链接中的 0.14.2 固定版本。Noto Sans CJK SC 已随 npm 主包发布，正式编译会校验字体字节并忽略系统字体，无需单独下载安装。
 
 </details>
 
@@ -272,7 +266,7 @@ npx probhub --version
 - 当前终端调用了另一套 Python，或当前 Python 没有完成依赖安装；
 - `g++` 或 Typst 不在 `PATH`；
 - Typst 不是 0.14.2；
-- Typst 找不到 `Noto Sans CJK SC`；
+- npm 包内的固定字体缺失或校验失败，可重新安装 `probhub`；
 - Python 依赖没有安装，可重新运行 `probhub-skill`。
 
 ### WebUI 打不开
@@ -298,7 +292,7 @@ probhub seal L01 --no-cache --seed 12345
 
 ### `status` 显示 `stale`
 
-这表示题目、数据、题序、模板或正式产物在上次构建后发生了变化。重新 `seal` 并 `build`，不要手工修改 Manifest。
+这表示题目、数据、题序、模板、构建工具链或正式产物在上次构建后发生了变化。读取 `stale_fields` 定位原因；重新 `seal` 并 `build`，不要手工修改 Manifest。若显示 `builder_fingerprint.unavailable`，先按诊断修复 Typst 或 Python 依赖。
 
 ### 出现 `recovery_required`
 

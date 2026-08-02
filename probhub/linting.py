@@ -4,6 +4,13 @@ import math
 import re
 from pathlib import Path, PureWindowsPath
 
+from .builder_fingerprint import (
+    BUILD_MANIFEST_SCHEMA_VERSION,
+    TYPST_TEXT_TEMPLATE_SUFFIXES,
+    builder_fingerprint_stale_fields,
+    compute_builder_fingerprint,
+    typst_template_paths,
+)
 from .calibration import evaluate_calibration, validate_calibration_config
 from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
@@ -12,12 +19,11 @@ from .metadata import build_meta, normalize_display_name
 from .solutions import analyze_solution_verification
 from .statement import parse_statement
 from .statement_consistency import analyze_constraint_consistency, reconcile_constraints
-from .typesetting import is_temporary_typst_source, typst_boundary_protocol_supported
+from .typesetting import typst_boundary_protocol_supported
 from .transactions import pending_workspace_transactions
 from .workspace import load_problem, problem_entries
 
 DEFAULT_FORBIDDEN = ("TODO", "FIXME", "114514", "待补充")
-BUILD_MANIFEST_SCHEMA_VERSION = 3
 TYPST_LENGTH_PATTERN = re.compile(r"^-?(?:\d+(?:\.\d+)?|\.\d+)(?:pt|mm|cm|in|em|fr|%)$")
 STATEMENT_ASSET_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
 CODE_HASH_IGNORED_SUFFIXES = {
@@ -208,18 +214,20 @@ def compute_source_hash(problem_dir, config):
 
 
 def compute_workspace_hash(root, workspace):
+    root = Path(root).resolve()
     paths = [root / ".probhub/workspace.yaml"]
-    typst_dir = root / ((workspace.get("typst") or {}).get("directory", "typst-statement/正式赛"))
-    typst_root = typst_dir.parent
-    if typst_root.exists():
-        for path in typst_root.rglob("*"):
-            if not path.is_file() or ".preview" in path.parts:
-                continue
-            if is_temporary_typst_source(path):
-                continue
-            if path.suffix.lower() in {".typ", ".png", ".jpg", ".jpeg", ".svg"}:
-                paths.append(path)
-    return hash_paths(root, [path.relative_to(root) for path in paths if path.exists()])[0]
+    try:
+        paths.extend(typst_template_paths(root, workspace))
+    except ProbHubError:
+        # Read-only status still reports source/artifact drift when the builder
+        # is unavailable; compute_builder_fingerprint supplies the fail-closed
+        # diagnostic and formal writers remain blocked.
+        pass
+    return hash_paths(
+        root,
+        [path.relative_to(root) for path in paths if path.exists()],
+        normalize_lf_suffixes=TYPST_TEXT_TEMPLATE_SUFFIXES,
+    )[0]
 
 
 def compute_collection_hash(root, workspace, loaded_problems=None):
@@ -713,6 +721,8 @@ def problem_status(
     workspace=None,
     workspace_hash=None,
     collection_hash=None,
+    builder_fingerprint=None,
+    builder_fingerprint_error=None,
 ):
     if root is not None and workspace is not None:
         pending = pending_workspace_transactions(root, workspace)
@@ -740,6 +750,14 @@ def problem_status(
             if collection_hash is None
             else collection_hash
         )
+        if builder_fingerprint is None and builder_fingerprint_error is None:
+            try:
+                builder_fingerprint = compute_builder_fingerprint(root, workspace)
+            except ProbHubError as exc:
+                builder_fingerprint_error = {
+                    "code": exc.code or "builder_fingerprint_failed",
+                    "error": str(exc),
+                }
     if not manifest:
         calibration = evaluate_calibration(
             problem_dir,
@@ -751,6 +769,16 @@ def problem_status(
             "state": "never-built",
             **({"manifest_error": manifest_error} if manifest_error else {}),
             **current,
+            **(
+                {"builder_fingerprint": builder_fingerprint}
+                if builder_fingerprint is not None
+                else {}
+            ),
+            **(
+                {"builder_fingerprint_error": builder_fingerprint_error}
+                if builder_fingerprint_error is not None
+                else {}
+            ),
             "warnings": calibration["warnings"],
             "diagnostics": calibration["diagnostics"],
             "calibration": calibration,
@@ -765,6 +793,17 @@ def problem_status(
         or not manifest["sealed_revision_id"]
     ):
         stale.append("sealed_revision_id")
+    elif not isinstance(manifest.get("builder_fingerprint"), dict):
+        stale.append("builder_fingerprint")
+    elif builder_fingerprint_error is not None:
+        stale.append("builder_fingerprint.unavailable")
+    elif builder_fingerprint is not None:
+        stale.extend(
+            builder_fingerprint_stale_fields(
+                manifest["builder_fingerprint"],
+                builder_fingerprint,
+            )
+        )
     stale.extend(key for key, value in current.items() if manifest.get(key) != value)
     calibration = evaluate_calibration(
         problem_dir,
@@ -776,6 +815,16 @@ def problem_status(
         "state": "stale" if stale else "current",
         "stale_fields": stale,
         **current,
+        **(
+            {"builder_fingerprint": builder_fingerprint}
+            if builder_fingerprint is not None
+            else {}
+        ),
+        **(
+            {"builder_fingerprint_error": builder_fingerprint_error}
+            if builder_fingerprint_error is not None
+            else {}
+        ),
         "manifest": manifest,
         "warnings": calibration["warnings"],
         "diagnostics": calibration["diagnostics"],
