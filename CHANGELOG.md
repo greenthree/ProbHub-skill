@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- Unix 内存限制 helper 改为隔离 Python 的内联 `-c` 启动，保留 `RLIMIT_AS`、状态管道、信号复位、session/process group 与 fail-closed 语义，同时避免 WSL 从 Windows 挂载目录逐次读取 helper 文件的冷启动开销。
+- 发布包清单检查同时兼容 npm 10 的单元素数组与 npm 12 的单包名对象 JSON 响应，畸形或多包响应仍 fail closed。
 - 主包 README、兼容包 README、Agent Skill 与 Release 安装说明统一为 Node.js 18+ / Python 3.10+ 的系统 Python 显式授权流程；非虚拟环境依赖只写入用户目录并兼容 Ubuntu PEP 668，pip 子进程清除 Python 环境污染；临时 `npx`、Doctor 修复和 WebUI 检查不再遗漏 `PROBHUB_ALLOW_SYSTEM_PYTHON=1`，安装器报错不再引导用户创建虚拟环境。
 - 空工作区锁文件只在取得 OS 文件锁后初始化，消除 Windows 并发 generation 首次启动时的写入、刷新与关闭竞态。
 - Build Manifest 升至 schema v4、试卷 generation 升至 schema v3，统一记录 ProbHub/Core、Typst、pypdf、模板与固定字体的 `builder_fingerprint`；`status` 提供字段级 stale 原因，旧 schema 和不可探测工具链不再误报 `current`，build/seal/generation 在发布前以 `builder_changed` 阻断身份漂移。Noto Sans CJK SC 与许可证改为随 npm 包发布，Typst 正式编译只使用校验后的包内字体。

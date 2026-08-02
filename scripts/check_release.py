@@ -145,9 +145,13 @@ def _parse_npm_json(stdout, command):
         payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise ReleaseCheckError(f"invalid npm JSON from {' '.join(command)}: {stdout[-2000:]}") from exc
-    if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
-        raise ReleaseCheckError(f"unexpected npm pack response: {payload!r}")
-    return payload[0]
+    if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], dict):
+        return payload[0]
+    if isinstance(payload, dict) and len(payload) == 1:
+        manifest = next(iter(payload.values()))
+        if isinstance(manifest, dict):
+            return manifest
+    raise ReleaseCheckError(f"unexpected npm pack response: {payload!r}")
 
 
 def npm_pack_manifest(target=None, *, dry_run=True, destination=None):
@@ -185,7 +189,6 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "requirements.txt", "bin/init.js", "bin/probhub.js", "bin/python.js",
         "probhub/__init__.py", "probhub/cli.py", "probhub/install_deps.py",
         "probhub/install_skill.py", "probhub/process_control.py",
-        "probhub/_unix_exec.py",
         "probhub/webui_runtime.py",
         "probhub/assets/fonts/NotoSansCJKsc-Regular.otf",
         "probhub/assets/fonts/OFL.txt",

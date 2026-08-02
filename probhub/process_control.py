@@ -21,6 +21,56 @@ PYTHON_OPTIONS_WITH_ARGUMENT = frozenset(("-W", "-X", "--check-hash-based-pycs")
 UNIX_EXEC_START_TIMEOUT_SECONDS = 10.0
 UNIX_EXEC_READY = b"PROBHUB_UNIX_EXEC_READY_V1\n"
 UNIX_EXEC_STATUS_LIMIT = 64 * 1024
+UNIX_EXEC_HELPER_CODE = r'''
+import os
+import signal
+import sys
+
+READY = b"PROBHUB_UNIX_EXEC_READY_V1\n"
+
+
+def report_failure(status_fd, message):
+    try:
+        os.write(status_fd, ("Unix execution helper failed: " + message).encode("utf-8"))
+    except OSError:
+        pass
+
+
+def main():
+    argv = sys.argv[1:]
+    status_fd = None
+    try:
+        if len(argv) < 7 or argv[0] != "--memory-limit-bytes" or argv[2] != "--status-fd":
+            raise ValueError("invalid helper arguments")
+        limit_bytes = int(argv[1])
+        status_fd = int(argv[3])
+        if argv[4] not in ("--restore-signals", "--keep-signals"):
+            raise ValueError("invalid signal restore mode")
+        restore_signals = argv[4] == "--restore-signals"
+        if argv[5] != "--" or not argv[6:]:
+            raise ValueError("target command is missing")
+        if limit_bytes <= 0:
+            raise ValueError("memory limit must be positive")
+
+        import resource
+
+        os.set_inheritable(status_fd, False)
+        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+        if restore_signals:
+            for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+                signum = getattr(signal, name, None)
+                if signum is not None:
+                    signal.signal(signum, signal.SIG_DFL)
+        os.write(status_fd, READY)
+        os.execvpe(argv[6], argv[6:], os.environ)
+    except BaseException as exc:
+        if status_fd is not None:
+            report_failure(status_fd, str(exc))
+        return 127
+
+
+raise SystemExit(main())
+'''.lstrip()
 
 
 class ProcessCancelled(Exception):
@@ -112,21 +162,19 @@ def _prepare_unix_memory_limited_command(command, memory_limit_mb):
     command = list(command)
     if not command:
         raise ValueError("memory-limited Unix target command is missing")
-    helper = Path(__file__).with_name("_unix_exec.py")
-    if not helper.is_file():
-        raise OSError(f"Unix execution helper is missing: {helper}")
     limit_bytes = int(float(memory_limit_mb) * 1024 * 1024)
     if limit_bytes <= 0:
         raise ValueError("memory limit must be positive")
-    return command, helper, limit_bytes
+    return command, limit_bytes
 
 
-def _unix_memory_limited_command(command, helper, limit_bytes, status_fd, restore_signals):
+def _unix_memory_limited_command(command, limit_bytes, status_fd, restore_signals):
     return [
         sys.executable,
         "-I",
         "-S",
-        str(helper),
+        "-c",
+        UNIX_EXEC_HELPER_CODE,
         "--memory-limit-bytes",
         str(limit_bytes),
         "--status-fd",
@@ -676,7 +724,7 @@ def spawn_managed(
             if kwargs.get("executable") is not None:
                 raise ValueError("memory-limited Unix commands do not support executable=")
             pass_fds = tuple(kwargs.get("pass_fds") or ())
-            command, helper, limit_bytes = _prepare_unix_memory_limited_command(
+            command, limit_bytes = _prepare_unix_memory_limited_command(
                 command, memory_limit_mb
             )
             read_fd, write_fd = os.pipe()
@@ -686,7 +734,6 @@ def spawn_managed(
                 kwargs["close_fds"] = True
                 command = _unix_memory_limited_command(
                     command,
-                    helper,
                     limit_bytes,
                     write_fd,
                     kwargs.get("restore_signals", True),
