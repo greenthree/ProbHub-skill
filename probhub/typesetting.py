@@ -3,25 +3,19 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from pypdf import PdfReader, PdfWriter
-
 from .errors import ProbHubError
 from .metadata import (
-    BOUNDARY_MARKER_PREFIX,
     normalize_display_name,
     problem_boundary_marker,
     write_typst_collection,
 )
+from .pdf_processing import inspect_pdf, split_pdf
 from .process_control import run_managed_to_files
 
 
 TYPST_TIMEOUT_SECONDS = 120
 TYPST_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
 TYPST_TEMP_SOURCE_PREFIX = ".probhub-"
-BOUNDARY_MARKER_PATTERN = re.compile(
-    rf"{re.escape(BOUNDARY_MARKER_PREFIX)}[0-9a-f]{{64}}"
-)
-LEGACY_HEADING_PATTERN = re.compile(r"题目\s+[A-Z]+\.\s*(.+)")
 TYPST_BOUNDARY_FIELD_PATTERN = re.compile(
     r"(?:\.\s*boundary_marker\b|at\(\s*[\"']boundary_marker[\"']\s*\))"
 )
@@ -238,21 +232,9 @@ def _validate_legacy_boundaries(boundaries, expected):
     return validated
 
 
-def problem_boundaries(pdf_path, loaded_problems=None):
-    reader = PdfReader(pdf_path)
-    markers = []
-    legacy = []
-    for index, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        markers.extend(
-            {"marker": marker, "page": index + 1}
-            for marker in BOUNDARY_MARKER_PATTERN.findall(text)
-        )
-        for line in text.splitlines():
-            match = LEGACY_HEADING_PATTERN.search(line.strip())
-            if match:
-                legacy.append({"display_name": match.group(1).strip(), "page": index + 1})
-                break
+def _boundaries_from_inspection(inspection, loaded_problems=None):
+    markers = inspection["markers"]
+    legacy = inspection["legacy"]
     if markers:
         if loaded_problems is None:
             return markers
@@ -260,6 +242,13 @@ def problem_boundaries(pdf_path, loaded_problems=None):
     if loaded_problems is None:
         return legacy
     return _validate_legacy_boundaries(legacy, _expected_boundaries(loaded_problems))
+
+
+def problem_boundaries(pdf_path, loaded_problems=None):
+    return _boundaries_from_inspection(
+        inspect_pdf(pdf_path, scan_text=True),
+        loaded_problems,
+    )
 
 
 def compile_collection(root, workspace, loaded_problems):
@@ -304,11 +293,12 @@ def compile_collection(root, workspace, loaded_problems):
 
 
 def extract_problem_pdfs(main_pdf, loaded_problems, only_ids=None):
-    boundaries = problem_boundaries(main_pdf, loaded_problems)
+    inspection = inspect_pdf(main_pdf, scan_text=True)
+    boundaries = _boundaries_from_inspection(inspection, loaded_problems)
     if not boundaries:
         raise ProbHubError("no problem headings found in compiled PDF")
-    reader = PdfReader(main_pdf)
     outputs = {}
+    split_plan = []
     boundary_indexes = {item["id"]: index for index, item in enumerate(boundaries)}
     for problem_dir, config in loaded_problems:
         problem_id = config["id"]
@@ -321,13 +311,14 @@ def extract_problem_pdfs(main_pdf, loaded_problems, only_ids=None):
             boundaries[index]["page"],
             boundaries[index + 1]["page"]
             if index + 1 < len(boundaries)
-            else len(reader.pages) + 1,
+            else inspection["pages"] + 1,
         )
-        writer = PdfWriter()
-        for page_number in range(found[0] - 1, found[1] - 1):
-            writer.add_page(reader.pages[page_number])
         output = problem_dir / "problem.pdf"
-        with output.open("wb") as stream:
-            writer.write(stream)
+        split_plan.append({
+            "path": output,
+            "start": found[0] - 1,
+            "end": found[1] - 1,
+        })
         outputs[problem_id] = {"path": str(output), "pages": found[1] - found[0]}
+    split_pdf(main_pdf, split_plan)
     return outputs

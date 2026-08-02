@@ -50,6 +50,7 @@
     "!scripts/webui/tailwind.input.css",
     "!scripts/check_clean_install.py",
     "!scripts/check_release.py",
+    "!scripts/audit_python_dependencies.py",
     "probhub/**/*.py"
   ],
   "devDependencies": {

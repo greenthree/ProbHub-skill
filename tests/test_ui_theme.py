@@ -92,7 +92,7 @@ class UiThemeTests(unittest.TestCase):
                 return {"reason": "completed", "returncode": 0}
 
             with (
-                mock.patch("pypdf.PdfReader", return_value=mock.Mock(pages=[object()])),
+                mock.patch.object(self.ui, "bounded_pdf_page_count", return_value=1),
                 mock.patch.object(self.ui, "run_managed_to_files", side_effect=fake_render),
             ):
                 response = self.client.get("/api/pdf-page/QA/0")
@@ -101,6 +101,37 @@ class UiThemeTests(unittest.TestCase):
             response.close()
             self.assertEqual(payload, b"fixture png")
             self.assertFalse((statement / ".preview").exists())
+        finally:
+            self.ui.BASE_DIR = original_base_dir
+            os.chdir(original_cwd)
+            temp.cleanup()
+
+    def test_invalid_pdf_is_bounded_and_preserves_api_shape(self):
+        original_cwd = Path.cwd()
+        original_base_dir = self.ui.BASE_DIR
+        temp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(temp.name)
+            statement = root / "typst-statement" / "QA"
+            statement.mkdir(parents=True)
+            (statement / "main.pdf").write_bytes(b"malformed pdf")
+            os.chdir(root)
+            self.ui.BASE_DIR = "typst-statement"
+            error = self.ui.ProbHubError(
+                "PDF processing timed out",
+                code="pdf_processing_failed",
+            )
+            with mock.patch.object(
+                self.ui,
+                "bounded_pdf_page_count",
+                side_effect=error,
+            ):
+                count = self.client.get("/api/pdf-pages/QA")
+                page = self.client.get("/api/pdf-page/QA/0")
+            self.assertEqual(count.status_code, 200)
+            self.assertEqual(count.get_json(), {"pages": 0})
+            self.assertEqual(page.status_code, 500)
+            self.assertEqual(page.get_data(as_text=True), "Invalid PDF")
         finally:
             self.ui.BASE_DIR = original_base_dir
             os.chdir(original_cwd)

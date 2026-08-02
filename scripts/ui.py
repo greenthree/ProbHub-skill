@@ -36,6 +36,7 @@ LOCAL_JUDGE_SCRIPT = next(
 from probhub.build_lock import workspace_build_lock
 from probhub.building import build_workspace, create_build_plan, create_build_snapshot
 from probhub.errors import ProbHubError
+from probhub.pdf_processing import pdf_page_count as bounded_pdf_page_count
 from probhub.process_control import (
     run_managed_to_files,
     spawn_managed,
@@ -2174,14 +2175,12 @@ def save_contest_config(subtitle):
 @app.route('/api/pdf-pages/<subtitle>')
 def pdf_page_count(subtitle):
     """Return the number of pages in main.pdf."""
-    import pypdf
     preview_path = _preview_pdf_path(subtitle)
     pdf_path = str(preview_path if preview_path.is_file() else Path(secure_path(subtitle, "main.pdf")))
     if not os.path.exists(pdf_path):
         return jsonify({"pages": 0})
     try:
-        reader = pypdf.PdfReader(pdf_path)
-        return jsonify({"pages": len(reader.pages)})
+        return jsonify({"pages": bounded_pdf_page_count(pdf_path)})
     except Exception:
         return jsonify({"pages": 0})
 
@@ -2190,7 +2189,6 @@ def pdf_page_count(subtitle):
 def serve_pdf_page(subtitle, page):
     """Render a single PDF page through Poppler into the process temp cache."""
     from flask import send_file
-    import pypdf
 
     preview_path = _preview_pdf_path(subtitle)
     pdf_path = str(preview_path if preview_path.is_file() else Path(secure_path(subtitle, "main.pdf")))
@@ -2199,8 +2197,7 @@ def serve_pdf_page(subtitle, page):
 
     # Validate page number
     try:
-        reader = pypdf.PdfReader(pdf_path)
-        total = len(reader.pages)
+        total = bounded_pdf_page_count(pdf_path)
         if page < 0 or page >= total:
             return "Page out of range", 404
     except Exception:

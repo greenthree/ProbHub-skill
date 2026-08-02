@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "17 2 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,6 +23,7 @@ env:
 
 jobs:
   quality:
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -119,6 +122,7 @@ jobs:
         run: npm run pack:check
 
   clean-install-e2e:
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -198,3 +202,23 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "TYPST_PACKAGE_CACHE_PATH=$packageCache"
       - name: Run clean npm and Python delivery flow
         run: python scripts/check_clean_install.py --json
+
+  python-dependency-audit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.11"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-audit.txt
+      - name: Audit exact Python runtime dependency closure
+        run: python scripts/audit_python_dependencies.py
