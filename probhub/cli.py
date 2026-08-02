@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .build_lock import workspace_build_lock, workspace_file_lock
+from .builder_fingerprint import compute_builder_fingerprint
 from .building import build_workspace, package_workspace, typeset_workspace
 from .doctor import run_doctor
 from .errors import ProbHubError
@@ -440,6 +441,15 @@ def command_status(args):
     ensure_no_pending_transactions(root, workspace)
     workspace_hash = compute_workspace_hash(root, workspace)
     collection_hash = compute_collection_hash(root, workspace)
+    builder_fingerprint = None
+    builder_fingerprint_error = None
+    try:
+        builder_fingerprint = compute_builder_fingerprint(root, workspace)
+    except ProbHubError as exc:
+        builder_fingerprint_error = {
+            "code": exc.code or "builder_fingerprint_failed",
+            "error": str(exc),
+        }
     result = {}
     for entry in select_entries(workspace, args.problem):
         problem_dir, config = load_problem(root, entry)
@@ -450,6 +460,8 @@ def command_status(args):
             workspace,
             workspace_hash=workspace_hash,
             collection_hash=collection_hash,
+            builder_fingerprint=builder_fingerprint,
+            builder_fingerprint_error=builder_fingerprint_error,
         )
     return {"ok": all(item["state"] == "current" for item in result.values()), "problems": result}
 
@@ -550,6 +562,7 @@ def command_seal(args):
     root, workspace, entry = _single_problem_context(args)
     ensure_no_pending_transactions(root, workspace)
     _ensure_local_gitignore(root)
+    builder_fingerprint = compute_builder_fingerprint(root, workspace)
     lint = lint_workspace(root, workspace, [entry])
     if not lint["ok"]:
         messages = list(lint.get("errors", []))
@@ -623,7 +636,10 @@ def command_seal(args):
         expected_source_hash=source_hash,
         expected_data_hash=data_hash,
     )
-    generation = assemble_exam_generation(root)
+    generation = assemble_exam_generation(
+        root,
+        expected_builder_fingerprint=builder_fingerprint,
+    )
     return {
         "ok": True,
         "checkpoint": checkpoint,

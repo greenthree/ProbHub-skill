@@ -1,8 +1,10 @@
+import os
 import re
 import tempfile
 import uuid
 from pathlib import Path
 
+from .builder_fingerprint import fixed_font_directory, fixed_font_identity
 from .errors import ProbHubError
 from .metadata import (
     normalize_display_name,
@@ -258,13 +260,25 @@ def compile_collection(root, workspace, loaded_problems):
     main_pdf = typst_dir / "main.pdf"
     if not main_typ.is_file():
         raise ProbHubError(f"Typst entry not found: {main_typ}")
+    # Verify the packaged font immediately before passing its only directory to Typst.
+    fixed_font_identity()
     compile_main, generated = _configured_typst_sources(root, workspace, main_typ)
     try:
-        command = ["typst", "compile", "--root", "."]
+        command = [
+            "typst",
+            "compile",
+            "--root",
+            ".",
+            "--font-path",
+            str(fixed_font_directory()),
+            "--ignore-system-fonts",
+        ]
         creation_timestamp = typst.get("creation_timestamp")
         if creation_timestamp is not None:
             command.extend(["--creation-timestamp", str(int(creation_timestamp))])
         command.extend([str(compile_main.relative_to(root)), str(main_pdf.relative_to(root))])
+        environment = os.environ.copy()
+        environment.pop("TYPST_FONT_PATHS", None)
         with tempfile.TemporaryDirectory(prefix="probhub-typst-") as temp:
             stdout_path = Path(temp) / "stdout"
             stderr_path = Path(temp) / "stderr"
@@ -277,6 +291,7 @@ def compile_collection(root, workspace, loaded_problems):
                 output_limit_bytes=TYPST_OUTPUT_LIMIT_BYTES,
                 process_limit=32,
                 cwd=root,
+                env=environment,
             )
             if result["reason"] != "completed" or result["returncode"] != 0:
                 detail = stderr_path.read_text(encoding="utf-8", errors="replace")

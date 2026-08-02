@@ -12,6 +12,11 @@ import yaml
 
 from . import __version__
 from .build_lock import workspace_file_lock, workspace_generation_lock
+from .builder_fingerprint import (
+    GENERATION_SCHEMA_VERSION,
+    builder_fingerprint_stale_fields,
+    compute_builder_fingerprint,
+)
 from .errors import ProbHubError
 from .hashing import hash_file
 from .io import atomic_write_json, read_yaml, write_yaml
@@ -21,7 +26,6 @@ from .workspace import WORKSPACE_FILE, load_problem, load_workspace, problem_ent
 
 
 CHECKPOINT_SCHEMA_VERSION = 1
-GENERATION_SCHEMA_VERSION = 2
 CHECKPOINTS_DIR = Path(".probhub/checkpoints")
 CHECKPOINT_TMP_DIR = Path(".probhub/checkpoint-tmp")
 GENERATIONS_DIR = Path(".probhub/generations")
@@ -518,7 +522,7 @@ def _generation_result(root, manifest, cached):
     }
 
 
-def _read_generation_manifest(generation_dir):
+def _read_generation_manifest(generation_dir, *, require_current_schema=True):
     generation_dir = Path(generation_dir)
     manifest = _read_json_object(
         generation_dir / "manifest.json",
@@ -527,8 +531,7 @@ def _read_generation_manifest(generation_dir):
     )
     main_pdf = generation_dir / "main.pdf"
     valid = (
-        manifest.get("schema_version") == GENERATION_SCHEMA_VERSION
-        and manifest.get("generation_id") == generation_dir.name
+        manifest.get("generation_id") == generation_dir.name
         and manifest.get("main_pdf_hash") == hash_file(main_pdf)
     )
     problems = manifest.get("problems")
@@ -557,13 +560,55 @@ def _read_generation_manifest(generation_dir):
             f"generation artifact hash mismatch: {generation_dir}",
             code="generation_invalid",
         )
+    if require_current_schema and (
+        manifest.get("schema_version") != GENERATION_SCHEMA_VERSION
+        or not isinstance(manifest.get("builder_fingerprint"), dict)
+    ):
+        raise ProbHubError(
+            f"generation identity is stale: {generation_dir}",
+            code="generation_stale",
+        )
     return manifest
 
 
-def assemble_exam_generation(root, workspace=None):
+def _assert_builder_fingerprint(expected, current):
+    changed = builder_fingerprint_stale_fields(expected, current)
+    if changed:
+        raise ProbHubError(
+            "builder identity changed during generation: " + ", ".join(changed),
+            code="builder_changed",
+        )
+
+
+def _recheck_builder_fingerprint(root, workspace, expected):
+    try:
+        current = compute_builder_fingerprint(root, workspace)
+    except Exception as exc:
+        raise ProbHubError(
+            f"builder identity changed during generation: {exc}",
+            code="builder_changed",
+        ) from exc
+    _assert_builder_fingerprint(expected, current)
+    return current
+
+
+def assemble_exam_generation(
+    root,
+    workspace=None,
+    *,
+    expected_builder_fingerprint=None,
+):
     root = Path(root).resolve()
     with workspace_generation_lock(root):
         _, workspace = load_workspace(root) if workspace is None else (root, workspace)
+        if expected_builder_fingerprint is None:
+            builder_fingerprint = compute_builder_fingerprint(root, workspace)
+        else:
+            builder_fingerprint = _recheck_builder_fingerprint(
+                root,
+                workspace,
+                expected_builder_fingerprint,
+            )
         entries = problem_entries(workspace)
         checkpoints = {}
         placeholder_reasons = {}
@@ -594,7 +639,7 @@ def assemble_exam_generation(root, workspace=None):
         generation_id = _digest_json({
             "schema_version": GENERATION_SCHEMA_VERSION,
             "workspace_hash": live_workspace_hash,
-            "probhub_version": __version__,
+            "builder_fingerprint": builder_fingerprint,
             "revisions": [
                 {
                     "problem_id": item["problem_id"],
@@ -611,6 +656,11 @@ def assemble_exam_generation(root, workspace=None):
             except ProbHubError:
                 manifest = None
             if manifest is not None:
+                _recheck_builder_fingerprint(
+                    root,
+                    load_workspace(root)[1],
+                    builder_fingerprint,
+                )
                 atomic_write_json(
                     root / GENERATIONS_DIR / "current.json",
                     {"generation_id": generation_id, "updated_at": _now()},
@@ -656,6 +706,11 @@ def assemble_exam_generation(root, workspace=None):
                     "workspace or Typst inputs changed while creating exam generation",
                     code="inputs_changed",
                 )
+            _recheck_builder_fingerprint(
+                snapshot_root,
+                snapshot_workspace,
+                builder_fingerprint,
+            )
 
             loaded = [load_problem(snapshot_root, entry) for entry in entries]
             _, main_pdf, _ = compile_collection(
@@ -693,6 +748,7 @@ def assemble_exam_generation(root, workspace=None):
                 ],
                 "all_sealed": all_sealed,
                 "workspace_hash": snapshot_workspace_hash,
+                "builder_fingerprint": builder_fingerprint,
                 "main_pdf_hash": hash_file(stage / "main.pdf"),
                 "created_at": _now(),
                 "probhub_version": __version__,
@@ -709,6 +765,11 @@ def assemble_exam_generation(root, workspace=None):
                 ],
             }
             atomic_write_json(stage / "manifest.json", manifest)
+            _recheck_builder_fingerprint(
+                root,
+                load_workspace(root)[1],
+                builder_fingerprint,
+            )
             generation_dir.parent.mkdir(parents=True, exist_ok=True)
             if generation_dir.exists():
                 # Reuse an existing directory only after validating it; a
@@ -757,14 +818,48 @@ def generation_status(root):
             "generation_id": generation_id,
         }
     try:
-        manifest = _read_generation_manifest(generation_dir)
-        valid = True
+        manifest = _read_generation_manifest(
+            generation_dir,
+            require_current_schema=False,
+        )
     except ProbHubError:
         manifest = None
-        valid = False
+    stale = []
+    builder_fingerprint_error = None
+    if manifest is not None:
+        if manifest.get("schema_version") != GENERATION_SCHEMA_VERSION:
+            stale.append("generation_schema")
+        elif not isinstance(manifest.get("builder_fingerprint"), dict):
+            stale.append("builder_fingerprint")
+        else:
+            try:
+                _, workspace = load_workspace(root)
+                current_builder = compute_builder_fingerprint(root, workspace)
+            except ProbHubError as exc:
+                stale.append("builder_fingerprint.unavailable")
+                builder_fingerprint_error = {
+                    "code": exc.code or "builder_fingerprint_failed",
+                    "error": str(exc),
+                }
+            else:
+                stale.extend(builder_fingerprint_stale_fields(
+                    manifest["builder_fingerprint"],
+                    current_builder,
+                ))
+    valid = manifest is not None and not stale
     return {
         "ok": valid,
-        "state": manifest.get("state") if valid else "invalid",
+        "state": (
+            manifest.get("state")
+            if valid
+            else ("stale" if manifest is not None and stale else "invalid")
+        ),
+        **({"stale_fields": stale} if manifest is not None and stale else {}),
+        **(
+            {"builder_fingerprint_error": builder_fingerprint_error}
+            if builder_fingerprint_error is not None
+            else {}
+        ),
         "generation_id": generation_id,
         "path": str(generation_dir),
         "main_pdf": str(main_pdf),

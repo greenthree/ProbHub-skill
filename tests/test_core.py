@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from probhub.cli import build_parser, main as cli_main
+from probhub.builder_fingerprint import GENERATION_SCHEMA_VERSION
 from probhub.errors import ProbHubError
 from probhub.hashing import hash_file
 from probhub.io import read_yaml, write_json, write_yaml
@@ -295,6 +296,7 @@ class CoreWorkspaceTests(unittest.TestCase):
                 "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
                 "batch_id": "fixture-batch",
                 "sealed_revision_id": "fixture-revision",
+                "builder_fingerprint": {"fixture": True},
                 "source_hash": compute_source_hash(problem, config),
                 "data_hash": compute_data_hash(problem, config),
                 "pdf_hash": hash_file(problem / "problem.pdf"),
@@ -303,7 +305,7 @@ class CoreWorkspaceTests(unittest.TestCase):
             write_json(problem / ".probhub/build-manifest.json", manifest)
             self.assertEqual(problem_status(problem, config)["state"], "current")
 
-            manifest["schema_version"] = 1
+            manifest["schema_version"] = BUILD_MANIFEST_SCHEMA_VERSION - 1
             write_json(problem / ".probhub/build-manifest.json", manifest)
             status = problem_status(problem, config)
             self.assertEqual(status["state"], "stale")
@@ -332,6 +334,61 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertEqual(status["state"], "stale")
             self.assertIn("source_hash", status["stale_fields"])
 
+    def test_status_reports_builder_field_change_and_unavailable_probe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            _, config = load_problem(root, {"id": "A", "directory": "A"})
+            (problem / "problem.pdf").write_bytes(b"%PDF-1.4\n")
+            (root / "A.zip").write_bytes(b"zip")
+            recorded = {
+                "schema_version": 1,
+                "probhub_version": "0.6.2",
+                "build_manifest_schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
+                "generation_schema_version": GENERATION_SCHEMA_VERSION,
+                "typst_version": "0.14.2",
+                "pypdf_version": "6.14.2",
+                "template_hash": "template",
+                "font": {
+                    "family": "Noto",
+                    "policy": "bundled",
+                    "sha256": "font",
+                },
+                "digest": "before",
+            }
+            write_json(problem / ".probhub/build-manifest.json", {
+                "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
+                "batch_id": "fixture-batch",
+                "sealed_revision_id": "fixture-revision",
+                "builder_fingerprint": recorded,
+                "source_hash": compute_source_hash(problem, config),
+                "data_hash": compute_data_hash(problem, config),
+                "pdf_hash": hash_file(problem / "problem.pdf"),
+                "package_hash": hash_file(root / "A.zip"),
+            })
+
+            current = {**recorded, "typst_version": "0.14.3", "digest": "after"}
+            status = problem_status(problem, config, builder_fingerprint=current)
+            self.assertEqual(status["state"], "stale")
+            self.assertEqual(
+                status["stale_fields"],
+                ["builder_fingerprint.typst_version"],
+            )
+
+            status = problem_status(
+                problem,
+                config,
+                builder_fingerprint_error={
+                    "code": "builder_fingerprint_failed",
+                    "error": "typst was not found",
+                },
+            )
+            self.assertEqual(status["state"], "stale")
+            self.assertEqual(
+                status["stale_fields"],
+                ["builder_fingerprint.unavailable"],
+            )
+
     def test_source_hash_and_status_track_code_headers(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -349,6 +406,7 @@ class CoreWorkspaceTests(unittest.TestCase):
                 "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
                 "batch_id": "fixture-batch",
                 "sealed_revision_id": "fixture-revision",
+                "builder_fingerprint": {"fixture": True},
                 "source_hash": first_source_hash,
                 "data_hash": compute_data_hash(problem, config),
                 "pdf_hash": hash_file(problem / "problem.pdf"),
@@ -540,6 +598,25 @@ class CoreWorkspaceTests(unittest.TestCase):
         with (
             patch("probhub.doctor.shutil.which", return_value="/fake/tool"),
             patch(
+                "probhub.doctor.builder_toolchain_status",
+                return_value={
+                    "typst": {
+                        "ok": True,
+                        "path": "/fake/typst",
+                        "version": "0.14.2",
+                        "diagnostic": None,
+                    },
+                    "font": {
+                        "ok": True,
+                        "family": "Noto Sans CJK SC",
+                        "policy": "bundled-only-v1",
+                        "sha256": "font",
+                        "diagnostic": None,
+                    },
+                    "pypdf_version": "6.14.2",
+                },
+            ),
+            patch(
                 "probhub.doctor.run_managed_to_files",
                 return_value={
                     "reason": "time_limit",
@@ -592,12 +669,22 @@ class CoreWorkspaceTests(unittest.TestCase):
         with (
             patch("probhub.doctor._command_version", side_effect=command_version),
             patch(
-                "probhub.doctor._command_probe",
+                "probhub.doctor.builder_toolchain_status",
                 return_value={
-                    "ok": True,
-                    "path": "/fake/typst",
-                    "lines": ["DejaVu Sans Mono"],
-                    "diagnostic": None,
+                    "typst": {
+                        "ok": True,
+                        "path": "/fake/typst",
+                        "version": "0.14.2",
+                        "diagnostic": None,
+                    },
+                    "font": {
+                        "ok": False,
+                        "family": "Noto Sans CJK SC",
+                        "policy": "bundled-only-v1",
+                        "sha256": "font",
+                        "diagnostic": "bundled font is missing",
+                    },
+                    "pypdf_version": "6.14.2",
                 },
             ),
         ):

@@ -383,7 +383,11 @@ class TransactionSafetyTests(unittest.TestCase):
                 expected_source_hash=compute_source_hash(problem, config),
                 expected_data_hash=compute_data_hash(problem, config),
             )
-            plan = create_build_plan(root, workspace, [entry])
+            with patch(
+                "probhub.building.compute_builder_fingerprint",
+                return_value={"digest": "fixture-builder"},
+            ):
+                plan = create_build_plan(root, workspace, [entry])
             bound = require_collection_sealed(plan)
 
             create_problem_checkpoint(

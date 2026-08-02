@@ -41,6 +41,9 @@ class TypesettingConfigTests(unittest.TestCase):
             }
 
             def fake_run(command, **kwargs):
+                self.assertIn("--ignore-system-fonts", command)
+                self.assertIn("--font-path", command)
+                self.assertNotIn("TYPST_FONT_PATHS", kwargs["env"])
                 compiled = root / command[-2]
                 text = compiled.read_text(encoding="utf-8")
                 self.assertIn('title: "New"', text)

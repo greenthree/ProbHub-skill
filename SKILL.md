@@ -122,7 +122,7 @@ probhub seal L01 --no-cache --seed 12345
 probhub build L01 L02 L03 --no-cache
 ```
 
-一次多题 `build` 只编译一次完整 Typst 集合，再分别提取、打包和更新所选题目。Core 会持有跨平台 OS 写锁，先统一恢复 build/gen/fixate 的 pending transaction，再要求整场所有题目的最新 sealed revision 与 live source/data 一致，并在临时快照中完成全部准备和 ZIP 验证；缺失或过期 seal 返回 `sealed_revision_required`，发布前 revision 变化返回 `sealed_revision_changed`，输入变化返回 `inputs_changed`，并发 writer 返回 `build_busy`。只读命令在事务待恢复时返回 `recovery_required`。Manifest v3 为所有所选题目记录同一 `batch_id` 和各自 `sealed_revision_id`。不要让多个 Agent 依次运行单题正式 `build`。
+一次多题 `build` 只编译一次完整 Typst 集合，再分别提取、打包和更新所选题目。Core 会持有跨平台 OS 写锁，先统一恢复 build/gen/fixate 的 pending transaction，再要求整场所有题目的最新 sealed revision 与 live source/data 一致，并在临时快照中完成全部准备和 ZIP 验证；缺失或过期 seal 返回 `sealed_revision_required`，发布前 revision 变化返回 `sealed_revision_changed`，输入变化返回 `inputs_changed`，构建器身份变化返回 `builder_changed`，并发 writer 返回 `build_busy`。只读命令在事务待恢复时返回 `recovery_required`。Manifest v4 为所有所选题目记录同一 `batch_id`、各自 `sealed_revision_id` 与同一份 `builder_fingerprint`。不要让多个 Agent 依次运行单题正式 `build`。
 
 沙箱默认复用内容寻址缓存。需要忽略旧结果、完整重跑并刷新缓存时使用：
 

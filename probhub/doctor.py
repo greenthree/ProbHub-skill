@@ -8,6 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .builder_fingerprint import builder_toolchain_status
 from .process_control import run_managed_to_files
 
 
@@ -127,26 +128,29 @@ def run_doctor():
     })
     node["ok"] = node["ok"] and node["version_ok"]
 
-    typst = _command_version("typst")
+    builder_toolchain = builder_toolchain_status()
+    typst_probe = builder_toolchain["typst"]
+    typst = {
+        "ok": typst_probe["ok"],
+        "path": typst_probe["path"],
+        "version": (
+            f"typst {typst_probe['version']}"
+            if typst_probe["version"] is not None
+            else (typst_probe["diagnostic"] or "unknown")
+        ),
+    }
     typst_version = _version_tuple(typst["version"], prefix="typst ")
     typst_version_ok = typst_version == (0, 14, 2)
-    font_probe = _command_probe("typst", ("fonts",)) if typst["ok"] else {
-        "ok": False,
-        "lines": [],
-        "diagnostic": typst.get("version"),
-    }
-    required_font = "Noto Sans CJK SC"
-    font_ok = font_probe["ok"] and any(
-        line.strip() == required_font for line in font_probe["lines"]
-    )
+    font = builder_toolchain["font"]
+    font_ok = font["ok"]
     typst.update({
         "requirement": "0.14.2",
         "version_ok": typst_version_ok,
-        "required_font": required_font,
+        "required_font": font["family"],
+        "font_policy": font["policy"],
+        "font_sha256": font["sha256"],
         "font_ok": font_ok,
-        "font_diagnostic": None if font_ok else (
-            font_probe.get("diagnostic") or f"{required_font} was not found by `typst fonts`"
-        ),
+        "font_diagnostic": font["diagnostic"],
     })
     typst["ok"] = typst["ok"] and typst_version_ok and font_ok
 
@@ -166,6 +170,9 @@ def run_doctor():
         name: importlib.util.find_spec(name) is not None
         for name in ("flask", "yaml", "pypdf")
     }
+    modules["pypdf"] = modules["pypdf"] and bool(
+        builder_toolchain["pypdf_version"]
+    )
     distributions = {"flask": "Flask", "yaml": "PyYAML", "pypdf": "pypdf"}
     module_versions = {}
     for name, distribution in distributions.items():
@@ -173,7 +180,11 @@ def run_doctor():
             module_versions[name] = None
             continue
         try:
-            module_versions[name] = importlib_metadata.version(distribution)
+            module_versions[name] = (
+                builder_toolchain["pypdf_version"]
+                if name == "pypdf"
+                else importlib_metadata.version(distribution)
+            )
         except importlib_metadata.PackageNotFoundError:
             module_versions[name] = "unknown"
     return {

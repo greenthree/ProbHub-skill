@@ -13,8 +13,11 @@ def hash_file(path):
     return digest.hexdigest()
 
 
-def hash_paths(root, paths):
+def hash_paths(root, paths, *, normalize_lf_suffixes=()):
     root = Path(root)
+    normalize_lf_suffixes = {
+        str(suffix).lower() for suffix in normalize_lf_suffixes
+    }
     digest = hashlib.sha256()
     existing = []
     for path in sorted({Path(p) for p in paths}, key=lambda p: p.as_posix()):
@@ -23,6 +26,8 @@ def hash_paths(root, paths):
             continue
         rel = full.relative_to(root).as_posix().encode("utf-8")
         content = full.read_bytes()
+        if full.suffix.lower() in normalize_lf_suffixes:
+            content = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         digest.update(len(rel).to_bytes(4, "big"))
         digest.update(rel)
         digest.update(len(content).to_bytes(8, "big"))

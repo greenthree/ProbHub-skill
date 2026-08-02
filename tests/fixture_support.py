@@ -104,6 +104,7 @@ def publish_current_status_artifacts(fixture):
         "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
         "batch_id": "fixture-batch",
         "sealed_revision_id": "fixture-revision",
+        "builder_fingerprint": {"fixture": True},
         "source_hash": compute_source_hash(fixture.problem, config),
         "data_hash": compute_data_hash(fixture.problem, config),
         "pdf_hash": hash_file(pdf),
