@@ -1,14 +1,19 @@
 const { spawnSync } = require('child_process');
 
 const MODULE_BOOTSTRAP = [
-    'import runpy, sys',
+    'import runpy, site, sys',
     'root = sys.argv.pop(1)',
     'module = sys.argv.pop(1)',
     "stdout = getattr(sys, 'stdout', None)",
     "stderr = getattr(sys, 'stderr', None)",
     "getattr(stdout, 'reconfigure', lambda **kwargs: None)(encoding='utf-8', errors='backslashreplace')",
     "getattr(stderr, 'reconfigure', lambda **kwargs: None)(encoding='utf-8', errors='backslashreplace')",
-    "sys.path[:] = [root] + [entry for entry in sys.path if entry not in ('', root)]",
+    "inside_venv = bool(getattr(sys, 'real_prefix', None) or sys.prefix != getattr(sys, 'base_prefix', sys.prefix))",
+    'user_sites = [] if inside_venv else site.getusersitepackages()',
+    'user_sites = [user_sites] if isinstance(user_sites, str) else list(user_sites)',
+    "base_paths = [entry for entry in sys.path if entry not in ('', root) and entry not in user_sites]",
+    "package_index = next((index for index, entry in enumerate(base_paths) if entry.replace('\\\\', '/').lower().endswith(('/site-packages', '/dist-packages'))), len(base_paths))",
+    "sys.path[:] = [root] + base_paths[:package_index] + [entry for entry in user_sites if entry and entry != root] + base_paths[package_index:]",
     "runpy.run_module(module, run_name='__main__', alter_sys=True)",
 ].join('; ');
 

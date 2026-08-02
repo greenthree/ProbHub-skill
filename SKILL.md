@@ -43,6 +43,8 @@ description: 当用户需要创作或维护算法竞赛题目、选择快速/普
 
 # 3. CLI 操作规则
 
+安装、升级、排查 `doctor` / WebUI 启动问题，或准备 GitHub Release 安装说明时，先读取 `references/installation.md`。不得推荐虚拟环境、遗漏 Node.js/Python 版本要求，或在系统 Python 路径中省略显式允许开关。
+
 ## 3.1 入口和工作区定位
 
 在工作区根目录或其任意子目录中运行：

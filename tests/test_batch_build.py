@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from probhub.build_lock import workspace_build_lock
+from probhub.build_lock import workspace_build_lock, workspace_file_lock
 from probhub.builder_fingerprint import (
     GENERATION_SCHEMA_VERSION,
     compute_typst_template_hash,
@@ -1139,6 +1139,18 @@ class BatchBuildTests(unittest.TestCase):
 
             with workspace_build_lock(root):
                 pass
+
+    def test_empty_lock_file_is_initialized_only_after_acquisition(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lock = root / ".probhub/test.lock"
+
+            def assert_empty_before_acquire(_stream):
+                self.assertEqual(lock.stat().st_size, 0)
+
+            with patch("probhub.build_lock._acquire", side_effect=assert_empty_before_acquire):
+                with workspace_file_lock(root, ".probhub/test.lock"):
+                    self.assertEqual(lock.stat().st_size, 1)
 
     def test_windows_locked_artifact_is_reported_before_publish(self):
         with tempfile.TemporaryDirectory() as temp:

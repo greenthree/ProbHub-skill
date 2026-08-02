@@ -32,7 +32,7 @@ ProbHub 会在这条流程中提供：
 
 ### 1. 安装 Skill
 
-安装前请确认已安装 Node.js 18 或更高版本（包含 npm），以及 Python 3.10 或更高版本。安装 Skill 时会把 Flask、PyYAML 和 pypdf 等依赖安装到当前 `python` 指向的环境；下面的命令显式允许这次安装。
+安装前请确认已安装 Node.js 18 或更高版本（包含 npm），以及 Python 3.10 或更高版本。Ubuntu 的系统 Python 还需安装 `python3-pip`。安装 Skill 时会把 Flask、PyYAML 和 pypdf 等固定版本依赖安装到当前 Python 的用户依赖目录；下面的命令显式允许这次安装。
 
 Windows PowerShell：
 
@@ -53,6 +53,8 @@ probhub doctor
 
 `probhub doctor` 会列出 Python、Node.js、npm、`g++`、Typst、字体和 Python 依赖的实际状态。先修复其中的错误，再继续创建题目。
 
+`PROBHUB_ALLOW_SYSTEM_PYTHON=1` 只表示你同意本次安装写入当前 Python 的用户依赖目录；不会覆盖 Ubuntu 由系统包管理器维护的 Python 包。PowerShell 中的设置只在当前终端会话生效，它也不会关闭 ProbHub 的资源限制。
+
 `probhub-skill` 还会把 Agent Skill 安装到：
 
 ```text
@@ -60,7 +62,23 @@ probhub doctor
 ~/.agents/skills/probhub
 ```
 
-只想临时安装 Skill 时可以运行 `npx probhub-skill`；只想安装到当前项目时使用 `npx probhub-skill --local`。
+<details>
+<summary>临时运行或只安装到当前项目</summary>
+
+不全局安装 npm 包时，同样需要显式允许写入当前 Python：
+
+```powershell
+$env:PROBHUB_ALLOW_SYSTEM_PYTHON = "1"
+npx probhub-skill
+```
+
+```bash
+PROBHUB_ALLOW_SYSTEM_PYTHON=1 npx probhub-skill
+```
+
+只安装到当前项目的 Agent Skill 目录时，在命令末尾增加 `--local`。
+
+</details>
 
 ### 2. 调用 Agent
 
@@ -117,7 +135,7 @@ Ubuntu 可以安装编译器：
 
 ```bash
 sudo apt update
-sudo apt install -y g++
+sudo apt install -y g++ python3-pip
 ```
 
 Typst 请使用上方链接中的 0.14.2 固定版本。Noto Sans CJK SC 已随 npm 主包发布，正式编译会校验字体字节并忽略系统字体，无需单独下载安装。
@@ -267,7 +285,7 @@ npx probhub --version
 - `g++` 或 Typst 不在 `PATH`；
 - Typst 不是 0.14.2；
 - npm 包内的固定字体缺失或校验失败，可重新安装 `probhub`；
-- Python 依赖没有安装，可重新运行 `probhub-skill`。
+- Python 依赖没有安装，可按“快速开始”使用带 `PROBHUB_ALLOW_SYSTEM_PYTHON=1` 的同一条 `probhub-skill` 命令重新安装。
 
 ### WebUI 打不开
 

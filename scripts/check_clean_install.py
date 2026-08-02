@@ -19,6 +19,14 @@ from check_release import (
 )
 
 
+WINDOWS_NODE_CHILD_LAUNCHER = (
+    "const {spawnSync}=require('child_process');"
+    "const child=spawnSync(process.argv[1],process.argv.slice(2),{stdio:'inherit'});"
+    "if(child.error){console.error(child.error.message);process.exit(1);}"
+    "process.exit(child.status===null?1:child.status);"
+)
+
+
 class CleanInstallError(RuntimeError):
     pass
 
@@ -72,6 +80,11 @@ def _venv_python(venv):
     return Path(venv) / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
+def _base_python():
+    candidate = Path(getattr(sys, "_base_executable", "") or sys.executable)
+    return candidate if candidate.is_file() else Path(sys.executable)
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -116,9 +129,20 @@ def run_clean_install():
         venv = root / "python venv"
         home = root / "isolated home"
         compat_home = root / "compat isolated home"
+        documented_project = root / "documented PowerShell project"
+        documented_workspace = documented_project / "赛事 工作区"
+        documented_user_base = root / "documented Python user base"
         project = root / "含空格的项目"
         workspace = project / "赛事 工作区"
-        for directory in (dist, prefix, home, compat_home, project):
+        for directory in (
+            dist,
+            prefix,
+            home,
+            compat_home,
+            documented_project,
+            documented_user_base,
+            project,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
 
         inventories = validate_pack_inventories(dry_run=False, destination=dist)
@@ -140,7 +164,78 @@ def run_clean_install():
         if not (installed_main / "bin/python.js").is_file():
             raise CleanInstallError("installed probhub package was not the locally packed release candidate")
 
-        _run([sys.executable, "-m", "venv", venv], cwd=root, timeout=300)
+        base_env = os.environ.copy()
+        base_env.pop("PYTHONPATH", None)
+        if not base_env.get("TYPST_PACKAGE_CACHE_PATH"):
+            if os.name == "nt" and base_env.get("LOCALAPPDATA"):
+                package_cache = Path(base_env["LOCALAPPDATA"]) / "typst/packages"
+            else:
+                cache_home = Path(base_env.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+                package_cache = cache_home / "typst/packages"
+            base_env["TYPST_PACKAGE_CACHE_PATH"] = str(package_cache)
+
+        probhub = _bin_path(prefix, "probhub")
+        probhub_skill = _bin_path(prefix, "probhub-skill")
+        base_python = _base_python()
+        documented_env = base_env.copy()
+        documented_env.update({
+            "PYTHON": str(base_python),
+            "PYTHONUSERBASE": str(documented_user_base),
+            "PROBHUB_ALLOW_SYSTEM_PYTHON": "1",
+        })
+        if os.name == "nt":
+            powershell = shutil.which("pwsh") or shutil.which("powershell")
+            if not powershell:
+                raise CleanInstallError("PowerShell is required for the documented Windows install smoke")
+            quoted_entry = str(probhub_skill).replace("'", "''")
+            _run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    f"$env:PROBHUB_ALLOW_SYSTEM_PYTHON = '1'; & '{quoted_entry}' --local",
+                ],
+                cwd=documented_project,
+                env=documented_env,
+            )
+        else:
+            _run([probhub_skill, "--local"], cwd=documented_project, env=documented_env)
+        for agent_dir in (
+            documented_project / ".claude/skills/probhub",
+            documented_project / ".agents/skills/probhub",
+        ):
+            marker = agent_dir / ".probhub-version.json"
+            if not marker.is_file() or json.loads(marker.read_text(encoding="utf-8"))["version"] != metadata["version"]:
+                raise CleanInstallError(f"documented Skill installation is incomplete: {agent_dir}")
+        _run_json([probhub, "--json", "doctor"], cwd=documented_project, env=documented_env)
+        _run_json(
+            [
+                probhub,
+                "--json",
+                "init",
+                documented_workspace,
+                "--title",
+                "Documented Install",
+                "--subtitle",
+                "正式赛",
+                "--author",
+                "ProbHub CI",
+            ],
+            cwd=documented_project,
+            env=documented_env,
+        )
+        _run_json(
+            [probhub, "--workspace", documented_workspace, "--json", "ui", "--check"],
+            cwd=documented_project,
+            env=documented_env,
+        )
+
+        venv_command = [base_python, "-m", "venv", venv]
+        if os.name == "nt":
+            venv_command = [node, "-e", WINDOWS_NODE_CHILD_LAUNCHER, *venv_command]
+        _run(venv_command, cwd=root, timeout=300)
         python = _venv_python(venv)
         missing_before = _run(
             [
@@ -155,15 +250,7 @@ def run_clean_install():
         if not all(json.loads(missing_before).values()):
             raise CleanInstallError("fresh venv unexpectedly contains ProbHub runtime dependencies")
 
-        env = os.environ.copy()
-        env.pop("PYTHONPATH", None)
-        if not env.get("TYPST_PACKAGE_CACHE_PATH"):
-            if os.name == "nt" and env.get("LOCALAPPDATA"):
-                package_cache = Path(env["LOCALAPPDATA"]) / "typst/packages"
-            else:
-                cache_home = Path(env.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
-                package_cache = cache_home / "typst/packages"
-            env["TYPST_PACKAGE_CACHE_PATH"] = str(package_cache)
+        env = base_env.copy()
         env["PYTHON"] = str(python)
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
@@ -176,9 +263,6 @@ def run_clean_install():
         for shadow_name in ("probhub.py", "runpy.py", "sitecustomize.py"):
             (project / shadow_name).write_text(shadow_payload, encoding="utf-8")
         env["PROBHUB_SHADOW_SENTINEL"] = str(shadow_sentinel)
-        probhub = _bin_path(prefix, "probhub")
-        _bin_path(prefix, "probhub-skill")
-
         version = _run([probhub, "--version"], cwd=project, env=env).strip()
         if version != metadata["version"]:
             raise CleanInstallError(f"installed CLI version mismatch: {version}")
@@ -298,6 +382,7 @@ def run_clean_install():
             "ok": True,
             "version": metadata["version"],
             "packages": inventories,
+            "documented_install": ["skill-install", "doctor", "ui-check"],
             "workflow": ["doctor", "init", "ui-check", "new", "gen", "judge", "seal", "build", "status", "verify-package"],
             "rebuild_equivalent": True,
         }
