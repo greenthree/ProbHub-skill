@@ -279,6 +279,18 @@ class ProcessControlTests(unittest.TestCase):
                 stderr=subprocess.DEVNULL,
             )
 
+    def test_unix_memory_limit_helper_is_passed_inline(self):
+        command = process_control._unix_memory_limited_command(
+            ["/bin/true"],
+            256 * 1024 * 1024,
+            17,
+            True,
+        )
+        self.assertEqual(command[:4], [sys.executable, "-I", "-S", "-c"])
+        self.assertEqual(command[4], process_control.UNIX_EXEC_HELPER_CODE)
+        self.assertNotIn("_unix_exec.py", command)
+        self.assertEqual(command[-2:], ["--", "/bin/true"])
+
     @mock.patch.object(process_control.platform, "system", return_value="Linux")
     @mock.patch.object(process_control.os, "pipe")
     def test_invalid_unix_memory_limited_command_does_not_open_status_pipe(
@@ -321,6 +333,20 @@ class ProcessControlTests(unittest.TestCase):
         self.assertEqual(managed.proc.returncode, 0, stderr)
         self.assertEqual(int(stdout.strip()), limit_mb * 1024 * 1024)
 
+    @unittest.skipIf(platform.system() == "Windows", "Unix exec helper only")
+    def test_unix_exec_status_fd_closes_before_target_exits(self):
+        managed = process_control.spawn_managed(
+            [sys.executable, "-c", "import time; time.sleep(2)"],
+            memory_limit_mb=256,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.assertIsNone(managed.proc.poll())
+        finally:
+            managed.terminate()
+            managed.close()
+
     @unittest.skipUnless(Path("/proc/self/status").is_file(), "Linux proc status only")
     def test_unix_exec_helper_restores_popen_signal_defaults(self):
         managed = process_control.spawn_managed(
@@ -340,6 +366,54 @@ class ProcessControlTests(unittest.TestCase):
             signum = getattr(signal, name, None)
             if signum is not None:
                 self.assertEqual(ignored & (1 << (signum - 1)), 0, name)
+
+    @unittest.skipUnless(Path("/proc/self/status").is_file(), "Linux proc status only")
+    def test_unix_exec_helper_can_preserve_ignored_signals(self):
+        managed = process_control.spawn_managed(
+            ["/bin/sh", "-c", "grep '^SigIgn:' /proc/self/status"],
+            memory_limit_mb=256,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            restore_signals=False,
+        )
+        try:
+            stdout, stderr = managed.proc.communicate(timeout=10)
+        finally:
+            managed.close()
+        self.assertEqual(managed.proc.returncode, 0, stderr)
+        ignored = int(stdout.split()[-1], 16)
+        sigpipe = getattr(signal, "SIGPIPE", None)
+        if sigpipe is not None:
+            self.assertNotEqual(ignored & (1 << (sigpipe - 1)), 0)
+
+    @unittest.skipIf(platform.system() == "Windows", "Unix pass_fds only")
+    def test_unix_exec_helper_preserves_caller_pass_fds(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            managed = process_control.spawn_managed(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import os; os.write({write_fd}, b'caller-fd')",
+                ],
+                memory_limit_mb=256,
+                pass_fds=(write_fd,),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            os.close(write_fd)
+            write_fd = None
+            try:
+                _, stderr = managed.proc.communicate(timeout=10)
+            finally:
+                managed.close()
+            self.assertEqual(managed.proc.returncode, 0, stderr)
+            self.assertEqual(os.read(read_fd, 64), b"caller-fd")
+        finally:
+            os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
 
     @unittest.skipIf(platform.system() == "Windows", "Unix selector only")
     def test_unix_exec_status_supports_high_numbered_fd(self):

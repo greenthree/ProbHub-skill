@@ -100,6 +100,31 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)["ok"])
 
+    def test_npm_pack_json_accepts_legacy_and_current_single_package_shapes(self):
+        from scripts import check_release
+
+        manifest = {"name": "probhub", "files": [{"path": "package.json"}]}
+        command = ["npm", "pack", "--json"]
+        self.assertEqual(
+            check_release._parse_npm_json(json.dumps([manifest]), command),
+            manifest,
+        )
+        self.assertEqual(
+            check_release._parse_npm_json(
+                json.dumps({"probhub": manifest}),
+                command,
+            ),
+            manifest,
+        )
+
+        for payload in ([], {}, {"probhub": []}, {"one": manifest, "two": manifest}):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(
+                    check_release.ReleaseCheckError,
+                    "unexpected npm pack response",
+                ):
+                    check_release._parse_npm_json(json.dumps(payload), command)
+
     def test_publish_release_gate_requires_matching_tag_and_clean_worktree(self):
         from scripts import check_release
 

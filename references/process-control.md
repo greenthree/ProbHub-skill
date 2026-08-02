@@ -87,11 +87,11 @@ Windows 虚拟环境的 `python.exe` 可能是一个重定向启动器，尤其�
 Linux/Unix 使用：
 
 - 独立 session/process group；
-- 由独立 exec helper 在子进程内设置 `RLIMIT_AS`，随后以 `exec` 原位替换为目标程序；
+- 由隔离 Python 启动的内联 exec helper 在子进程内设置 `RLIMIT_AS`，随后以 `exec` 原位替换为目标程序；
 - Linux `/proc` 低频采样整棵进程树的 RSS 和进程数；
 - `killpg` 在结束时清理进程组。
 
-Flask 多线程请求和 CLI 都不会在父进程中使用 Python `preexec_fn`。helper 会通过仅在成功 `exec` 时关闭的状态管道报告参数、`setrlimit` 或 `exec` 失败；启动阶段超时同样 fail closed，不会退化成无内存限制执行。
+Flask 多线程请求和 CLI 都不会在父进程中使用 Python `preexec_fn`。helper 代码通过 `python -I -S -c` 传入，避免 WSL 在 Windows 挂载目录中为每个短进程重新打开 helper 脚本；它仍通过仅在成功 `exec` 时关闭的状态管道报告参数、`setrlimit` 或 `exec` 失败。启动阶段超时同样 fail closed，不会退化成无内存限制执行。
 
 资源采样约每 `50 ms` 进行一次，时间和输出检查使用更短轮询，以降低大量短进程和 stress 场景的监控开销。Linux 的 `RLIMIT_AS` 是每进程地址空间限制，和 Windows Job 的整树共享内存配额并不完全等价；ProbHub 同时使用 `/proc` 聚合 RSS 做补充监控。无法使用 `/proc` 时，进程组清理与 `RLIMIT_AS` 仍然有效，但进程数和聚合内存遥测能力会受限。
 
