@@ -199,6 +199,7 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "scripts/webui/vendor/THIRD_PARTY_NOTICES.txt",
         "references/cli.md", "references/lib.typ", "references/main.typ",
         "references/problems.typ", "references/usts.png", "references/testlib.h",
+        "references/installation.md",
         "references/verification-modes.md",
     }
     missing = sorted(required_main - main_paths)

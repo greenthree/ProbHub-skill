@@ -56,6 +56,35 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertIn("require('probhub/bin/init.js')", (ROOT / "compat/probhub-skill/bin/init.js").read_text(encoding="utf-8"))
         self.assertIn("require('probhub/bin/probhub.js')", (ROOT / "compat/probhub-skill/bin/probhub.js").read_text(encoding="utf-8"))
 
+    def test_installation_guides_share_the_supported_system_python_flow(self):
+        documents = {
+            "main README": (ROOT / "README.md").read_text(encoding="utf-8"),
+            "compatibility README": (ROOT / "compat/probhub-skill/README.md").read_text(encoding="utf-8"),
+            "Agent installation reference": (ROOT / "references/installation.md").read_text(encoding="utf-8"),
+        }
+        windows = (
+            "npm install -g probhub\n"
+            "$env:PROBHUB_ALLOW_SYSTEM_PYTHON = \"1\"\n"
+            "probhub-skill\n"
+            "probhub doctor"
+        )
+        linux = (
+            "npm install -g probhub\n"
+            "PROBHUB_ALLOW_SYSTEM_PYTHON=1 probhub-skill\n"
+            "probhub doctor"
+        )
+        for label, content in documents.items():
+            with self.subTest(document=label):
+                self.assertIn("Node.js 18", content)
+                self.assertIn("Python 3.10", content)
+                self.assertIn("python3-pip", content)
+                self.assertIn(windows, content)
+                self.assertIn(linux, content)
+                self.assertIn("probhub --json ui --check", content)
+                self.assertNotIn("python3 -m venv", content)
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("references/installation.md", skill)
+
     def test_release_metadata_gate_passes_for_the_source_tree(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts/check_release.py"), "--json"],
@@ -227,7 +256,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 )
                 self.assertEqual(marker["version"], "0.6.2")
 
-    def test_dependency_installer_requires_an_explicit_virtual_environment(self):
+    def test_dependency_installer_requires_explicit_system_python_consent(self):
         from probhub import install_deps
 
         error = io.StringIO()
@@ -239,7 +268,87 @@ class NpmPackageMetadataTests(unittest.TestCase):
             os.environ.pop("PROBHUB_ALLOW_SYSTEM_PYTHON", None)
             code = install_deps.main()
         self.assertEqual(code, 1)
-        self.assertIn("virtual environment", error.getvalue())
+        self.assertIn("PROBHUB_ALLOW_SYSTEM_PYTHON=1", error.getvalue())
+
+    def test_dependency_installer_accepts_explicit_system_python_consent(self):
+        from probhub import install_deps
+
+        completed = {"reason": "completed", "returncode": 0, "message": None}
+        with (
+            patch("probhub.install_deps._inside_virtual_environment", return_value=False),
+            patch.dict(
+                os.environ,
+                {
+                    "PROBHUB_ALLOW_SYSTEM_PYTHON": "1",
+                    "PYTHONHOME": "polluted-home",
+                    "PYTHONPATH": "polluted-path",
+                    "PYTHONSTARTUP": "polluted-startup",
+                },
+                clear=False,
+            ),
+            patch("probhub.install_deps.run_managed_to_files", return_value=completed) as run,
+        ):
+            code = install_deps.main()
+        self.assertEqual(code, 0)
+        command = run.call_args.args[0]
+        self.assertIn(sys.executable, command)
+        self.assertIn("pip", command)
+        self.assertIn("install", command)
+        self.assertIn("--user", command)
+        self.assertIn(str(ROOT / "requirements.txt"), command)
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(child_env["PIP_BREAK_SYSTEM_PACKAGES"], "1")
+        self.assertNotIn("PYTHONHOME", child_env)
+        self.assertNotIn("PYTHONPATH", child_env)
+        self.assertNotIn("PYTHONSTARTUP", child_env)
+
+    def test_dependency_installer_keeps_virtual_environment_local(self):
+        from probhub import install_deps
+
+        completed = {"reason": "completed", "returncode": 0, "message": None}
+        with (
+            patch("probhub.install_deps._inside_virtual_environment", return_value=True),
+            patch("probhub.install_deps.run_managed_to_files", return_value=completed) as run,
+        ):
+            code = install_deps.main()
+        self.assertEqual(code, 0)
+        self.assertNotIn("--user", run.call_args.args[0])
+        self.assertNotIn("PIP_BREAK_SYSTEM_PACKAGES", run.call_args.kwargs["env"])
+
+    def test_dependency_installer_explains_missing_ubuntu_pip(self):
+        from probhub import install_deps
+
+        def missing_pip(_command, **kwargs):
+            kwargs["stderr_path"].write_text(
+                "/usr/bin/python3: No module named pip\n",
+                encoding="utf-8",
+            )
+            return {"reason": "completed", "returncode": 1, "message": None}
+
+        error = io.StringIO()
+        with (
+            patch("probhub.install_deps._inside_virtual_environment", return_value=False),
+            patch.dict(os.environ, {"PROBHUB_ALLOW_SYSTEM_PYTHON": "1"}, clear=False),
+            patch("probhub.install_deps.run_managed_to_files", side_effect=missing_pip),
+            redirect_stderr(error),
+        ):
+            code = install_deps.main()
+        self.assertEqual(code, 1)
+        self.assertIn("sudo apt install python3-pip", error.getvalue())
+
+    def test_windows_dependency_installer_uses_a_bounded_node_supervisor(self):
+        from probhub import install_deps
+
+        requirements = ROOT / "requirements.txt"
+        with (
+            patch("probhub.install_deps.os.name", "nt"),
+            patch("probhub.install_deps.shutil.which", return_value="C:/node/node.exe"),
+            patch.dict(os.environ, {"PYTHON": "C:/python/python.exe"}, clear=False),
+        ):
+            command = install_deps._pip_install_command(requirements, user_install=False)
+        self.assertEqual(command[:2], ["C:/node/node.exe", "-e"])
+        self.assertEqual(command[3:7], ["C:/python/python.exe", "-m", "pip", "install"])
+        self.assertEqual(command[-1], str(requirements))
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_dependency_install_failure_preserves_both_existing_skills(self):

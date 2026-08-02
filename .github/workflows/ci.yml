@@ -162,6 +162,46 @@ jobs:
       - name: Run clean npm and Python delivery flow
         run: python scripts/check_clean_install.py --json
 
+  ubuntu-distro-python-install:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Ubuntu pip package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip
+      - name: Install with externally managed distro Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          compgen -G '/usr/lib/python3*/EXTERNALLY-MANAGED' >/dev/null
+          project="$RUNNER_TEMP/probhub-distro-project"
+          home="$RUNNER_TEMP/probhub-distro-home"
+          user_base="$RUNNER_TEMP/probhub-distro-user-base"
+          mkdir -p "$project" "$home" "$user_base"
+          cd "$project"
+          env \
+            HOME="$home" \
+            PYTHON=/usr/bin/python3 \
+            PYTHONUSERBASE="$user_base" \
+            PROBHUB_ALLOW_SYSTEM_PYTHON=1 \
+            node "$GITHUB_WORKSPACE/bin/init.js" --local
+          env \
+            HOME="$home" \
+            PYTHON=/usr/bin/python3 \
+            PYTHONUSERBASE="$user_base" \
+            node "$GITHUB_WORKSPACE/bin/probhub.js" --version
+          env PYTHONUSERBASE="$user_base" /usr/bin/python3 -c \
+            'import flask, pypdf, yaml; print(flask.__name__, pypdf.__version__)'
+          test -f "$project/.agents/skills/probhub/.probhub-version.json"
+          test -n "$(find "$user_base" -type f -print -quit)"
+
   python-dependency-audit:
     strategy:
       fail-fast: false

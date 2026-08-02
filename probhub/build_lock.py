@@ -106,9 +106,6 @@ def workspace_file_lock(
     path.parent.mkdir(parents=True, exist_ok=True)
     stream = _open_lock_stream(path, no_follow=no_follow)
     try:
-        if path.stat().st_size == 0:
-            stream.write(b"\0")
-            stream.flush()
         deadline = time.monotonic() + max(0, float(wait_timeout))
         while True:
             try:
@@ -127,6 +124,9 @@ def workspace_file_lock(
                     else f"failed to acquire ProbHub workspace lock {path}: {exc}"
                 )
                 raise ProbHubError(message, code=code) from exc
+        if path.stat().st_size == 0:
+            stream.write(b"\0")
+            stream.flush()
         try:
             yield path
         finally:
