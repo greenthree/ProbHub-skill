@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-02
+
 - Unix 内存限制 helper 改为隔离 Python 的内联 `-c` 启动，保留 `RLIMIT_AS`、状态管道、信号复位、session/process group 与 fail-closed 语义，同时避免 WSL 从 Windows 挂载目录逐次读取 helper 文件的冷启动开销。
 - 发布包清单检查同时兼容 npm 10 的单元素数组与 npm 12 的单包名对象 JSON 响应，畸形或多包响应仍 fail closed。
 - 主包 README、兼容包 README、Agent Skill 与 Release 安装说明统一为 Node.js 18+ / Python 3.10+ 的系统 Python 显式授权流程；非虚拟环境依赖只写入用户目录并兼容 Ubuntu PEP 668，pip 子进程清除 Python 环境污染；临时 `npx`、Doctor 修复和 WebUI 检查不再遗漏 `PROBHUB_ALLOW_SYSTEM_PYTHON=1`，安装器报错不再引导用户创建虚拟环境。
