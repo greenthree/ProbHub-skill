@@ -25,6 +25,7 @@ ProbHub 会在这条流程中提供：
 - standard、custom checker、浮点比较和 interactive 四类常见评测场景；
 - AC、WA、TLE、MLE、OLE、RE、FAIL 等结果和完整进程树清理；
 - 可复现的数据生成、差分测试、反例重放和错解击杀矩阵；
+- 题面与 Validator 的范围对账、多组数据累计总量的静态复核提示，以及按复杂度、测试需求和资源余量推导 `T` 与累计上限的 Agent 指引；
 - Typst 全卷排版、单题 PDF、DOMjudge ZIP 和交付前验包；
 - Windows 与 Ubuntu 双平台 CI 验证。
 
@@ -168,7 +169,8 @@ Agent 和 WebUI 都会调用同一套 Core。只有需要手动排查或编排�
 |---|---|
 | `probhub doctor` | 检查安装环境 |
 | `probhub ui` | 启动 WebUI |
-| `probhub lint L01` | 检查目录、配置和题面结构 |
+| `probhub lint L01` | 检查目录、配置、题面结构和约束对账 |
+| `probhub report L01` | 查看数据画像、错解击杀和累计约束状态 |
 | `probhub judge L01` | 编译并运行 Validator、标程、暴力和错解 |
 | `probhub stress L01 --rounds 1000 --seed 12345` | 用随机小数据对拍 |
 | `probhub seal L01 --no-cache` | 验证并冻结当前题目版本 |

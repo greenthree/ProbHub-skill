@@ -272,6 +272,8 @@ source hash 会递归覆盖 `code/` 下全部普通源码与辅助文本，包�
 
 `statement.source` 和 `judge.validator` 必须解析为题目目录内的普通非符号链接文件。lint 的 `constraint_reconciliation` 会保留题面输入范围与 Validator `readInt/readLong/readDouble/readStrictDouble/ensuref` 直接字面量的 path/line/raw 证据，并固定声明 `analysis_state: partial`。它不是完整 Markdown/C++ 语义分析：只有唯一同名变量的确定数值差异给 warning，动态、析取、歧义或不支持结构只要求人工复核，永不改变 lint 的 `ok` 或退出码。
 
+对多组数据，`aggregate_constraints` 还会保守识别 `$\sum_{i=1}^{T} n_i\le 2\times 10^5$`、`所有测试用例中的 n 之和不超过 2×10^5` 等直接题面表述，以及 Validator 中 `sum_n += n` / `sum_n = sum_n + n`、`sum_len += s.size()` 后由 `ensuref` 检查的直接累加器。主体规范化为 `sum:n`、`sum:len:s` 或 `sum:n+m`，并报告 `matched`、`statement_only`、`validator_only`、`dynamic` 与 `state`。题面缺失、Validator 缺失和确定数值不一致为非阻断 warning；检测到多测和单组规模、但没有直接累计约束时只提示人工复核。Core 不解析宏、函数封装、数组归约或任意 C++/自然语言表达式，也不会自动推导正确总量；出题人仍必须人工检查 `T × 单组上界`、算法复杂度和累加类型是否安全。
+
 当前 Schema v1 不支持可执行的 `constraints` 单一事实源。未来 Token、临时 C++ header、缓存/hash、WebUI round-trip 和构建快照的完整评估见 [`constraints-schema-evaluation.md`](constraints-schema-evaluation.md)；在该设计落地前，不要向 `probhub.yaml` 添加未知 `constraints` 字段或宣称题面与 Validator 已自动同步。
 
 非交互题的 `data/sample/*.ans` 还必须由配置顺序中的首个 accepted 精确复现。`probhub sample-check` 与完整 Judge 都只归一 CRLF/裸 CR 为 LF，尾空格、缺少尾换行等差异仍失败；Custom Checker 接受非唯一输出不能绕过正式样例答案一致性。交互题对此检查明确不适用。

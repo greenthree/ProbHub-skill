@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-08-04
+
+- Schema v1 题面—Validator 约束对账新增多组数据累计约束检查：保守识别 LaTeX 求和、中文“所有测试用例之和”表述，以及 Validator 中直接 `+=` / `acc = acc + term` 累加和后续 `ensuref` 上限；统一规范化为 `sum:n`、`sum:len:s`、`sum:n+m` 等主体。
+- lint 对累计约束的题面缺失、Validator 缺失和确定数值不一致给出非阻断 warning；动态边界与“检测到多测和单组规模但未发现累计上限”保留结构化人工复核信息，不自动推导正确上限，也不把启发式结果当作证明。
+- `probhub report` 的 JSON、终端和 Markdown 输出新增累计约束状态与 matched / statement-only / Validator-only / dynamic 计数；新能力仅进入 Workspace Schema v1，Legacy 保持冻结兼容。
+- Agent Skill 新增多组数据上限推导契约：`T_max` 在 5 至 100000 间按同文件测试需求、逐组固定成本和 I/O 选择；高测试需求且满足复杂度条件时以 `sum(n_i) <= 10N` 为候选，再用联合最坏数据和三倍 TL 余量校准。题面累计上限未在 Validator 匹配、数值冲突或动态不可核对时阻断封题；即使自动匹配，也要求人工确认累加器宽度、初始化、逐组一次累计和最终拒绝逻辑。
+
 ## [0.6.3] - 2026-08-02
 
 - Unix 内存限制 helper 改为隔离 Python 的内联 `-c` 启动，保留 `RLIMIT_AS`、状态管道、信号复位、session/process group 与 fail-closed 语义，同时避免 WSL 从 Windows 挂载目录逐次读取 helper 文件的冷启动开销。

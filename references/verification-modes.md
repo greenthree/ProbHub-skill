@@ -62,6 +62,13 @@
 9. 负责整场正式交付时，在所有题目均为有效 sealed revision 后执行一次多 ID `build --no-cache`，再运行 `status`、深度 `verify-package` 和最终 PDF QA。
 10. 最终交接必须区分已自动验证、已人工/Agent 审查、未验证和剩余风险；不得用“未发现问题”替代通过条件。
 
+多组数据累计约束属于三种模式共享的封题门槛。创作、修改或审查含 `T` 的题目时，先完整执行 `references/aggregate-limit-derivation.md`：推导的 `T_max` 必须在 `5..100000`，测试需求较大时的 `sum(n_i) <= 10*N` 只能作为满足复杂度条件后的候选，并且必须通过联合最坏数据与 `accepted_max_time * 3 <= TL` 校准。题面声明 `sum n`、总长度、总点数或总边数等累计上限时：
+
+- 必须读取 `probhub --json lint <ID>` 的 `constraint_reconciliation.aggregate_constraints`；对应约束出现 `statement_only`、`aggregate_constraint_mismatch` 或 `dynamic` 时，不得因为 lint 仍为 warning 就继续 seal；
+- 直接写法应得到 `state: matched`；静态分析不支持的函数封装、宏或复杂表达式必须由主 Agent 人工复核并记录证据，不能伪称自动匹配；
+- `matched` 只证明直接语句形状和值可以对账。主 Agent 仍要确认使用足够宽的累加类型、累加器在循环前初始化、每组目标量恰好累计一次，并在读取完相关输入后执行与题面同值的 `ensuref` 或等价拒绝逻辑；
+- 缺少实际累计或拒绝逻辑时，修复 Validator 并重新运行 lint、Judge 和受影响的 seal。变量名含 `sum`、错误位置的检查或只在错误分支执行的比较都不算通过。
+
 模式不能削弱现有 Core 门禁。快速模式必须配置可用的 stress 链路，并使用固定 seed 完成 100 轮对拍；不得删除已有 `stress` 配置、减少到 100 轮以下或虚构跳过参数来绕过 `seal`。
 
 ## 3. 快速模式

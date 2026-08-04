@@ -760,8 +760,8 @@ class ProcessControlTests(unittest.TestCase):
             cwd=root,
         )
 
-    def wait_until_dead(self, pid):
-        deadline = time.time() + 5
+    def wait_until_dead(self, pid, timeout=5):
+        deadline = time.time() + timeout
         while process_alive(pid) and time.time() < deadline:
             time.sleep(0.05)
         self.assertFalse(process_alive(pid), f"child process {pid} survived")
@@ -1002,7 +1002,9 @@ class ProcessControlTests(unittest.TestCase):
                 child_pid = int(pid_file.read_text(encoding="utf-8"))
                 known_pids = snapshot_process_tree(proc.pid)
                 terminate_external_process_tree(proc, known_pids)
-                self.wait_until_dead(child_pid)
+                # Under full-suite load taskkill may return before Windows has
+                # finished tearing down the detached process object.
+                self.wait_until_dead(child_pid, timeout=10)
             finally:
                 if proc.poll() is None:
                     terminate_external_process_tree(proc)

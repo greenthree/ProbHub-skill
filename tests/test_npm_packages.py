@@ -100,6 +100,58 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)["ok"])
 
+    def test_skill_requires_aggregate_validator_enforcement_review(self):
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        verification = (ROOT / "references/verification-modes.md").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "constraint_reconciliation.aggregate_constraints",
+            "statement_only",
+            "aggregate_constraint_mismatch",
+            "足够宽的累加类型",
+            "每组目标量恰好累计一次",
+            "ensuref",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, skill)
+                self.assertIn(marker, verification)
+
+    def test_skill_routes_and_covers_aggregate_limit_derivation(self):
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        verification = (ROOT / "references/verification-modes.md").read_text(
+            encoding="utf-8"
+        )
+        reference_path = ROOT / "references/aggregate-limit-derivation.md"
+        reference = reference_path.read_text(encoding="utf-8")
+
+        self.assertIn("references/aggregate-limit-derivation.md", skill)
+        self.assertIn("references/aggregate-limit-derivation.md", verification)
+        release_check = (ROOT / "scripts/check_release.py").read_text(encoding="utf-8")
+        self.assertIn("references/aggregate-limit-derivation.md", release_check)
+
+        scenarios = {
+            "test count range": ("1 <= T <= T_max", "5 <= T_max <= 100000"),
+            "linear high-demand default": ("C(n)/n", "sum(n_i) <= 10 * N"),
+            "joint feasibility": ("T_max * n_min <= K * N", "T_max >= K"),
+            "n log n": ("O(n log n)", "large_case_equivalents"),
+            "quadratic": ("O(n^2)", "K * C(N)"),
+            "graph": ("O(n+m)", "sum(m_i) <= K*M"),
+            "two-dimensional": ("O(nm)", "sum(n_i*m_i) <= K*N*M"),
+            "fixed per-case cost": ("T * F", "T*U"),
+            "high test count": ("100000", "input_io + output_io"),
+            "runtime calibration": ("accepted_max_time * 3 <= TL", "target_guarantee: false"),
+            "decision record": ("aggregate_limit_derivation:", "decision: accepted"),
+            "joint decision record": ("jointly_reachable: true", "decision: needs_review"),
+        }
+        for scenario, markers in scenarios.items():
+            with self.subTest(scenario=scenario):
+                for marker in markers:
+                    self.assertIn(marker, reference)
+
+        self.assertIn("本文不是 Core Schema", reference)
+        self.assertIn("decision: needs_review", reference)
+
     def test_npm_pack_json_accepts_legacy_and_current_single_package_shapes(self):
         from scripts import check_release
 
@@ -147,7 +199,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 require_head_tag=True,
                 require_clean=True,
             )
-        self.assertEqual(metadata["tag"], "v0.6.3")
+        self.assertEqual(metadata["tag"], "v0.6.5")
 
         with (
             patch("scripts.check_release.shutil.which", return_value="git"),
@@ -251,7 +303,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(version.returncode, 0, version.stderr)
-            self.assertEqual(version.stdout.strip(), "0.6.3")
+            self.assertEqual(version.stdout.strip(), "0.6.5")
 
             installed = subprocess.run(
                 [
@@ -279,7 +331,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 marker = json.loads(
                     (target / ".probhub-version.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(marker["version"], "0.6.3")
+                self.assertEqual(marker["version"], "0.6.5")
 
     def test_dependency_installer_requires_explicit_system_python_consent(self):
         from probhub import install_deps
