@@ -547,6 +547,267 @@ Output.
                 for item in report["diagnostics"]
             ))
 
+    def test_latex_aggregate_constraint_matches_validator_accumulator(self):
+        statement = VALID_STATEMENT.replace(
+            "Input.",
+            r"第一行输入测试用例数 $T$。对每组输入整数 $n_i$。"
+            "\n\n"
+            r"保证 $\sum_{i=1}^{T} n_i \le 2\times 10^5$。",
+        )
+        validator = r'''int main() {
+            int T = inf.readInt(1, 10000, "T");
+            long long sum_n = 0;
+            for (int tc = 0; tc < T; ++tc) {
+                int n = inf.readInt(1, 200000, "n");
+                sum_n += n;
+            }
+            ensuref(sum_n <= 200000, "sum of n is too large");
+        }
+        '''
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root, statement=statement, validator=validator)
+            result = self.lint(root)
+            aggregate = result["constraint_reconciliation"]["aggregate_constraints"]
+
+            self.assertTrue(result["ok"], result)
+            self.assertTrue(aggregate["multi_case_detected"])
+            self.assertEqual(aggregate["state"], "matched")
+            self.assertEqual(aggregate["summary"]["matched"], 1)
+            match = aggregate["matched"][0]
+            self.assertEqual(match["subject_normalized"], "sum:n")
+            self.assertEqual(match["normalized"], "sum:n <= 200000")
+            self.assertEqual(match["validator"]["origin"], "ensuref")
+            self.assertFalse(any(
+                diagnostic["code"].startswith("aggregate_constraint_")
+                for diagnostic in result["diagnostics"]
+            ))
+
+    def test_chinese_aggregate_and_string_length_accumulators_match(self):
+        statement = VALID_STATEMENT.replace(
+            "Input.",
+            "第一行输入测试用例数 $T$。每组输入整数 $n$ 和字符串 $s$。\n\n"
+            "所有测试数据的 $n$ 之和不超过 $2\\times 10^5$，"
+            "所有测试用例中的字符串 $s$ 的长度之和不超过 $10^6$。",
+        )
+        validator = r'''int main() {
+            int T = inf.readInt(1, 10000, "T");
+            long long total_n = 0, total_len = 0;
+            while (T--) {
+                int n = inf.readInt(1, 200000, "n");
+                string s = inf.readToken("[a-z]+", "s");
+                total_n = total_n + n;
+                total_len += s.size();
+            }
+            ensuref(total_n <= 200000, "sum n");
+            ensuref(total_len <= 1000000, "sum len");
+        }
+        '''
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root, statement=statement, validator=validator)
+            result = self.lint(root)
+            aggregate = result["constraint_reconciliation"]["aggregate_constraints"]
+
+            self.assertEqual(aggregate["state"], "matched")
+            self.assertEqual(
+                {item["subject_normalized"] for item in aggregate["matched"]},
+                {"sum:n", "sum:len:s"},
+            )
+
+    def test_aggregate_sum_of_two_per_case_dimensions_matches(self):
+        statement = VALID_STATEMENT.replace(
+            "Input.",
+            r"第一行输入测试用例数 $T$。每组输入整数 $n_i,m_i$。"
+            "\n\n"
+            r"保证 $\sum_{i=1}^{T}(n_i+m_i) \le 4\times 10^5$。",
+        )
+        validator = r'''int main() {
+            int T = inf.readInt(1, 10000, "T");
+            long long sum_nm = 0;
+            for (int tc = 0; tc < T; ++tc) {
+                int n = inf.readInt(1, 200000, "n");
+                int m = inf.readInt(1, 200000, "m");
+                sum_nm += m + n;
+            }
+            ensuref(sum_nm <= 400000, "sum n + m");
+        }
+        '''
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root, statement=statement, validator=validator)
+            result = self.lint(root)
+            aggregate = result["constraint_reconciliation"]["aggregate_constraints"]
+
+            self.assertEqual(aggregate["state"], "matched")
+            self.assertEqual(
+                aggregate["matched"][0]["subject_normalized"],
+                "sum:n+m",
+            )
+
+    def test_aggregate_statement_only_validator_only_and_mismatch_are_warnings(self):
+        cases = (
+            (
+                "statement_only",
+                VALID_STATEMENT.replace(
+                    "Input.",
+                    "第一行输入测试用例数 $T$。每组输入整数 $n$。\n\n"
+                    "所有测试用例中的 $n$ 之和不超过 $200000$。",
+                ),
+                'int T = inf.readInt(1, 10, "T"); int n = inf.readInt(1, 200000, "n");\n',
+                "aggregate_constraint_statement_only",
+            ),
+            (
+                "validator_only",
+                VALID_STATEMENT.replace(
+                    "Input.",
+                    "第一行输入测试用例数 $T$。每组输入整数 $n$。",
+                ),
+                'int T = inf.readInt(1, 10, "T"); long long sum_n = 0; '
+                'for (int tc = 0; tc < T; ++tc) { int n = inf.readInt(1, 200000, "n"); '
+                'sum_n += n; } ensuref(sum_n <= 200000, "sum");\n',
+                "aggregate_constraint_validator_only",
+            ),
+            (
+                "mismatch",
+                VALID_STATEMENT.replace(
+                    "Input.",
+                    "第一行输入测试用例数 $T$。每组输入整数 $n$。\n\n"
+                    "所有测试用例中的 $n$ 之和不超过 $200000$。",
+                ),
+                'int T = inf.readInt(1, 10, "T"); int n = inf.readInt(1, 200000, "n"); '
+                'long long sum_n = 0; sum_n += n; ensuref(sum_n <= 199999, "sum");\n',
+                "aggregate_constraint_mismatch",
+            ),
+        )
+        for name, statement, validator, expected_code in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                self.create_workspace(root, statement=statement, validator=validator)
+                result = self.lint(root)
+                aggregate = result["constraint_reconciliation"]["aggregate_constraints"]
+                codes = {item["code"] for item in result["diagnostics"]}
+
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(aggregate["state"], "requires_review")
+                self.assertIn(expected_code, codes)
+                diagnostic = next(
+                    item for item in result["diagnostics"] if item["code"] == expected_code
+                )
+                self.assertEqual(diagnostic["severity"], "warning")
+
+    def test_dynamic_aggregate_bound_is_retained_for_review(self):
+        statement = VALID_STATEMENT.replace(
+            "Input.",
+            "第一行输入测试用例数 $T$ 和上限 $K$。每组输入整数 $n$。\n\n"
+            "所有测试用例中的 $n$ 之和不超过 $K$。",
+        )
+        validator = r'''int main() {
+            int T = inf.readInt(1, 10, "T");
+            int K = inf.readInt(1, 200000, "K");
+            int n = inf.readInt(1, 200000, "n");
+            long long sum_n = 0;
+            sum_n += n;
+            ensuref(sum_n <= K, "sum");
+        }
+        '''
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root, statement=statement, validator=validator)
+            result = self.lint(root)
+            aggregate = result["constraint_reconciliation"]["aggregate_constraints"]
+
+            self.assertEqual(aggregate["state"], "requires_review")
+            self.assertEqual(aggregate["summary"]["dynamic"], 2)
+            self.assertTrue(any(
+                item["code"] == "aggregate_constraint_dynamic"
+                for item in result["diagnostics"]
+            ))
+
+    def test_multicase_without_aggregate_constraint_requests_manual_review(self):
+        statement = VALID_STATEMENT.replace(
+            "Input.",
+            "第一行输入测试用例数 $T$（$1\\le T\\le 100$）。"
+            "每组输入整数 $n$（$1\\le n\\le 200000$）。",
+        )
+        validator = r'''int main() {
+            int T = inf.readInt(1, 100, "T");
+            for (int tc = 0; tc < T; ++tc) {
+                inf.readInt(1, 200000, "n");
+            }
+        }
+        '''
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root, statement=statement, validator=validator)
+            result = self.lint(root)
+            aggregate = result["constraint_reconciliation"]["aggregate_constraints"]
+
+            self.assertEqual(aggregate["state"], "requires_review")
+            self.assertTrue(aggregate["multi_case_detected"])
+            self.assertTrue(any(
+                item["code"] == "aggregate_constraint_review_required"
+                for item in result["diagnostics"]
+            ))
+
+    def test_single_case_and_cpp_non_code_do_not_create_aggregate_evidence(self):
+        statement = VALID_STATEMENT.replace(
+            "Input.", "输入整数 $n$（$1\\le n\\le 200000$）。"
+        )
+        validator = r'''int main() {
+            int n = inf.readInt(1, 200000, "n");
+            // sum_n += n;
+            const char *text = "sum_n += n; ensuref(sum_n <= 1, aggregate)";
+            long long sum_n = 0;
+            sum_n += n;
+            ensuref(sum_n <= 200000, "single-case sum");
+        }
+        '''
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root, statement=statement, validator=validator)
+            result = self.lint(root)
+            aggregate = result["constraint_reconciliation"]["aggregate_constraints"]
+
+            self.assertEqual(aggregate["state"], "not_detected")
+            self.assertFalse(aggregate["multi_case_detected"])
+            self.assertEqual(aggregate["statement_constraints"], [])
+            self.assertEqual(aggregate["validator_constraints"], [])
+            self.assertFalse(any(
+                item["code"].startswith("aggregate_constraint_")
+                for item in result["diagnostics"]
+            ))
+
+    def test_preprocessor_accumulator_is_not_treated_as_executable_code(self):
+        statement = VALID_STATEMENT.replace(
+            "Input.",
+            "第一行输入测试用例数 $T$（$1\\le T\\le 100$）。"
+            "每组输入整数 $n$（$1\\le n\\le 200000$）。",
+        )
+        validator = r'''#define ADD_N() sum_n += n
+        int main() {
+            int T = inf.readInt(1, 100, "T");
+            long long sum_n = 0;
+            for (int tc = 0; tc < T; ++tc) {
+                int n = inf.readInt(1, 200000, "n");
+                ADD_N();
+            }
+            ensuref(sum_n <= 200000, "sum");
+        }
+        '''
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root, statement=statement, validator=validator)
+            result = self.lint(root)
+            aggregate = result["constraint_reconciliation"]["aggregate_constraints"]
+
+            self.assertEqual(aggregate["state"], "requires_review")
+            self.assertEqual(aggregate["validator_constraints"], [])
+            self.assertTrue(any(
+                item["code"] == "aggregate_constraint_review_required"
+                for item in result["diagnostics"]
+            ))
+
     def test_falsey_non_mapping_statement_config_is_rejected(self):
         for value in ([], "", 0, False):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as temp:

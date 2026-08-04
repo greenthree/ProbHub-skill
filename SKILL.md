@@ -158,12 +158,16 @@ probhub build L01 --skip-judge
 
 1. 读取 `.probhub/workspace.yaml`，确认稳定 ID、目录和正式题序。
 2. 读取所选题目的 `probhub.yaml`、`problem.md`、`code/` 与 `data/`。
-3. 只修改规范源文件；不要修改生成物来“修复”结果。
+3. 只修改规范源文件；不要修改生成物来“修复”结果。创作、修改或审查含 `T` 的多组数据题时，先读取 `references/aggregate-limit-derivation.md`，在定稿题面和 Validator 前推导并记录 `T_max`、累计规模代理与资源校准结论。
 4. 修改后执行：
 
    ```powershell
    probhub lint <ID>
    ```
+
+   多组数据题还必须读取 `probhub --json lint <ID>` 的 `constraint_reconciliation.aggregate_constraints`。题面声明累计上限时，任何对应的 `statement_only`、`aggregate_constraint_mismatch` 或 `dynamic` 都是 Agent 封题阻断，不能因为 Core 仍返回非阻断 warning 就忽略。直接写法应达到 `state: matched`；若 Validator 使用函数封装、宏或其他静态分析不支持的等价实现，必须人工读代码确认并在验证记录中说明，不能把未识别状态冒充自动通过。
+
+   即使结果为 `matched`，也要人工确认 Validator 使用足够宽的累加类型、在多测循环前初始化、对每组目标量恰好累计一次，并在读取全部相关输入后用 `ensuref` 或等价检查限制为题面同一上限。只看到变量名或同一常量不算“确实限制”。发现题面有总量承诺但 Validator 没有实际执行这些步骤时，先修 Validator 并重跑 lint/Judge，再进入 seal。
 
 5. 开发代码或数据时执行：
 
@@ -202,6 +206,7 @@ probhub build L01 --skip-judge
 
 - 现有题面来源不得擅自改意，只修正格式；Idea 题应自行完成约束、算法与简洁题面。
 - 输入格式中的数据范围使用中文括号，紧跟变量第一次出现处，例如：`输入一个整数 $T$（$1\le T\le 100$）。`
+- 多组数据题除单组范围外，必须按 `references/aggregate-limit-derivation.md` 推导 `T_max` 与累计规模：`T_max` 候选限制在 `5..100000`；测试需求较大、算法至少线性、各组独立且工作量条件成立时，以 `sum(n_i) <= 10*N` 为默认候选，再用联合最坏数据和 `accepted_max_time * 3 <= TL` 校准。若算法复杂度需要累计输入受限，应在题面明确写出总点数、总边数或字符串总长度上界，并在 Validator 中使用足够宽的累加类型逐组累计后校验。题面已有累计上限时，Validator 中的实际累计和拒绝逻辑是封题必查项，不得只依赖 lint 退出码或变量名匹配。
 - 题面写法守则：
   - 任务目标必须在题目描述阶段即可读懂，不得推迟到输入输出格式甚至样例才首次出现；关键定义、对象、操作在就近位置解释。
   - 数据范围必须覆盖输入中每个量的完整前提：下界、字符集、互异性、是否保证有解、是否保证成树/连通等；浮点输出题写明误差判定标准，而不是只写"保留若干位小数"。
@@ -217,7 +222,7 @@ probhub build L01 --skip-judge
 - Checker/Interactor 必须使用附带的 DOMjudge/testlib 协议；交互题按需设置 `judge.interactive.idle_limit` 和 `transcript_limit`。Core 负责本地编译以及生成 `output_validators/validate/`，不得手工维护该生成目录。
 - 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
 - 样例 `.ans` 必须由配置顺序中的首个 accepted 精确复现；只归一 CRLF/CR 为 LF，尾空格、缺少尾换行和其他字节差异仍失败。Custom Checker 的非唯一输出语义不能替代这条样例不变量；交互题明确不适用。
-- 题面只能有一个 H1，必需 H2 依次为题目描述、输入格式、输出格式且内容非空；提示位于输出之后，样例输入/输出只来自 `data/sample`。lint 的约束对账始终是 `analysis_state: partial` 的人工复核报告，启发式 mismatch 只能 warning，不能作为自动正确性证明。
+- 题面只能有一个 H1，必需 H2 依次为题目描述、输入格式、输出格式且内容非空；提示位于输出之后，样例输入/输出只来自 `data/sample`。lint 的约束对账会保守识别直接 LaTeX/中文累计上限与 Validator 直接累加器，并在多测但未发现累计上限时提示复核；结果始终是 `analysis_state: partial`，启发式 mismatch 只能 warning，不能替代复杂度分析或正确性证明。
 - secret 数据优先通过 `data.recipes` 配方生成（`probhub gen`）：生成器 + 精确 args 可复现同一字节，手工数据显式 `manual: true`；没有配方的测试点 lint 会给 warning。配方格式见 `references/workspace-schema-v1.md`。
 - 为定向卡错解和复杂度数据配置 `data.groups` 与结构化 `solutions.*[].expected`；实现或审查时读取 `references/data-groups-expectations.md`。要求错解必须 WA 时显式写 `status: WA`，不得用偶然 RE/TLE 代替。
 - 慢参考解可在第二及后续 accepted 上配置 `run_on: [groups]`；多个组取并集，sample 始终执行。首个 accepted 禁止缩域；局部 accepted 必须显式写 `expected.groups`，且期望和 target 覆盖不得超出运行域。该字段只影响本地 Judge，不影响 stress 或 DOMjudge 包。

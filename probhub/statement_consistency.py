@@ -33,6 +33,13 @@ _READ_CALLS = {
 _CPP_RAW_STRING_OPEN = re.compile(
     r'(?:u8|u|U|L)?R"(?P<delimiter>[^ ()\\\t\r\n]{0,16})\('
 )
+_AGGREGATE_PREFIX = "sum:"
+_CHINESE_AGGREGATE = re.compile(
+    r"(?:所有|全部)(?:测试用例|测试数据|测试组|组数据)(?:中|内|中的|内的|的)?\s*"
+    r"(?P<term>.+?)\s*(?:之和|总和)\s*"
+    r"(?P<relation>不超过|至多|不大于|小于等于|不小于|至少|大于等于)\s*"
+    r"(?P<boundary>[^，。；;]+)"
+)
 
 
 def _decimal_text(value):
@@ -141,6 +148,69 @@ def _canonical_subject(raw):
     return ""
 
 
+def _strip_testcase_index(raw):
+    value = re.sub(
+        r"(?P<name>[A-Za-z][A-Za-z0-9]*)\s*_\s*\{\s*i\s*\}",
+        r"\g<name>",
+        raw,
+    )
+    return re.sub(
+        r"(?P<name>[A-Za-z][A-Za-z0-9]*)\s*_\s*i\b",
+        r"\g<name>",
+        value,
+    )
+
+
+def _split_direct_sum(raw):
+    value = _strip_balanced_outer_parentheses(raw.strip())
+    depth = 0
+    start = 0
+    parts = []
+    for index, character in enumerate(value):
+        if character in "({[":
+            depth += 1
+        elif character in ")}]":
+            depth -= 1
+            if depth < 0:
+                return []
+        elif character == "+" and depth == 0:
+            parts.append(value[start:index].strip())
+            start = index + 1
+    if depth != 0:
+        return []
+    parts.append(value[start:].strip())
+    return parts if all(parts) else []
+
+
+def _canonical_aggregate_term(raw):
+    value = raw.strip().strip("$` ")
+    value = value.replace("\\left", "").replace("\\right", "")
+    value = re.sub(r"\\(?:big|Big|bigg|Bigg)[lrm]?", "", value)
+    value = value.replace("\\,", "").strip()
+    value = _strip_testcase_index(value)
+    length_words = re.fullmatch(
+        r"(?:字符串\s*)?\$?\s*([A-Za-z][A-Za-z0-9_]*)\s*\$?\s*的长度",
+        value,
+    )
+    if length_words:
+        return f"len:{length_words.group(1).casefold()}"
+    return _canonical_subject(value)
+
+
+def _canonical_aggregate_subject(raw):
+    value = raw.strip().strip("$` ")
+    value = re.sub(r"^(?:的|每组的?)\s*", "", value)
+    value = re.sub(r"\s*的\s*$", "", value)
+    value = re.sub(r"\s*(?:、|，|,|与|和)\s*", "+", value)
+    parts = _split_direct_sum(value)
+    canonical = [_canonical_aggregate_term(part) for part in parts]
+    if not canonical or any(
+        not item or item.startswith(_AGGREGATE_PREFIX) for item in canonical
+    ):
+        return ""
+    return _AGGREGATE_PREFIX + "+".join(canonical)
+
+
 def _statement_subjects(raw):
     value = raw.strip()
     pieces = re.split(r"\s*[,，]\s*", value)
@@ -223,6 +293,7 @@ def _constraint_item(
         "direct": boundary["type"] == "number",
         "kind": kind,
         "origin": origin,
+        "aggregate": subject_normalized.startswith(_AGGREGATE_PREFIX),
         "path": str(path),
         "line": int(line),
         "raw": raw.strip(),
@@ -278,7 +349,11 @@ def _constraints_for_relation(
     normalized_operator = _operator_for_subject(operator, subject_on_left)
     return [
         _constraint_item(
-            source="statement" if origin == "input_format" else "validator",
+            source=(
+                "statement"
+                if origin in {"input_format", "input_aggregate"}
+                else "validator"
+            ),
             subject=subject,
             subject_normalized=canonical,
             operator=normalized_operator,
@@ -362,6 +437,81 @@ def _inline_math_expressions(line):
     return [line] if re.search(r"(?:<=|>=|<|>|≤|≥|\\le|\\ge)", line) else []
 
 
+def _aggregate_statement_constraint(
+    subject_raw,
+    operator,
+    boundary_raw,
+    *,
+    path,
+    line,
+    raw,
+):
+    subject = _canonical_aggregate_subject(subject_raw)
+    if not subject:
+        return None
+    boundary_text = boundary_raw.strip().strip("$` ").strip("，。；;:")
+    boundary = _parse_statement_operand(boundary_text)
+    if boundary["type"] == "unknown":
+        boundary = {"type": "dynamic", "raw": boundary_text}
+    return _constraint_item(
+        source="statement",
+        subject=subject_raw.strip(),
+        subject_normalized=subject,
+        operator=operator,
+        boundary=boundary,
+        path=path,
+        line=line,
+        raw=raw,
+        kind="integer",
+        origin="input_aggregate",
+    )
+
+
+def _extract_statement_aggregates(line, *, path, line_number):
+    constraints = []
+    for expression in _inline_math_expressions(line):
+        normalized = _normalize_statement_expression(expression)
+        match = re.fullmatch(
+            r"\\sum\s*_\s*\{[^{}]*\}\s*"
+            r"\^\s*(?:\{\s*[Tt]\s*\}|[Tt])\s*(?P<term>.+?)\s*"
+            r"(?P<operator><=|>=|<|>)\s*(?P<boundary>.+)",
+            normalized,
+        )
+        if match:
+            item = _aggregate_statement_constraint(
+                match.group("term"),
+                match.group("operator"),
+                match.group("boundary"),
+                path=path,
+                line=line_number,
+                raw=line,
+            )
+            if item:
+                constraints.append(item)
+
+    relation_operators = {
+        "不超过": "<=",
+        "至多": "<=",
+        "不大于": "<=",
+        "小于等于": "<=",
+        "不小于": ">=",
+        "至少": ">=",
+        "大于等于": ">=",
+    }
+    for match in _CHINESE_AGGREGATE.finditer(line):
+        item = _aggregate_statement_constraint(
+            match.group("term"),
+            relation_operators[match.group("relation")],
+            match.group("boundary"),
+            path=path,
+            line=line_number,
+            raw=line,
+        )
+        if item:
+            constraints.append(item)
+    return constraints
+
+
 def extract_statement_constraints(parsed, path):
     input_sections = [
         item for item in parsed.get("section_occurrences", []) if item.get("key") == "input"
@@ -384,6 +534,9 @@ def extract_statement_constraints(parsed, path):
                 origin="input_format",
                 operand_parser=_parse_statement_operand,
             ))
+        constraints.extend(
+            _extract_statement_aggregates(line, path=path, line_number=line_number)
+        )
     return _deduplicate_constraints(constraints)
 
 
@@ -480,6 +633,25 @@ def _mask_cpp_strings(text):
                 break
             index += 1
         blank(start, min(index, len(text)))
+    return "".join(output)
+
+
+def _mask_cpp_preprocessor(text):
+    """Blank preprocessor directives while preserving offsets and line breaks."""
+
+    output = []
+    continued = False
+    for line in text.splitlines(keepends=True):
+        directive = continued or line.lstrip().startswith("#")
+        if directive:
+            output.append("".join(
+                character if character in {"\n", "\r"} else " "
+                for character in line
+            ))
+            continued = line.rstrip("\r\n").rstrip().endswith("\\")
+        else:
+            output.append(line)
+            continued = False
     return "".join(output)
 
 
@@ -583,16 +755,99 @@ def _raw_source(text, start, end):
     return text[start:end + 1].strip()
 
 
-def extract_validator_constraints(text, path, diagnostics=None):
+def _validator_aggregate_subject(raw, aliases):
+    parts = _split_direct_sum(_strip_cpp_casts(raw.strip()))
+    terms = []
+    kinds = []
+    for part in parts:
+        subjects = _validator_subject(part, aliases)
+        if len(subjects) != 1:
+            return None
+        _display, canonical, kind = subjects[0]
+        if canonical.startswith(_AGGREGATE_PREFIX):
+            return None
+        terms.append(canonical)
+        kinds.append(kind)
+    if not terms:
+        return None
+    return {
+        "canonical": _AGGREGATE_PREFIX + "+".join(terms),
+        "kind": "integer" if all(kind == "integer" for kind in kinds) else "unknown",
+    }
+
+
+def _register_validator_accumulators(stripped, aliases):
+    scan_text = _mask_cpp_strings(stripped)
+    assignments = []
+    patterns = (
+        re.compile(r"\b(?P<acc>[A-Za-z_]\w*)\s*\+=\s*(?P<term>[^;]+);"),
+        re.compile(
+            r"\b(?P<acc>[A-Za-z_]\w*)\s*=\s*(?P=acc)\s*\+\s*(?P<term>[^;]+);"
+        ),
+    )
+    for pattern in patterns:
+        assignments.extend(pattern.finditer(scan_text))
+    assignments.sort(key=lambda item: item.start())
+
+    accumulator_terms = {}
+    for match in assignments:
+        aggregate = _validator_aggregate_subject(match.group("term"), aliases)
+        if not aggregate:
+            continue
+        accumulator = match.group("acc").casefold()
+        terms = accumulator_terms.setdefault(accumulator, [])
+        for term in aggregate["canonical"][len(_AGGREGATE_PREFIX):].split("+"):
+            if term not in terms:
+                terms.append(term)
+        aliases[accumulator] = {
+            "subject": f"sum({'+'.join(terms)})",
+            "canonical": _AGGREGATE_PREFIX + "+".join(terms),
+            "kind": aggregate["kind"],
+        }
+
+
+def _validator_testcase_variables(stripped):
+    variables = set()
+    for match, _method, arguments, _end in _iter_named_calls(
+        stripped, _READ_CALLS, receiver="inf"
+    ):
+        assigned = _assigned_variable(stripped, match.start())
+        label = _cpp_string_literal(arguments[2]) if len(arguments) >= 3 else None
+        canonical = _canonical_subject(label or assigned or "")
+        if assigned and canonical in {"t", "tests", "testcases", "test_count"}:
+            variables.add(assigned)
+    return variables
+
+
+def _validator_has_multicase_loop(stripped):
+    scan_text = _mask_cpp_strings(_mask_cpp_preprocessor(stripped))
+    return any(
+        re.search(
+            rf"(?:for\s*\([^;]*;[^;]*(?:<|<=)\s*{re.escape(variable)}\b|"
+            rf"while\s*\(\s*{re.escape(variable)}\s*--\s*\))",
+            scan_text,
+        )
+        for variable in _validator_testcase_variables(stripped)
+    )
+
+
+def extract_validator_constraints(
+    text,
+    path,
+    diagnostics=None,
+    *,
+    aggregate_context=False,
+):
     diagnostics = diagnostics if diagnostics is not None else []
     stripped = _strip_cpp_comments(text)
+    analysis_text = _mask_cpp_preprocessor(stripped)
     aliases = {}
     constraints = []
-    read_calls = list(_iter_named_calls(stripped, _READ_CALLS, receiver="inf"))
+    read_calls = list(_iter_named_calls(analysis_text, _READ_CALLS, receiver="inf"))
     for match, method, arguments, end in read_calls:
         if len(arguments) < 2:
             continue
-        assigned = _assigned_variable(stripped, match.start())
+        assigned = _assigned_variable(analysis_text, match.start())
         label = _cpp_string_literal(arguments[2]) if len(arguments) >= 3 else None
         subject = label or assigned
         if not subject:
@@ -601,7 +856,7 @@ def extract_validator_constraints(text, path, diagnostics=None):
         if not canonical:
             continue
         kind = _READ_CALLS[method]
-        line = stripped.count("\n", 0, match.start()) + 1
+        line = analysis_text.count("\n", 0, match.start()) + 1
         raw = _raw_source(text, match.start(), end)
         if assigned:
             aliases[assigned.casefold()] = {
@@ -641,7 +896,10 @@ def extract_validator_constraints(text, path, diagnostics=None):
             item["bound"] = bound
             constraints.append(item)
 
-    for match, _method, arguments, end in _iter_named_calls(stripped, {"ensuref"}):
+    if aggregate_context or _validator_has_multicase_loop(stripped):
+        _register_validator_accumulators(analysis_text, aliases)
+
+    for match, _method, arguments, end in _iter_named_calls(analysis_text, {"ensuref"}):
         if not arguments:
             continue
         condition = re.sub(
@@ -650,7 +908,7 @@ def extract_validator_constraints(text, path, diagnostics=None):
             r"\1",
             arguments[0],
         )
-        line = stripped.count("\n", 0, match.start()) + 1
+        line = analysis_text.count("\n", 0, match.start()) + 1
         raw = _raw_source(text, match.start(), end)
         if "||" in condition:
             diagnostics.append({
@@ -804,13 +1062,30 @@ def _unmatched_copy(item, reason):
     return {**item, "reconciliation": reason}
 
 
-def reconcile_constraints(statement_constraints, validator_constraints):
+def _constraint_group_subject(subject):
+    if not subject.startswith(_AGGREGATE_PREFIX):
+        return subject
+    terms = subject[len(_AGGREGATE_PREFIX):].split("+")
+    return _AGGREGATE_PREFIX + "+".join(sorted(terms))
+
+
+def reconcile_constraints(
+    statement_constraints,
+    validator_constraints,
+    *,
+    multi_case_detected=False,
+    aggregate_review_candidate=False,
+):
     statement_groups = defaultdict(list)
     validator_groups = defaultdict(list)
     for item in statement_constraints:
-        statement_groups[(item["subject_normalized"], item["bound"])].append(item)
+        statement_groups[
+            (_constraint_group_subject(item["subject_normalized"]), item["bound"])
+        ].append(item)
     for item in validator_constraints:
-        validator_groups[(item["subject_normalized"], item["bound"])].append(item)
+        validator_groups[
+            (_constraint_group_subject(item["subject_normalized"]), item["bound"])
+        ].append(item)
 
     matched = []
     statement_only = []
@@ -840,7 +1115,7 @@ def reconcile_constraints(statement_constraints, validator_constraints):
             validator_item = validator_items[match_index]
             matched.append({
                 "subject": statement_item["subject"],
-                "subject_normalized": key[0],
+                "subject_normalized": statement_item["subject_normalized"],
                 "bound": key[1],
                 "confidence": "high" if not statement_item["dynamic"] else "medium",
                 "dynamic": statement_item["dynamic"] or validator_item["dynamic"],
@@ -867,18 +1142,35 @@ def reconcile_constraints(statement_constraints, validator_constraints):
             statement_item = remaining_statement[0]
             validator_item = remaining_validator[0]
             high_confidence_mismatches += 1
+            aggregate = key[0].startswith(_AGGREGATE_PREFIX)
+            diagnostic_subject = statement_item["subject_normalized"]
             diagnostics.append({
-                "code": "constraint_mismatch",
+                "code": (
+                    "aggregate_constraint_mismatch"
+                    if aggregate
+                    else "constraint_mismatch"
+                ),
                 "severity": "warning",
                 "message": (
-                    f"statement/Validator constraint mismatch for {key[0]} {key[1]}: "
+                    f"statement/Validator {'aggregate ' if aggregate else ''}constraint "
+                    f"mismatch for {diagnostic_subject} {key[1]}: "
                     f"{statement_item['normalized']} vs {validator_item['normalized']}"
                 ),
-                "subject": key[0],
+                "subject": diagnostic_subject,
                 "bound": key[1],
                 "confidence": "high",
                 "statement": statement_item,
                 "validator": validator_item,
+                **(
+                    {"statement_limit": statement_item["value"]}
+                    if aggregate and statement_item.get("direct")
+                    else {}
+                ),
+                **(
+                    {"validator_limit": validator_item["value"]}
+                    if aggregate and validator_item.get("direct")
+                    else {}
+                ),
             })
             statement_only.append(_unmatched_copy(statement_item, "numeric_mismatch"))
             validator_only.append(_unmatched_copy(validator_item, "numeric_mismatch"))
@@ -897,37 +1189,82 @@ def reconcile_constraints(statement_constraints, validator_constraints):
     for item in statement_only:
         if item["reconciliation"] == "numeric_mismatch":
             continue
+        aggregate = item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
         diagnostics.append({
-            "code": "constraint_statement_only",
-            "severity": "info",
-            "message": f"statement-only constraint: {item['normalized']}",
+            "code": (
+                "aggregate_constraint_statement_only"
+                if aggregate
+                else "constraint_statement_only"
+            ),
+            "severity": "warning" if aggregate else "info",
+            "message": (
+                f"statement-only {'aggregate ' if aggregate else ''}constraint: "
+                f"{item['normalized']}"
+            ),
             "subject": item["subject_normalized"],
             "bound": item["bound"],
             "evidence": item,
+            **(
+                {"statement_limit": item["value"]}
+                if aggregate and item.get("direct")
+                else {}
+            ),
         })
     for item in validator_only:
         if item["reconciliation"] == "numeric_mismatch":
             continue
+        aggregate = item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
         diagnostics.append({
-            "code": "constraint_validator_only",
-            "severity": "info",
-            "message": f"Validator-only constraint: {item['normalized']}",
+            "code": (
+                "aggregate_constraint_validator_only"
+                if aggregate
+                else "constraint_validator_only"
+            ),
+            "severity": "warning" if aggregate else "info",
+            "message": (
+                f"Validator-only {'aggregate ' if aggregate else ''}constraint: "
+                f"{item['normalized']}"
+            ),
             "subject": item["subject_normalized"],
             "bound": item["bound"],
             "evidence": item,
+            **(
+                {"validator_limit": item["value"]}
+                if aggregate and item.get("direct")
+                else {}
+            ),
         })
 
-    dynamic_count = sum(
-        item["dynamic"] for item in [*statement_constraints, *validator_constraints]
+    all_constraints = [*statement_constraints, *validator_constraints]
+    aggregate_dynamic = [
+        item
+        for item in all_constraints
+        if item["dynamic"] and item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
+    ]
+    nonaggregate_dynamic_count = sum(
+        item["dynamic"]
+        for item in all_constraints
+        if not item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
     )
-    if dynamic_count:
+    dynamic_count = len(aggregate_dynamic) + nonaggregate_dynamic_count
+    if nonaggregate_dynamic_count:
         diagnostics.append({
             "code": "constraint_dynamic_bounds",
             "severity": "info",
             "message": (
-                f"{dynamic_count} dynamic bound(s) were retained as partial evidence; "
+                f"{nonaggregate_dynamic_count} dynamic bound(s) were retained as partial evidence; "
                 "no semantic mismatch warning is inferred from them"
             ),
+        })
+    if aggregate_dynamic:
+        diagnostics.append({
+            "code": "aggregate_constraint_dynamic",
+            "severity": "info",
+            "message": (
+                f"{len(aggregate_dynamic)} dynamic aggregate bound(s) were retained "
+                "for manual review"
+            ),
+            "evidence": aggregate_dynamic,
         })
     if matched and not statement_only and not validator_only and not dynamic_count:
         confidence = "high"
@@ -945,8 +1282,56 @@ def reconcile_constraints(statement_constraints, validator_constraints):
                 "manual review is still required"
             ),
         })
+    aggregate_statement = [
+        item
+        for item in statement_constraints
+        if item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
+    ]
+    aggregate_validator = [
+        item
+        for item in validator_constraints
+        if item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
+    ]
+    aggregate_matched = [
+        item
+        for item in matched
+        if item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
+    ]
+    aggregate_statement_only = [
+        item
+        for item in statement_only
+        if item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
+    ]
+    aggregate_validator_only = [
+        item
+        for item in validator_only
+        if item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
+    ]
+    aggregate_evidence = bool(aggregate_statement or aggregate_validator)
+    if aggregate_evidence and not (
+        aggregate_statement_only or aggregate_validator_only or aggregate_dynamic
+    ):
+        aggregate_state = "matched"
+    elif aggregate_evidence or (multi_case_detected and aggregate_review_candidate):
+        aggregate_state = "requires_review"
+    else:
+        aggregate_state = "not_detected"
+    if not aggregate_evidence and multi_case_detected and aggregate_review_candidate:
+        diagnostics.append({
+            "code": "aggregate_constraint_review_required",
+            "severity": "info",
+            "message": (
+                "multiple test cases and per-case scale variables were detected, but no "
+                "direct aggregate constraint was found; manually review T times the "
+                "per-case bound and the intended total input budget"
+            ),
+        })
     requires_review = bool(
-        statement_only or validator_only or dynamic_count or no_evidence
+        statement_only
+        or validator_only
+        or dynamic_count
+        or no_evidence
+        or aggregate_state == "requires_review"
     )
     return {
         "analysis_state": "partial",
@@ -963,6 +1348,27 @@ def reconcile_constraints(statement_constraints, validator_constraints):
         "diagnostics": diagnostics,
         "statement_constraints": list(statement_constraints),
         "validator_constraints": list(validator_constraints),
+        "aggregate_constraints": {
+            "analysis_state": "partial",
+            "scope": (
+                "Direct statement sums and direct C++ accumulator assignments only; "
+                "this does not infer a correct total limit or prove loop semantics."
+            ),
+            "multi_case_detected": bool(multi_case_detected),
+            "state": aggregate_state,
+            "matched": aggregate_matched,
+            "statement_only": aggregate_statement_only,
+            "validator_only": aggregate_validator_only,
+            "dynamic": aggregate_dynamic,
+            "statement_constraints": aggregate_statement,
+            "validator_constraints": aggregate_validator,
+            "summary": {
+                "matched": len(aggregate_matched),
+                "statement_only": len(aggregate_statement_only),
+                "validator_only": len(aggregate_validator_only),
+                "dynamic": len(aggregate_dynamic),
+            },
+        },
         "summary": {
             "matched": len(matched),
             "statement_only": len(statement_only),
@@ -973,15 +1379,82 @@ def reconcile_constraints(statement_constraints, validator_constraints):
     }
 
 
+def _input_section_text(parsed):
+    sections = [
+        item for item in parsed.get("section_occurrences", []) if item.get("key") == "input"
+    ]
+    if not sections:
+        return ""
+    section = sections[0]
+    return "\n".join(
+        line
+        for line_number, line in iter_unfenced_lines(parsed["raw"])
+        if section["start_line"] <= line_number <= section["end_line"]
+    )
+
+
+def _aggregate_review_context(
+    parsed,
+    statement_constraints,
+    validator_text,
+    validator_constraints,
+):
+    aggregate_evidence = any(
+        item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
+        for item in [*statement_constraints, *validator_constraints]
+    )
+    input_text = _input_section_text(parsed)
+    statement_mentions_cases = bool(re.search(
+        r"(?:测试用例|测试数据|测试组|组数据|test\s+cases?)",
+        input_text,
+        re.IGNORECASE,
+    ))
+    statement_mentions_count = bool(re.search(
+        r"(?:\$\s*[Tt]\s*\$|\b(?:test_count|testcases|tests|[Tt])\b)",
+        input_text,
+    ))
+
+    stripped = _strip_cpp_comments(validator_text)
+    validator_mentions_loop = _validator_has_multicase_loop(stripped)
+    multi_case_detected = bool(
+        aggregate_evidence
+        or (statement_mentions_cases and statement_mentions_count)
+        or validator_mentions_loop
+    )
+    control_subjects = {"t", "tests", "testcases", "test_count"}
+    aggregate_review_candidate = any(
+        not item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
+        and item["subject_normalized"] not in control_subjects
+        for item in [*statement_constraints, *validator_constraints]
+    )
+    return multi_case_detected, aggregate_review_candidate
+
+
 def analyze_constraint_consistency(parsed, statement_path, validator_text, validator_path):
     statement_constraints = extract_statement_constraints(parsed, statement_path)
     extraction_diagnostics = []
+    statement_has_aggregate = any(
+        item["subject_normalized"].startswith(_AGGREGATE_PREFIX)
+        for item in statement_constraints
+    )
     validator_constraints = extract_validator_constraints(
         validator_text,
         validator_path,
         diagnostics=extraction_diagnostics,
+        aggregate_context=statement_has_aggregate,
     )
-    result = reconcile_constraints(statement_constraints, validator_constraints)
+    multi_case_detected, aggregate_review_candidate = _aggregate_review_context(
+        parsed,
+        statement_constraints,
+        validator_text,
+        validator_constraints,
+    )
+    result = reconcile_constraints(
+        statement_constraints,
+        validator_constraints,
+        multi_case_detected=multi_case_detected,
+        aggregate_review_candidate=aggregate_review_candidate,
+    )
     result["diagnostics"] = [*extraction_diagnostics, *result["diagnostics"]]
     if extraction_diagnostics:
         result["requires_review"] = True

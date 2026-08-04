@@ -296,7 +296,7 @@ class GenerationTests(unittest.TestCase):
 
     def test_artifact_builder_changes_create_new_generations(self):
         cases = (
-            (("probhub_version",), "0.6.3"),
+            (("probhub_version",), "0.6.5"),
             (("typst_version",), "0.14.3"),
             (("pypdf_version",), "6.15.0"),
             (("template_hash",), "template-two"),

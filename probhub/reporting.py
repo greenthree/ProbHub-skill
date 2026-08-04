@@ -492,6 +492,23 @@ def _problem_report(root, workspace, entry, position, lint_result):
         "ungrouped_secret_cases": ungrouped_secret,
         "targeted_secret_cases": len(targeted_secret_cases),
         "recipes": recipes,
+        "aggregate_constraints": constraint_report.get("aggregate_constraints") or {
+            "analysis_state": "partial",
+            "multi_case_detected": False,
+            "state": "not_detected",
+            "matched": [],
+            "statement_only": [],
+            "validator_only": [],
+            "dynamic": [],
+            "statement_constraints": [],
+            "validator_constraints": [],
+            "summary": {
+                "matched": 0,
+                "statement_only": 0,
+                "validator_only": 0,
+                "dynamic": 0,
+            },
+        },
         "calibration": _calibration_profile(calibration),
         "solution_verification": (lint_result or {}).get("solution_verification") or {},
         "kill_matrix": _kill_matrix(config, groups, cases, calibration),
@@ -619,6 +636,11 @@ def render_markdown_report(report):
             f"targeted {recipes['targeted']}/{recipes['total']}；near-boundary {recipes['near_boundary']}/{recipes['total']}",
             f"- 校准：{problem['calibration']['state']}；primary accepted TL 余量 "
             f"{_format_headroom(problem['calibration']['primary_headroom'])}；`target_guarantee: false`",
+            f"- 累计约束：{problem['aggregate_constraints']['state']}；"
+            f"matched {problem['aggregate_constraints']['summary']['matched']}；"
+            f"statement-only {problem['aggregate_constraints']['summary']['statement_only']}；"
+            f"Validator-only {problem['aggregate_constraints']['summary']['validator_only']}；"
+            f"dynamic {problem['aggregate_constraints']['summary']['dynamic']}",
             "",
         ])
         if problem["groups"]:
@@ -691,6 +713,14 @@ def render_text_report(report):
             f"targeted={recipes['targeted']}/{recipes['total']} "
             f"near-boundary={recipes['near_boundary']}/{recipes['total']} "
             f"analysis={recipes['analysis_state']}"
+        )
+        aggregate = problem["aggregate_constraints"]
+        lines.append(
+            f"  累计约束: {aggregate['state']} "
+            f"matched={aggregate['summary']['matched']} "
+            f"statement-only={aggregate['summary']['statement_only']} "
+            f"validator-only={aggregate['summary']['validator_only']} "
+            f"dynamic={aggregate['summary']['dynamic']}"
         )
         if problem["groups"]:
             lines.append("  数据组:")

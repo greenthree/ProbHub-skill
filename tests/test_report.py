@@ -32,12 +32,15 @@ class WorkspaceReportTests(unittest.TestCase):
         (problem / "problem.md").write_text(
             "# Report Problem\n\n"
             "## 题目描述\n\n求值。\n\n"
-            "## 输入格式\n\n输入整数 $n$（$1\\le n\\le 100$）。\n\n"
+            "## 输入格式\n\n第一行输入测试用例数 $T$。每组输入整数 $n$（$1\\le n\\le 100$）。\n\n"
+            "所有测试用例中的 $n$ 之和不超过 $100$。\n\n"
             "## 输出格式\n\n输出 $n$。\n",
             encoding="utf-8",
         )
         (problem / "code/validator.cpp").write_text(
-            'int main(){ inf.readInt(1, 100, "n"); }\n', encoding="utf-8"
+            'int main(){ int T = inf.readInt(1, 10, "T"); int n = inf.readInt(1, 100, "n"); '
+            'long long sum_n = 0; sum_n += n; ensuref(sum_n <= 100, "sum"); }\n',
+            encoding="utf-8",
         )
         (problem / "code/std.cpp").write_text("int main(){}\n", encoding="utf-8")
         (problem / "code/wrong.cpp").write_text("int main(){}\n", encoding="utf-8")
@@ -218,6 +221,8 @@ class WorkspaceReportTests(unittest.TestCase):
             self.assertEqual(item["recipes"]["random"], 2)
             self.assertEqual(item["recipes"]["targeted"], 1)
             self.assertEqual(item["calibration"]["primary_headroom"], 5.0)
+            self.assertEqual(item["aggregate_constraints"]["state"], "matched")
+            self.assertEqual(item["aggregate_constraints"]["summary"]["matched"], 1)
             row = item["kill_matrix"]["rows"][0]
             self.assertEqual(row["cells"]["killer"]["state"], "killed")
             self.assertEqual(row["cells"]["random"]["state"], "not-targeted")
@@ -247,10 +252,17 @@ class WorkspaceReportTests(unittest.TestCase):
             self.assertIn("ProbHub 工作区报告", outputs["text"])
             self.assertIn("击杀矩阵", outputs["text"])
             self.assertIn("near-boundary=0/3", outputs["text"])
+            self.assertIn("累计约束: matched", outputs["text"])
             self.assertIn("# ProbHub 工作区报告", outputs["markdown"])
             self.assertIn("| 题号 | ID |", outputs["markdown"])
             self.assertIn("near-boundary 0/3", outputs["markdown"])
-            self.assertEqual(json.loads(outputs["json"])["schema_version"], 1)
+            self.assertIn("累计约束：matched", outputs["markdown"])
+            json_report = json.loads(outputs["json"])
+            self.assertEqual(json_report["schema_version"], 1)
+            self.assertEqual(
+                json_report["problems"][0]["aggregate_constraints"]["state"],
+                "matched",
+            )
             self.assertEqual(self.snapshot(root), before)
 
     def test_missing_recipes_and_targeted_groups_are_structured_warnings(self):
