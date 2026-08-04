@@ -500,14 +500,12 @@ class DatagenWorkspaceTests(unittest.TestCase):
             return {"status": "AC", "stdout": stdout, "stderr": b"", "message": ""}
 
         outcomes = (
-            ({"status": "WA", "match": False, "message": "rejected", "stderr": b""}, "WA", None),
-            ({"status": "FAIL", "match": False, "message": "checker failed", "stderr": b""}, "FAIL", None),
+            ({"verdict": "WA", "execution_status": "completed", "message": "rejected"}, "WA", None),
+            ({"verdict": None, "execution_status": "completed", "message": "checker failed"}, "FAIL", None),
             ({
-                "status": "FAIL",
-                "execution_status": "TLE",
-                "match": False,
+                "verdict": None,
+                "execution_status": "time_limit",
                 "message": "checker timed out",
-                "stderr": b"",
             }, "FAIL", "TLE"),
         )
         for comparison, expected_status, execution_status in outcomes:
@@ -516,7 +514,7 @@ class DatagenWorkspaceTests(unittest.TestCase):
                 with (
                     mock.patch("probhub.datagen._prepare_program", side_effect=prepare),
                     mock.patch("probhub.datagen._run", side_effect=run),
-                    mock.patch("probhub.datagen._compare_custom", return_value=comparison),
+                    mock.patch("probhub.datagen.run_checker_to_files", return_value=comparison),
                 ):
                     result = generate_problem_data(problem, config, apply_changes=True)
                 self.assertFalse(result["ok"])
@@ -529,18 +527,25 @@ class DatagenWorkspaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             problem, config = fixture(Path(temp))
-            accepted = {"status": "AC", "match": True, "message": "", "stderr": b""}
+            accepted = {"verdict": "AC", "execution_status": "completed", "message": ""}
+
+            def accept_checker(*args, **_kwargs):
+                self.assertEqual(Path(args[3]).read_bytes(), b"2\n")
+                return accepted
+
             with (
                 mock.patch("probhub.datagen._prepare_program", side_effect=prepare),
                 mock.patch("probhub.datagen._run", side_effect=run),
-                mock.patch("probhub.datagen._compare_custom", return_value=accepted) as checker,
+                mock.patch(
+                    "probhub.datagen.run_checker_to_files", side_effect=accept_checker
+                ) as checker,
             ):
                 result = generate_problem_data(problem, config, apply_changes=True)
             self.assertTrue(result["ok"])
             self.assertTrue(result["applied"])
             self.assertEqual((problem / "data/secret/gen01.ans").read_bytes(), b"2\n")
             self.assertTrue((problem / GEN_MANIFEST_PATH).is_file())
-            self.assertEqual(checker.call_args.args[3], b"2\n")
+            self.assertEqual(checker.call_args.args[2], checker.call_args.args[3])
 
     def test_lint_reports_recipe_errors_and_coverage_warnings(self):
         with tempfile.TemporaryDirectory() as temp:

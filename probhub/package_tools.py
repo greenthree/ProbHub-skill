@@ -17,6 +17,7 @@ from yaml.constructor import ConstructorError
 
 from .errors import ProbHubError
 from .io import write_yaml
+from .problem_paths import ProblemPathError, resolve_problem_regular_file
 from .process_control import DEFAULT_PROCESS_LIMIT, ProcessCancelled, run_managed_to_files
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -280,37 +281,16 @@ def _expected_validation(config):
 
 
 def _problem_regular_file(problem_dir, relative, label):
-    if not isinstance(relative, str) or not relative:
-        raise ProbHubError(f"{label} is required", code="unsafe_package_source")
-    problem_dir = Path(problem_dir).resolve()
-    relative_path = Path(relative)
-    if relative_path.is_absolute() or relative_path.drive or ".." in relative_path.parts:
-        raise ProbHubError(
-            f"{label} must stay inside the problem directory: {relative}",
-            code="unsafe_package_source",
-        )
-    candidate = problem_dir / relative_path
-    current = problem_dir
-    has_symlink = False
-    for part in relative_path.parts:
-        current = current / part
-        if current.is_symlink():
-            has_symlink = True
-            break
-    if has_symlink or not candidate.is_file():
-        raise ProbHubError(
-            f"{label} must be a regular file: {relative}",
-            code="unsafe_package_source",
-        )
-    resolved = candidate.resolve()
     try:
-        resolved.relative_to(problem_dir)
-    except ValueError as exc:
-        raise ProbHubError(
-            f"{label} must stay inside the problem directory: {relative}",
-            code="unsafe_package_source",
-        ) from exc
-    return resolved
+        return resolve_problem_regular_file(problem_dir, relative)
+    except ProblemPathError as exc:
+        if exc.reason == "invalid":
+            message = f"{label} is required"
+        elif exc.reason == "outside":
+            message = f"{label} must stay inside the problem directory: {relative}"
+        else:
+            message = f"{label} must be a regular file: {relative}"
+        raise ProbHubError(message, code="unsafe_package_source") from exc
 
 
 def _problem_directory(problem_dir, relative, label):
@@ -358,8 +338,6 @@ def prepare_output_validator(problem_dir, config):
         return None
 
     source_value = judge.get(source_key)
-    if not source_value:
-        raise ProbHubError(f"judge.{source_key} is required for {judge_type} judging")
     source = _problem_regular_file(problem_dir, source_value, f"judge.{source_key}")
     if not TESTLIB_PATH.is_file():
         raise ProbHubError(f"testlib.h not found: {TESTLIB_PATH}")

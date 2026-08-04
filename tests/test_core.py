@@ -503,6 +503,19 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertTrue(lint_workspace(root, workspace)["ok"])
 
             config["judge"] = {
+                "type": "checker",
+                "validator": "code/validator.cpp",
+                "checker": "../outside-checker.cpp",
+            }
+            write_yaml(config_path, config)
+            result = lint_workspace(root, workspace)
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "judge.checker must stay inside the problem directory: ../outside-checker.cpp",
+                result["problems"][0]["errors"],
+            )
+
+            config["judge"] = {
                 "type": "interactive",
                 "validator": "code/validator.cpp",
                 "interactor": "code/interactor.cpp",
@@ -515,6 +528,58 @@ class CoreWorkspaceTests(unittest.TestCase):
             (problem / "code/interactor.cpp").write_text("int main(){}\n", encoding="utf-8")
             self.assertTrue(lint_workspace(root, workspace)["ok"])
 
+            config["judge"]["interactor"] = r"..\outside-interactor.cpp"
+            write_yaml(config_path, config)
+            result = lint_workspace(root, workspace)
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                r"judge.interactor must stay inside the problem directory: ..\outside-interactor.cpp",
+                result["problems"][0]["errors"],
+            )
+
+            checker_link = problem / "code/checker-link.cpp"
+            try:
+                checker_link.symlink_to(problem / "code/checker.cpp")
+            except (NotImplementedError, OSError):
+                checker_link = None
+            if checker_link is not None:
+                config["judge"] = {
+                    "type": "checker",
+                    "validator": "code/validator.cpp",
+                    "checker": "code/checker-link.cpp",
+                }
+                write_yaml(config_path, config)
+                result = lint_workspace(root, workspace)
+                self.assertFalse(result["ok"])
+                self.assertIn(
+                    "judge.checker must be a regular non-symlink file: code/checker-link.cpp",
+                    result["problems"][0]["errors"],
+                )
+
+            interactor_link = problem / "code/interactor-link.cpp"
+            try:
+                interactor_link.symlink_to(problem / "code/interactor.cpp")
+            except (NotImplementedError, OSError):
+                interactor_link = None
+            if interactor_link is not None:
+                config["judge"] = {
+                    "type": "interactive",
+                    "validator": "code/validator.cpp",
+                    "interactor": "code/interactor-link.cpp",
+                }
+                write_yaml(config_path, config)
+                result = lint_workspace(root, workspace)
+                self.assertFalse(result["ok"])
+                self.assertIn(
+                    "judge.interactor must be a regular non-symlink file: code/interactor-link.cpp",
+                    result["problems"][0]["errors"],
+                )
+
+            config["judge"] = {
+                "type": "interactive",
+                "validator": "code/validator.cpp",
+                "interactor": "code/interactor.cpp",
+            }
             config["judge"]["interactive"] = {"idle_limit": 0, "transcript_limit": -1}
             write_yaml(config_path, config)
             result = lint_workspace(root, workspace)

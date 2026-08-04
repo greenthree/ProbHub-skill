@@ -88,6 +88,30 @@ class LocalJudgeLayoutTests(unittest.TestCase):
             cases = MODULE.collect_testcases(problem, config)
             self.assertEqual([case["case"] for case in cases], ["sample/1"])
 
+    def test_schema_execution_paths_use_the_shared_problem_fence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = root / "A"
+            code = problem / "code"
+            code.mkdir(parents=True)
+            outside = root / "outside.cpp"
+            outside.write_text("int main(){}\n", encoding="utf-8")
+            (code / "checker.cpp").write_text("int main(){}\n", encoding="utf-8")
+
+            self.assertIsNone(MODULE.resolve_problem_path(problem, "../outside.cpp"))
+            self.assertIsNone(MODULE.resolve_problem_path(problem, str(outside)))
+            self.assertEqual(
+                Path(MODULE.resolve_problem_path(problem, "code/checker.cpp")),
+                (code / "checker.cpp").resolve(),
+            )
+
+            link = code / "linked-checker.cpp"
+            try:
+                link.symlink_to(outside)
+            except OSError:
+                return
+            self.assertIsNone(MODULE.resolve_problem_path(problem, "code/linked-checker.cpp"))
+
 
     def test_legacy_workspace_prefers_code_directory_when_present(self):
         with tempfile.TemporaryDirectory() as temp:

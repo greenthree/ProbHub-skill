@@ -21,6 +21,7 @@ from probhub.building import _publish_calibration_evidence
 from probhub.cli import _ensure_local_gitignore
 from probhub.io import write_yaml
 from probhub.linting import lint_problem, problem_status
+from probhub.special_judges import _interactive_result
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -512,20 +513,27 @@ class LocalJudgeCalibrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             stderr = Path(temp) / "solution.stderr"
             stderr.write_bytes(b"12345")
-            transcript = {"entries": [], "truncated": False}
-            result = LOCAL_JUDGE._interactive_result(
-                "OLE",
-                0.1,
-                1,
-                True,
-                "output limit exceeded",
-                transcript,
-                traffic={"solution_to_interactor": 7},
-                solution_stderr=str(stderr),
-                termination_reason="output_limit",
+            transcript = {"entries": [], "bytes": 0, "truncated": False}
+            result = _interactive_result(
+                {
+                    "status": "OLE",
+                    "verdict": "OLE",
+                    "execution_status": "output_limit",
+                    "failure_kind": "resource_limit",
+                    "actor": "contestant",
+                    "termination_reason": "output_limit",
+                    "message": "output limit exceeded",
+                },
+                elapsed=0.1,
+                memory=1,
+                memory_enforced=True,
+                transcript=transcript,
+                traffic_evidence={"solution_to_interactor": 7, "solution_stderr": 5},
+                cleanup={"ok": True},
+                exit_codes={},
             )
-            self.assertEqual(result[-1]["output_bytes"], 12)
-            self.assertEqual(result[-1]["termination_reason"], "output_limit")
+            self.assertEqual(result["output_bytes"], 12)
+            self.assertEqual(result["termination_reason"], "output_limit")
 
     def test_tle_probe_distinguishes_exact_and_censored_measurements(self):
         with tempfile.TemporaryDirectory() as temp:
