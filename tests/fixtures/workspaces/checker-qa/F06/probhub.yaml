@@ -1,0 +1,45 @@
+schema_version: 1
+id: F06
+name: Checker QA Fixture
+limits:
+  time: 1
+  memory: 256
+  output: 1
+  processes: 8
+statement:
+  source: problem.md
+judge:
+  type: custom
+  validator: code/validator.cpp
+  checker: code/checker.cpp
+  qa:
+    schema_version: 1
+    robustness:
+      baseline: accepts-alternative
+      probes: [empty, truncated, extra-token, oversized]
+    cases:
+    - id: accepts-alternative
+      purpose: valid-alternative
+      case: sample/basic
+      contestant_output: judge-fixtures/checker/alternative.out
+      expected: {status: AC}
+    - id: rejects-extra-token
+      purpose: extra-token
+      input: judge-fixtures/checker/extra.in
+      jury_answer: judge-fixtures/checker/extra.ans
+      contestant_output: judge-fixtures/checker/extra.out
+      expected: {status: WA}
+solutions:
+  accepted:
+  - file: code/std.cpp
+    expected: {status: AC, all: true}
+  brute: []
+  wrong:
+  - file: code/wrong.cpp
+    expected: {status: WA, all: true}
+data:
+  sample_dir: data/sample
+  secret_dir: data/secret
+  recipes:
+  - case: edge
+    manual: true

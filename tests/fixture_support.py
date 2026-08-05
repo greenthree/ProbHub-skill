@@ -13,7 +13,15 @@ from probhub.workspace import load_problem, load_workspace, problem_entries
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures"
-WORKSPACE_FIXTURES = ("standard", "custom", "float", "interactive", "stress")
+JUDGE_QA_FIXTURES = ("checker-qa", "interactor-qa")
+WORKSPACE_FIXTURES = (
+    "standard",
+    "custom",
+    "float",
+    "interactive",
+    "stress",
+    *JUDGE_QA_FIXTURES,
+)
 
 
 @dataclass(frozen=True)
