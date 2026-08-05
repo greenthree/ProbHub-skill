@@ -1,0 +1,54 @@
+schema_version: 1
+id: F07
+name: Interactor QA Fixture
+limits:
+  time: 2
+  memory: 256
+  output: 1
+  processes: 8
+statement:
+  source: problem.md
+judge:
+  type: interactive
+  validator: code/validator.cpp
+  interactor: code/interactor.cpp
+  interactive:
+    idle_limit: 0.5
+    transcript_limit: 4096
+  qa:
+    schema_version: 1
+    cases:
+    - id: normal-protocol
+      purpose: normal
+      case: secret/edge
+      contestant: {source: code/judge-qa/normal.cpp}
+      expected: {status: AC}
+    - id: early-eof-player
+      purpose: early-eof
+      case: sample/basic
+      contestant: {behavior: early-eof}
+      expected: {status: WA}
+    - id: idle-player
+      purpose: idle
+      case: sample/basic
+      contestant: {behavior: idle}
+      expected: {status: TLE, timeout_kind: idle, termination_reason: time_limit}
+    - id: output-flood-player
+      purpose: output-flood
+      case: sample/basic
+      contestant: {behavior: output-flood}
+      expected: {status: OLE, termination_reason: output_limit}
+solutions:
+  accepted:
+  - file: code/std.cpp
+    expected: {status: AC, all: true}
+  brute: []
+  wrong:
+  - file: code/wrong.cpp
+    expected: {status: WA, all: true}
+data:
+  sample_dir: data/sample
+  secret_dir: data/secret
+  recipes:
+  - case: edge
+    manual: true

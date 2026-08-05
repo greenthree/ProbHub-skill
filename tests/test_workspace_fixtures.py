@@ -31,6 +31,7 @@ class FixtureCatalogTests(unittest.TestCase):
         forbidden_names = {
             "build-manifest.json",
             "domjudge-problem.ini",
+            "judge-qa-evidence-v1.json",
             "meta.json",
             "problem.pdf",
             "problem.yaml",
@@ -73,6 +74,8 @@ class FixtureExecutionTests(unittest.TestCase):
             "custom": "custom",
             "float": "custom",
             "interactive": "interactive",
+            "checker-qa": "custom",
+            "interactor-qa": "interactive",
         }
         for name, judge_type in expected_types.items():
             with self.subTest(name=name):

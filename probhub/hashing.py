@@ -25,9 +25,22 @@ def hash_paths(root, paths, *, normalize_lf_suffixes=()):
         if not full.is_file():
             continue
         rel = full.relative_to(root).as_posix().encode("utf-8")
+        if full.suffix.lower() not in normalize_lf_suffixes:
+            expected_size = full.stat().st_size
+            digest.update(len(rel).to_bytes(4, "big"))
+            digest.update(rel)
+            digest.update(expected_size.to_bytes(8, "big"))
+            observed_size = 0
+            with full.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    observed_size += len(chunk)
+                    digest.update(chunk)
+            if observed_size != expected_size:
+                raise OSError(f"file changed while hashing: {full}")
+            existing.append(full)
+            continue
         content = full.read_bytes()
-        if full.suffix.lower() in normalize_lf_suffixes:
-            content = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        content = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         digest.update(len(rel).to_bytes(4, "big"))
         digest.update(rel)
         digest.update(len(content).to_bytes(8, "big"))

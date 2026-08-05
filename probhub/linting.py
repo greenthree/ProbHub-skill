@@ -15,6 +15,7 @@ from .calibration import evaluate_calibration, validate_calibration_config
 from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
+from .judge_qa import inspect_judge_qa, judge_fixture_tree_paths
 from .metadata import build_meta, normalize_display_name
 from .problem_paths import ProblemPathError, resolve_problem_regular_file
 from .solutions import analyze_solution_verification
@@ -55,6 +56,7 @@ STATEMENT_ASSET_IGNORED_DIRS = {
     "__pycache__",
     "code",
     "data",
+    "judge-fixtures",
     "output_validators",
 }
 
@@ -163,6 +165,7 @@ def problem_source_paths(problem_dir, config):
             )
             and path.suffix.lower() not in CODE_HASH_IGNORED_SUFFIXES
         )
+    paths.extend(judge_fixture_tree_paths(problem_dir))
     paths.extend(problem_statement_asset_paths(problem_dir))
     return paths
 
@@ -396,6 +399,11 @@ def lint_problem(root, workspace, entry):
             errors.append("judge.checker requires judge.type: custom")
         if interactor:
             errors.append("judge.interactor requires judge.type: interactive")
+    judge_qa = inspect_judge_qa(problem_dir, config)
+    errors.extend(
+        f"[{diagnostic['code']}] {diagnostic['message']}"
+        for diagnostic in judge_qa["diagnostics"]
+    )
     solutions = config.get("solutions") or {}
     configured_programs = set()
     if not isinstance(solutions, dict):
@@ -600,6 +608,7 @@ def lint_problem(root, workspace, entry):
         *calibration["diagnostics"],
         *constraint_reconciliation["diagnostics"],
         *(solution_verification.get("diagnostics") or []),
+        *judge_qa["diagnostics"],
     ]
     return {
         "id": entry["id"],
@@ -611,6 +620,7 @@ def lint_problem(root, workspace, entry):
         "constraint_reconciliation": constraint_reconciliation,
         "solution_verification": solution_verification,
         "calibration": calibration,
+        "judge_qa": judge_qa,
         "source_hash": source_hash,
         "data_hash": data_hash,
     }
