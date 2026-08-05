@@ -24,7 +24,8 @@ import yaml
 from .errors import ProbHubError
 from .io import normalize_newlines as _normalize_newlines, read_yaml, write_json
 from .process_control import DEFAULT_PROCESS_LIMIT
-from .stressing import _compare_custom, _prepare_program, _run
+from .special_judges import run_checker_to_files
+from .stressing import _prepare_program, _run
 from .transactions import (
     TRANSACTION_PHASE_COMMITTED,
     TRANSACTION_PHASE_PREPARED,
@@ -694,26 +695,37 @@ def generate_problem_data(
                 checker_answer = checker_dir / "answer.ans"
                 checker_input.write_bytes(input_bytes)
                 checker_answer.write_bytes(answer_bytes)
-                checked = _compare_custom(
+                checker_env = os.environ.copy()
+                checker_env["PYTHONIOENCODING"] = "utf-8"
+                checked = run_checker_to_files(
                     checker_cmd,
                     checker_input,
                     checker_answer,
-                    answer_bytes,
-                    tool_timeout,
-                    checker_dir,
-                    TOOL_MEMORY_LIMIT_MB,
-                    output_limit,
-                    process_limit,
+                    checker_answer,
+                    timeout=tool_timeout,
+                    cwd=checker_dir,
+                    memory_limit_mb=TOOL_MEMORY_LIMIT_MB,
+                    output_limit_bytes=int(output_limit * 1024 * 1024),
+                    process_limit=process_limit,
+                    env=checker_env,
                 )
-                if checked["status"] != "AC":
+                if checked.get("verdict") != "AC":
                     failure = {
                         "case": case,
                         "stage": "checker",
-                        "status": checked["status"],
+                        "status": checked.get("verdict") or "FAIL",
                         "message": checked.get("message") or "checker rejected the generated answer",
                     }
-                    if checked.get("execution_status"):
-                        failure["execution_status"] = checked["execution_status"]
+                    legacy_execution_status = {
+                        "time_limit": "TLE",
+                        "memory_limit": "MLE",
+                        "output_limit": "OLE",
+                        "process_limit": "RE",
+                        "start_error": "RE",
+                        "output_control_error": "FAIL",
+                    }.get(checked.get("execution_status"))
+                    if legacy_execution_status:
+                        failure["execution_status"] = legacy_execution_status
                     failures.append(failure)
                     continue
 

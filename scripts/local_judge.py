@@ -1,4 +1,3 @@
-import codecs
 import hashlib
 import json
 import os
@@ -6,10 +5,8 @@ import platform
 import re
 import shutil
 import signal
-import subprocess
 import sys
 import tempfile
-import threading
 import time
 
 import yaml
@@ -29,14 +26,14 @@ from probhub.build_lock import workspace_file_lock
 from probhub.errors import ProbHubError
 from probhub.io import read_bounded_text
 from probhub.output_compare import compare_standard_output
+from probhub.problem_paths import ProblemPathError, resolve_problem_regular_file
+from probhub.special_judges import execute_interactive_session, run_checker_to_files
 from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
     OutputBudgetError,
     ProcessCancelled,
     cancellation_requested,
-    output_path_size,
     run_managed_to_files,
-    spawn_managed,
 )
 from probhub.solutions import (
     analyze_solution_verification,
@@ -569,7 +566,10 @@ def resolve_problem_path(prob_dir, entry):
     relative = _entry_file(entry)
     if not relative:
         return None
-    return os.path.normpath(os.path.join(prob_dir, str(relative)))
+    try:
+        return os.fspath(resolve_problem_regular_file(prob_dir, str(relative)))
+    except ProblemPathError:
+        return None
 
 
 def display_problem_path(prob_dir, path):
@@ -984,29 +984,6 @@ def run_sample_answer_testcase(
         _remove_file_with_retries(output_file)
 
 
-def _checker_result(returncode, message):
-    message = (message or "").strip()
-    if returncode in {0, 42}:
-        return "AC", message
-    if returncode in {1, 2, 43}:
-        return "WA", message
-    return "FAIL", message or f"checker exited with code {returncode}"
-
-
-def _feedback_message(feedback_dir, fallback="", limit_bytes=MAX_TOOL_DIAGNOSTIC_BYTES):
-    for name in ("judgemessage.txt", "teammessage.txt"):
-        path = os.path.join(feedback_dir, name)
-        try:
-            result = read_bounded_text(path, limit_bytes)
-        except OSError:
-            continue
-        message = result["text"].strip()
-        if message:
-            return message
-    encoded = (fallback or "").encode("utf-8", errors="replace")
-    return encoded[: max(int(limit_bytes), 0)].decode("utf-8", errors="replace").strip()
-
-
 def run_custom_testcase(
     bin_path,
     checker_bin,
@@ -1018,13 +995,8 @@ def run_custom_testcase(
     process_limit=DEFAULT_PROCESS_LIMIT,
     capture_sample_answer=False,
 ):
-    """Run a DOMjudge/testlib-style output validator.
-
-    The validator receives <input> <answer> <feedback-dir> as argv and reads
-    contestant output from stdin, matching DOMjudge's custom validation protocol.
-    """
+    """Run a contestant and adapt the shared Checker result to the legacy tuple."""
     output_file = _temporary_output_path(bin_path)
-    feedback_dir = tempfile.mkdtemp(prefix=".probhub-feedback-", dir=os.path.dirname(bin_path))
     try:
         status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
             bin_path, in_file, output_file, time_limit, memory_limit, output_limit, process_limit
@@ -1032,214 +1004,79 @@ def run_custom_testcase(
         if capture_sample_answer:
             details["sample_answer"] = compare_sample_answer(output_file, ans_file)
         if status != "AC":
+            termination_reason = details.get("termination_reason")
+            if not termination_reason:
+                termination_reason = "start_error"
+                details["termination_reason"] = termination_reason
+            details.update({
+                "verdict": status if status != "FAIL" else None,
+                "execution_status": (
+                    "memory_limit" if termination_reason == "inferred_memory_limit"
+                    else termination_reason
+                    if termination_reason in {
+                        "time_limit", "memory_limit", "output_limit", "process_limit",
+                        "output_control_error", "start_error",
+                    }
+                    else "completed"
+                ),
+                "failure_kind": (
+                    "control_failure" if status == "FAIL"
+                    else "startup_failure" if termination_reason == "start_error"
+                    else "resource_limit" if status in {"TLE", "MLE", "OLE"}
+                    or termination_reason == "process_limit"
+                    else "runtime_error"
+                ),
+                "actor": "supervisor" if status == "FAIL" else "contestant",
+            })
             return status, elapsed, memory, memory_enforced, message, details
-        checker_stdout = output_file + ".checker.out"
-        checker_stderr = output_file + ".checker.stderr"
-        try:
-            diagnostic_limit_bytes = min(
+        checker = run_checker_to_files(
+            [checker_bin],
+            in_file,
+            ans_file,
+            output_file,
+            timeout=max(5.0, float(time_limit)),
+            cwd=os.path.dirname(bin_path),
+            memory_limit_mb=memory_limit,
+            output_limit_bytes=min(
                 int(output_limit * 1024 * 1024), MAX_TOOL_DIAGNOSTIC_BYTES
-            )
-            feedback_paths = tuple(
-                os.path.join(feedback_dir, name)
-                for name in ("judgemessage.txt", "teammessage.txt")
-            )
-            checker = run_managed_to_files(
-                [checker_bin, in_file, ans_file, feedback_dir],
-                input_path=output_file,
-                stdout_path=checker_stdout,
-                stderr_path=checker_stderr,
-                additional_output_paths=feedback_paths,
-                timeout=max(5.0, float(time_limit)),
-                memory_limit_mb=memory_limit,
-                output_limit_bytes=min(int(output_limit * 1024 * 1024), 8 * 1024 * 1024),
-                process_limit=process_limit,
-            )
-            try:
-                stderr = open(checker_stderr, "r", encoding="utf-8", errors="replace").read()
-            except OSError:
-                stderr = ""
-            checker_message = _feedback_message(
-                feedback_dir, stderr, diagnostic_limit_bytes
-            )
-            if checker["reason"] != "completed":
-                detail = checker["message"] or checker["reason"].replace("_", " ")
-                return "FAIL", elapsed, memory, memory_enforced, f"checker {detail}", details
-            checker_status, checker_message = _checker_result(
-                checker["returncode"], checker_message
-            )
-            return checker_status, elapsed, memory, memory_enforced, checker_message, details
-        except OutputBudgetError as exc:
-            details = dict(details)
-            details["checker_termination_reason"] = "output_control_error"
-            return (
-                "FAIL",
-                elapsed,
-                memory,
-                memory_enforced,
-                f"checker output control failed: {exc}",
-                details,
-            )
-        except OSError as exc:
-            return "FAIL", elapsed, memory, memory_enforced, f"checker failed to start: {exc}", details
-        finally:
-            for file_name in (checker_stdout, checker_stderr):
-                _remove_file_with_retries(file_name)
+            ),
+            process_limit=process_limit,
+        )
+        checker_status = checker.get("verdict") or "FAIL"
+        actor = checker.get("actor")
+        failure_kind = checker.get("failure_kind")
+        if checker_status == "AC":
+            actor = "session"
+        elif checker_status == "WA":
+            actor = "contestant"
+            failure_kind = "wrong_answer"
+        details.update({
+            "verdict": checker.get("verdict"),
+            "execution_status": checker.get("execution_status"),
+            "failure_kind": failure_kind,
+            "actor": actor,
+            "termination_reason": checker.get("termination_reason"),
+            "checker_termination_reason": checker.get("termination_reason"),
+            "cleanup": checker.get("cleanup"),
+        })
+        checker_message = checker.get("message") or ""
+        if checker_status == "FAIL":
+            if checker.get("execution_status") == "output_control_error":
+                checker_message = f"checker output control failed: {checker_message}"
+            elif checker.get("execution_status") == "start_error":
+                checker_message = f"checker failed to start: {checker_message}"
+            elif checker.get("termination_reason") != "completed":
+                checker_message = f"checker {checker_message}"
+        return (
+            checker_status,
+            elapsed,
+            memory,
+            memory_enforced,
+            checker_message,
+            details,
+        )
     finally:
         _remove_file_with_retries(output_file)
-        shutil.rmtree(feedback_dir, ignore_errors=True)
-
-
-def _record_interactive_transcript(transcript, direction, payload, decoder, *, final=False):
-    """Reserve the shared byte budget and decode one direction incrementally."""
-    with transcript["_lock"]:
-        remaining = max(transcript["limit"] - transcript["bytes"], 0)
-        saved = payload[:remaining]
-        transcript["bytes"] += len(saved)
-        if len(saved) < len(payload):
-            transcript["truncated"] = True
-        text = decoder.decode(saved, final=final)
-        if text:
-            transcript["entries"].append({
-                "direction": direction,
-                "data": text,
-            })
-
-
-def _pump_interactive_stream(source, destination, direction, transcript, activity, traffic):
-    """Forward bytes while recording a bounded transcript and last activity time."""
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    try:
-        while True:
-            chunk = source.read(4096)
-            if not chunk:
-                break
-            now = time.monotonic()
-            with transcript["_lock"]:
-                activity["last"] = max(activity["last"], now)
-                traffic[direction] = traffic.get(direction, 0) + len(chunk)
-                limit_exceeded = traffic[direction] > traffic["limit"]
-            if limit_exceeded:
-                break
-            _record_interactive_transcript(transcript, direction, chunk, decoder)
-            destination.write(chunk)
-            destination.flush()
-    except (BrokenPipeError, OSError, ValueError):
-        pass
-    finally:
-        _record_interactive_transcript(
-            transcript, direction, b"", decoder, final=True
-        )
-        try:
-            destination.close()
-        except (OSError, ValueError):
-            pass
-        try:
-            source.close()
-        except (OSError, ValueError):
-            pass
-
-
-def _interactive_solution_output_bytes(traffic, solution_stderr):
-    try:
-        stderr_size = os.path.getsize(solution_stderr)
-    except OSError:
-        stderr_size = 0
-    lock = traffic.get("_lock")
-    if lock is None:
-        protocol_bytes = traffic.get("solution_to_interactor", 0)
-    else:
-        with lock:
-            protocol_bytes = traffic.get("solution_to_interactor", 0)
-    return int(protocol_bytes + stderr_size)
-
-
-def _interactive_result(
-    status,
-    elapsed,
-    memory,
-    memory_enforced,
-    message,
-    transcript,
-    timeout_kind=None,
-    traffic=None,
-    solution_stderr=None,
-    termination_reason=None,
-):
-    lock = transcript.get("_lock")
-    if lock is None:
-        entries = [dict(entry) for entry in transcript["entries"]]
-        transcript_truncated = transcript["truncated"]
-    else:
-        with lock:
-            entries = [dict(entry) for entry in transcript["entries"]]
-            transcript_truncated = transcript["truncated"]
-    details = {
-        "transcript": entries,
-        "transcript_truncated": transcript_truncated,
-    }
-    if traffic is not None and solution_stderr is not None:
-        details["output_bytes"] = _interactive_solution_output_bytes(
-            traffic, solution_stderr
-        )
-    if termination_reason:
-        details["termination_reason"] = termination_reason
-    if timeout_kind:
-        details["timeout_kind"] = timeout_kind
-    return status, elapsed, memory, memory_enforced, message, details
-
-
-def _interactive_output_status(
-    traffic,
-    solution_stderr,
-    interactor_stderr,
-    feedback_dir=None,
-    diagnostic_limit_bytes=MAX_TOOL_DIAGNOSTIC_BYTES,
-):
-    """Classify combined protocol/stderr output after every lifecycle edge."""
-    solution_stderr_size = output_path_size(solution_stderr, required=True)[0]
-    interactor_stderr_size = output_path_size(interactor_stderr, required=True)[0]
-    feedback_size = 0
-    if feedback_dir:
-        for name in ("judgemessage.txt", "teammessage.txt"):
-            feedback_size += output_path_size(
-                os.path.join(feedback_dir, name)
-            )[0]
-
-    lock = traffic.get("_lock")
-    if lock is None:
-        limit = int(traffic["limit"])
-        interactor_protocol_bytes = traffic.get("interactor_to_solution", 0)
-        solution_protocol_bytes = traffic.get("solution_to_interactor", 0)
-    else:
-        with lock:
-            limit = int(traffic["limit"])
-            interactor_protocol_bytes = traffic.get("interactor_to_solution", 0)
-            solution_protocol_bytes = traffic.get("solution_to_interactor", 0)
-    interactor_diagnostic_bytes = interactor_stderr_size + feedback_size
-    solution_bytes = solution_protocol_bytes + solution_stderr_size
-    if interactor_protocol_bytes > limit:
-        return "FAIL", "interactor output limit exceeded"
-    if interactor_diagnostic_bytes > int(diagnostic_limit_bytes):
-        return "FAIL", "interactor diagnostic output limit exceeded"
-    if solution_bytes > limit:
-        return "OLE", "interactive output limit exceeded"
-    return None, ""
-
-
-def _remove_interactive_temp(path):
-    """Best-effort cleanup for Windows handles that may close asynchronously."""
-    if not path:
-        return
-    for _ in range(20):
-        try:
-            shutil.rmtree(path)
-            return
-        except FileNotFoundError:
-            return
-        except PermissionError:
-            time.sleep(0.05)
-        except OSError:
-            return
 
 
 def run_interactive_testcase(
@@ -1255,285 +1092,43 @@ def run_interactive_testcase(
     process_limit=DEFAULT_PROCESS_LIMIT,
 ):
     """Connect contestant and interactor with transcript, idle and total deadlines."""
-    start = time.time()
-    monotonic_start = time.monotonic()
-    idle_limit = max(float(idle_limit if idle_limit is not None else min(time_limit, 2.0)), 0.1)
-    state_lock = threading.RLock()
-    transcript = {
-        "entries": [],
-        "bytes": 0,
-        "limit": max(int(transcript_limit), 0),
-        "truncated": False,
-        "_lock": state_lock,
-    }
-    activity = {"last": monotonic_start}
-    traffic = {"limit": int(output_limit * 1024 * 1024), "_lock": state_lock}
-    last_resource_sample = monotonic_start
-    solution_managed = None
-    interactor_managed = None
-    memory_enforced = False
-    peak_memory_mb = None
-    threads = []
-    runtime_dir = tempfile.mkdtemp(prefix=".probhub-interactive-", dir=os.path.dirname(bin_path))
-    solution_stderr = os.path.join(runtime_dir, "solution.stderr")
-    interactor_stderr = os.path.join(runtime_dir, "interactor.stderr")
-    feedback_dir = os.path.join(runtime_dir, "feedback")
-    os.mkdir(feedback_dir)
-    diagnostic_limit_bytes = min(
-        int(output_limit * 1024 * 1024), MAX_TOOL_DIAGNOSTIC_BYTES
+    result = execute_interactive_session(
+        [bin_path],
+        [interactor_bin],
+        in_file,
+        ans_file,
+        work_dir=os.path.dirname(bin_path),
+        time_limit=time_limit,
+        memory_limit_mb=memory_limit,
+        idle_limit=idle_limit,
+        transcript_limit=transcript_limit,
+        output_limit_bytes=int(output_limit * 1024 * 1024),
+        process_limit=process_limit,
     )
-    try:
-        with open(solution_stderr, "wb") as solution_err, open(interactor_stderr, "wb") as interactor_err:
-            solution_managed = spawn_managed(
-                [bin_path],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=solution_err,
-                bufsize=0,
-                memory_limit_mb=memory_limit,
-                process_limit=process_limit,
-            )
-            memory_enforced = solution_managed.memory_enforced
-            solution = solution_managed.proc
-            interactor_managed = spawn_managed(
-                [interactor_bin, in_file, ans_file, feedback_dir],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=interactor_err,
-                bufsize=0,
-                memory_limit_mb=memory_limit,
-                process_limit=process_limit,
-            )
-            interactor = interactor_managed.proc
-
-            threads = [
-                threading.Thread(
-                    target=_pump_interactive_stream,
-                    args=(solution.stdout, interactor.stdin, "solution_to_interactor", transcript, activity, traffic),
-                    daemon=True,
-                ),
-                threading.Thread(
-                    target=_pump_interactive_stream,
-                    args=(interactor.stdout, solution.stdin, "interactor_to_solution", transcript, activity, traffic),
-                    daemon=True,
-                ),
-            ]
-            for thread in threads:
-                thread.start()
-            # Process creation and Windows Job setup are infrastructure time, not
-            # contestant execution or protocol idleness. Start both clocks once
-            # both pumps can observe traffic so a slow runner cannot consume the
-            # formal TL before the interactive session is ready.
-            monotonic_start = time.monotonic()
-            start = time.time()
-            activity["last"] = max(activity["last"], monotonic_start)
-            last_resource_sample = monotonic_start
-
-            deadline = monotonic_start + float(time_limit)
-            while solution.poll() is None or interactor.poll() is None:
-                if cancellation_requested():
-                    raise ProcessCancelled("execution cancelled")
-                now = time.monotonic()
-                resource_status, resource_message = _interactive_output_status(
-                    traffic,
-                    solution_stderr,
-                    interactor_stderr,
-                    feedback_dir,
-                    diagnostic_limit_bytes,
-                )
-                if now - last_resource_sample >= 0.05:
-                    last_resource_sample = now
-                    solution_count, solution_memory = solution_managed.sample()
-                    peak_memory_mb = solution_managed.peak_memory_mb
-                    if solution_memory is not None and solution_memory >= memory_limit:
-                        resource_status, resource_message = "MLE", "memory limit exceeded"
-                    elif solution_count is not None and solution_count > process_limit:
-                        resource_status, resource_message = "RE", "process limit exceeded"
-                    interactor_count, interactor_memory = interactor_managed.sample()
-                    if interactor_memory is not None and interactor_memory >= memory_limit:
-                        resource_status, resource_message = "FAIL", "interactor memory limit exceeded"
-                    elif interactor_count is not None and interactor_count > process_limit:
-                        resource_status, resource_message = "FAIL", "interactor process limit exceeded"
-                    elif interactor.poll() is not None:
-                        interactor_status, interactor_message = _checker_result(
-                            interactor.returncode, ""
-                        )
-                        if interactor_status == "FAIL":
-                            resource_status = "FAIL"
-                            resource_message = interactor_message
-                if resource_status:
-                    solution_managed.terminate()
-                    solution_managed = None
-                    interactor_managed.terminate()
-                    interactor_managed = None
-                    for thread in threads:
-                        thread.join(timeout=1)
-                    return _interactive_result(
-                        resource_status,
-                        time.time() - start,
-                        peak_memory_mb,
-                        memory_enforced,
-                        resource_message,
-                        transcript,
-                        traffic=traffic,
-                        solution_stderr=solution_stderr,
-                        termination_reason=(
-                            "memory_limit" if resource_status == "MLE"
-                            else "output_limit" if resource_status == "OLE"
-                            else None
-                        ),
-                    )
-                timeout_kind = None
-                if now >= deadline:
-                    timeout_kind = "total"
-                else:
-                    with state_lock:
-                        idle_elapsed = now - activity["last"]
-                    if idle_elapsed >= idle_limit:
-                        timeout_kind = "idle"
-                if timeout_kind:
-                    solution_managed.sample()
-                    peak_memory_mb = solution_managed.peak_memory_mb
-                    solution_managed.terminate()
-                    solution_managed = None
-                    interactor_managed.terminate()
-                    interactor_managed = None
-                    for thread in threads:
-                        thread.join(timeout=1)
-                    message = (
-                        "interactive idle timeout exceeded"
-                        if timeout_kind == "idle"
-                        else "interactive time limit exceeded"
-                    )
-                    elapsed = min(time.time() - start, float(time_limit))
-                    return _interactive_result(
-                        "TLE",
-                        elapsed,
-                        peak_memory_mb,
-                        memory_enforced,
-                        message,
-                        transcript,
-                        timeout_kind=timeout_kind,
-                        traffic=traffic,
-                        solution_stderr=solution_stderr,
-                        termination_reason="time_limit",
-                    )
-                time.sleep(0.005)
-
-            # Both direct processes may exit while descendants keep their pipes
-            # or diagnostic files open. Preserve telemetry, terminate both full
-            # trees, then classify the stable final byte counts.
-            solution_managed.sample()
-            peak_memory_mb = solution_managed.peak_memory_mb
-            interactor_managed.sample()
-            interactor_peak_memory = interactor_managed.peak_memory_mb
-            solution_managed.terminate()
-            interactor_managed.terminate()
-            for thread in threads:
-                thread.join(timeout=1)
-            resource_status, resource_message = _interactive_output_status(
-                traffic,
-                solution_stderr,
-                interactor_stderr,
-                feedback_dir,
-                diagnostic_limit_bytes,
-            )
-            if (
-                interactor.returncode != 0
-                and interactor_managed.memory_enforced
-                and interactor_peak_memory is not None
-                and interactor_peak_memory >= memory_limit * 0.98
-            ):
-                resource_status = "FAIL"
-                resource_message = "interactor memory limit exceeded"
-
-        elapsed = time.time() - start
-        solution_message = ""
-        interactor_message = ""
-        try:
-            solution_message = read_bounded_text(
-                solution_stderr, int(output_limit * 1024 * 1024)
-            )["text"].strip()
-        except OSError:
-            pass
-        try:
-            interactor_message = read_bounded_text(
-                interactor_stderr, diagnostic_limit_bytes
-            )["text"].strip()
-        except OSError:
-            pass
-        interactor_message = _feedback_message(
-            feedback_dir, interactor_message, diagnostic_limit_bytes
-        )
-
-        if resource_status:
-            return _interactive_result(
-                resource_status,
-                elapsed,
-                peak_memory_mb,
-                memory_enforced,
-                resource_message,
-                transcript,
-                traffic=traffic,
-                solution_stderr=solution_stderr,
-                termination_reason=(
-                    "memory_limit" if resource_status == "MLE"
-                    else "output_limit" if resource_status == "OLE"
-                    else None
-                ),
-            )
-
-        if solution.returncode != 0:
-            status = _failed_status(
-                solution.returncode,
-                solution_message,
-                memory_enforced,
-                peak_memory_mb,
-                memory_limit,
-            )
-            return _interactive_result(
-                status,
-                elapsed,
-                peak_memory_mb,
-                memory_enforced,
-                solution_message,
-                transcript,
-                traffic=traffic,
-                solution_stderr=solution_stderr,
-                termination_reason=(
-                    "inferred_memory_limit" if status == "MLE" else None
-                ),
-            )
-        interactor_status, message = _checker_result(interactor.returncode, interactor_message)
-        return _interactive_result(
-            interactor_status,
-            elapsed,
-            peak_memory_mb,
-            memory_enforced,
-            message,
-            transcript,
-            traffic=traffic,
-            solution_stderr=solution_stderr,
-        )
-    except OSError as exc:
-        return _interactive_result(
-            "FAIL",
-            time.time() - start,
-            peak_memory_mb,
-            memory_enforced,
-            str(exc),
-            transcript,
-            traffic=traffic,
-            solution_stderr=solution_stderr,
-        )
-    finally:
-        if solution_managed is not None:
-            solution_managed.terminate()
-        if interactor_managed is not None:
-            interactor_managed.terminate()
-        for thread in threads:
-            thread.join(timeout=1)
-        _remove_interactive_temp(runtime_dir)
+    details = {
+        "transcript": result.get("transcript", []),
+        "transcript_truncated": result.get("transcript_truncated", False),
+        "output_bytes": result.get("output_bytes"),
+        "termination_reason": result.get("termination_reason"),
+        "verdict": result.get("verdict"),
+        "execution_status": result.get("execution_status"),
+        "failure_kind": result.get("failure_kind"),
+        "actor": result.get("actor"),
+        "cleanup": result.get("cleanup"),
+        "exit_codes": result.get("exit_codes"),
+        "traffic": result.get("traffic"),
+        "resources": result.get("resources"),
+    }
+    if result.get("timeout_kind"):
+        details["timeout_kind"] = result["timeout_kind"]
+    return (
+        result.get("status") or "FAIL",
+        float(result.get("time") or 0.0),
+        result.get("memory"),
+        bool(result.get("memory_enforced")),
+        result.get("message") or "",
+        details,
+    )
 
 def run_testcase(
     bin_path,
@@ -2683,6 +2278,11 @@ def _main_unlocked():
                     transcript_truncated=judge_details.get("transcript_truncated", False),
                     output_bytes=judge_details.get("output_bytes"),
                     termination_reason=judge_details.get("termination_reason"),
+                    verdict=judge_details.get("verdict"),
+                    execution_status=judge_details.get("execution_status"),
+                    failure_kind=judge_details.get("failure_kind"),
+                    actor=judge_details.get("actor"),
+                    cleanup=judge_details.get("cleanup"),
                     cached=cached,
                 )
                 case_results.append({
@@ -2695,6 +2295,11 @@ def _main_unlocked():
                     "memory_enforced": memory_enforced,
                     "output_bytes": judge_details.get("output_bytes"),
                     "termination_reason": judge_details.get("termination_reason"),
+                    "verdict": judge_details.get("verdict"),
+                    "execution_status": judge_details.get("execution_status"),
+                    "failure_kind": judge_details.get("failure_kind"),
+                    "actor": judge_details.get("actor"),
+                    "cleanup": judge_details.get("cleanup"),
                     "cached": cached,
                 })
                 if requires_sample_answer:

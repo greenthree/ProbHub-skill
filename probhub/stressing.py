@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .build_lock import workspace_build_lock
 from .errors import ProbHubError
-from .io import normalize_newlines, read_bounded_text, read_yaml, write_json, write_yaml
+from .io import normalize_newlines, read_yaml, write_json, write_yaml
 from .output_compare import compare_standard_output
 from .process_control import (
     DEFAULT_PROCESS_LIMIT,
@@ -23,6 +23,7 @@ from .process_control import (
     allocate_shared_prefix_bytes,
     run_managed_to_files,
 )
+from .special_judges import MAX_CHECKER_DIAGNOSTIC_BYTES, run_checker_to_files
 from .transactions import (
     TRANSACTION_PHASE_COMMITTED,
     TRANSACTION_PHASE_PREPARED,
@@ -40,7 +41,6 @@ DEFAULT_ROUNDS = 1000
 _CASE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 DEFAULT_TOOL_TIMEOUT = 5.0
 MIB = 1024 * 1024
-MAX_CHECKER_DIAGNOSTIC_BYTES = 8 * MIB
 STRESS_METADATA_BUDGET_BYTES = 64 * 1024
 
 
@@ -349,28 +349,6 @@ def _run(
         }
 
 
-def _feedback_message(feedback_dir, fallback="", limit_bytes=MAX_CHECKER_DIAGNOSTIC_BYTES):
-    for name in ("judgemessage.txt", "teammessage.txt"):
-        path = Path(feedback_dir) / name
-        try:
-            result = read_bounded_text(path, limit_bytes)
-        except OSError:
-            continue
-        message = result["text"].strip()
-        if message:
-            result["source"] = name
-            return message, result
-    encoded = (fallback or "").encode("utf-8", errors="replace")
-    retained = encoded[: max(int(limit_bytes), 0)]
-    return retained.decode("utf-8", errors="replace").strip(), {
-        "source": "stderr",
-        "observed_bytes": len(encoded),
-        "retained_bytes": len(retained),
-        "truncated": len(retained) < len(encoded),
-        "exists": bool(encoded),
-    }
-
-
 def _compare_custom(
     checker_command,
     input_path,
@@ -382,28 +360,27 @@ def _compare_custom(
     output_limit,
     process_limit,
 ):
-    feedback_dir = Path(tempfile.mkdtemp(prefix="feedback-", dir=cwd))
+    contestant_dir = Path(tempfile.mkdtemp(prefix="checker-input-", dir=cwd))
     try:
+        contestant_output_path = contestant_dir / "contestant.out"
+        contestant_output_path.write_bytes(brute_output)
         diagnostic_limit_bytes = min(int(output_limit * MIB), MAX_CHECKER_DIAGNOSTIC_BYTES)
-        feedback_paths = tuple(
-            feedback_dir / name for name in ("judgemessage.txt", "teammessage.txt")
-        )
-        result = _run(
-            [*checker_command, str(input_path), str(answer_path), str(feedback_dir)],
-            brute_output,
-            timeout,
-            cwd,
-            memory_limit,
-            min(output_limit, 8),
-            process_limit,
-            additional_output_paths=feedback_paths,
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        result = run_checker_to_files(
+            checker_command,
+            input_path,
+            answer_path,
+            contestant_output_path,
+            timeout=timeout,
+            cwd=cwd,
+            memory_limit_mb=memory_limit,
+            output_limit_bytes=int(output_limit * MIB),
+            process_limit=process_limit,
+            diagnostic_limit_bytes=diagnostic_limit_bytes,
+            env=env,
         )
         stderr = result.get("stderr") or b""
-        message, feedback = _feedback_message(
-            feedback_dir,
-            stderr.decode("utf-8", errors="replace"),
-            diagnostic_limit_bytes,
-        )
         output_details = {
             key: result.get(key)
             for key in (
@@ -414,44 +391,30 @@ def _compare_custom(
                 "output_truncated",
             )
         }
-        if result.get("reason") != "completed":
-            return {
-                "status": "FAIL",
-                "execution_status": result.get("status"),
-                "match": False,
-                "message": message or f"checker {result.get('message') or result.get('reason')}",
-                "stderr": stderr,
-                "feedback": feedback,
-                **output_details,
-            }
-        if result["returncode"] in {0, 42}:
-            return {
-                "status": "AC",
-                "match": True,
-                "message": message,
-                "stderr": stderr,
-                "feedback": feedback,
-                **output_details,
-            }
-        if result["returncode"] in {1, 2, 43}:
-            return {
-                "status": "WA",
-                "match": False,
-                "message": message,
-                "stderr": stderr,
-                "feedback": feedback,
-                **output_details,
-            }
-        return {
-            "status": "FAIL",
-            "match": False,
-            "message": message or f"checker exited with code {result['returncode']}",
+        verdict = result.get("verdict")
+        diagnostic_message = result.get("message") or ""
+        if result.get("failure_kind") != "cleanup_failure":
+            diagnostic_message = result.get("feedback_message") or diagnostic_message
+        comparison = {
+            "status": verdict or "FAIL",
+            "match": verdict == "AC",
+            "message": diagnostic_message,
             "stderr": stderr,
-            "feedback": feedback,
+            "feedback": result.get("feedback"),
             **output_details,
         }
+        if verdict is None and result.get("termination_reason") != "completed":
+            comparison["execution_status"] = {
+                "time_limit": "TLE",
+                "memory_limit": "MLE",
+                "output_limit": "OLE",
+                "process_limit": "RE",
+                "start_error": "RE",
+                "output_control_error": "FAIL",
+            }.get(result.get("execution_status"), "RE")
+        return comparison
     finally:
-        shutil.rmtree(feedback_dir, ignore_errors=True)
+        shutil.rmtree(contestant_dir, ignore_errors=True)
 
 
 def _comparison(configured, commands, round_dir, input_data, accepted_output, brute_output):

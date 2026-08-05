@@ -2,7 +2,7 @@ import hashlib
 import json
 import math
 import re
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 from .builder_fingerprint import (
     BUILD_MANIFEST_SCHEMA_VERSION,
@@ -16,6 +16,7 @@ from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
 from .metadata import build_meta, normalize_display_name
+from .problem_paths import ProblemPathError, resolve_problem_regular_file
 from .solutions import analyze_solution_verification
 from .statement import parse_statement
 from .statement_consistency import analyze_constraint_consistency, reconcile_constraints
@@ -70,54 +71,17 @@ def _problem_relative_path(problem_dir, value):
     return candidate
 
 
-def _is_link_like(path):
-    try:
-        return path.is_symlink() or (
-            hasattr(path, "is_junction") and path.is_junction()
-        )
-    except OSError:
-        return False
-
-
 def _problem_regular_file_path(problem_dir, value):
-    """Resolve a configured problem-local file without accepting links.
-
-    Returns ``(path, reason)`` where reason is one of ``invalid``, ``outside``,
-    ``symlink``, or ``missing``.  The explicit reason lets lint keep stable,
-    field-specific diagnostics without ever opening an escaped path.
-    """
-
-    if not isinstance(value, str) or not value.strip():
-        return None, "invalid"
-    problem_dir = Path(problem_dir).resolve()
-    value = value.strip()
-    relative = Path(value)
-    if relative.is_absolute() or PureWindowsPath(value).is_absolute():
-        return None, "outside"
-    if ".." in relative.parts or ".." in PureWindowsPath(value).parts:
-        return None, "outside"
-    candidate = problem_dir / relative
-    current = problem_dir
     try:
-        for part in relative.parts:
-            if part in {"", "."}:
-                continue
-            current = current / part
-            if _is_link_like(current):
-                return None, "symlink"
-        resolved = candidate.resolve()
-        resolved.relative_to(problem_dir)
-    except (OSError, RuntimeError, ValueError):
-        return None, "outside"
-    if not resolved.is_file():
-        return None, "missing"
-    return resolved, None
+        return resolve_problem_regular_file(problem_dir, value), None
+    except ProblemPathError as exc:
+        return None, exc.reason
 
 
 def _configured_file_error(field, value, reason, missing_label):
     if reason == "outside":
         return f"{field} must stay inside the problem directory: {value}"
-    if reason == "symlink":
+    if reason == "link":
         return f"{field} must be a regular non-symlink file: {value}"
     if reason == "invalid":
         return f"{field} must be a non-empty relative path"
@@ -390,15 +354,29 @@ def lint_problem(root, workspace, entry):
     if judge_type == "custom":
         if not checker:
             errors.append("judge.checker is required for custom judging")
-        elif not (problem_dir / checker).is_file():
-            errors.append(f"checker not found: {checker}")
+        else:
+            _, checker_reason = _problem_regular_file_path(problem_dir, checker)
+            if checker_reason:
+                errors.append(_configured_file_error(
+                    "judge.checker",
+                    checker,
+                    checker_reason,
+                    "checker",
+                ))
         if interactor:
             errors.append("judge.interactor is only valid for interactive judging")
     elif judge_type == "interactive":
         if not interactor:
             errors.append("judge.interactor is required for interactive judging")
-        elif not (problem_dir / interactor).is_file():
-            errors.append(f"interactor not found: {interactor}")
+        else:
+            _, interactor_reason = _problem_regular_file_path(problem_dir, interactor)
+            if interactor_reason:
+                errors.append(_configured_file_error(
+                    "judge.interactor",
+                    interactor,
+                    interactor_reason,
+                    "interactor",
+                ))
         if checker:
             errors.append("judge.checker is not used for interactive judging")
         interactive = judge.get("interactive") or {}

@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+- 统一 Schema v1 特殊 Judge 路径栅栏：lint、正式打包和 local Judge 共同拒绝绝对路径、`..`、符号链接、junction/reparse point、非普通文件和题目目录外目标，并保留 `judge.type: checker` 兼容别名。
+- 新增共享 Checker/Interactor Core 运行层，供 local Judge、stress 与数据生成复用；结果分离 verdict、execution status、failure kind、责任方、终止原因、双方资源/流量证据与清理结果，沙箱缓存 Schema 升至 7。
+- Checker feedback 同时保留有界诊断与简短正式失败原因；Interactor 非普通 feedback、资源异常、启动失败、取消和清理失败均返回一致的结构化语义，清理失败不会再被成功 verdict 或取消状态掩盖。
+
 ## [0.6.5] - 2026-08-04
 
 - Schema v1 题面—Validator 约束对账新增多组数据累计约束检查：保守识别 LaTeX 求和、中文“所有测试用例之和”表述，以及 Validator 中直接 `+=` / `acc = acc + term` 累加和后续 `ensuref` 上限；统一规范化为 `sum:n`、`sum:len:s`、`sum:n+m` 等主体。

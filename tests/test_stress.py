@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import time
 import unittest
@@ -11,6 +12,7 @@ from probhub.errors import ProbHubError
 from probhub.io import write_yaml
 from probhub.linting import compute_source_hash, lint_workspace
 from probhub.process_control import process_alive
+from probhub.special_judges import run_checker_to_files
 from probhub.stressing import expand_generator_args, stress_problem
 from probhub.workspace import load_problem, load_workspace, problem_entries
 
@@ -31,6 +33,75 @@ class StressTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertEqual(result["reason"], "output_control_error")
         self.assertIn("cannot enforce", result["message"])
+
+    def test_checker_core_separates_protocol_verdict_and_execution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            input_path = root / "case.in"
+            answer_path = root / "case.ans"
+            output_path = root / "contestant.out"
+            checker_path = root / "checker.py"
+            input_path.write_bytes(b"1\n")
+            answer_path.write_bytes(b"2\n")
+            output_path.write_bytes(b"contestant\n")
+            checker_path.write_text(
+                "import pathlib,sys\n"
+                "assert sys.stdin.buffer.read() == b'contestant\\n'\n"
+                "pathlib.Path(sys.argv[-1], 'judgemessage.txt').write_text("
+                "'checker feedback', encoding='utf-8')\n"
+                "raise SystemExit(int(sys.argv[1]))\n",
+                encoding="utf-8",
+            )
+
+            for returncode, verdict, execution_status, failure_kind, actor in (
+                (0, "AC", "completed", None, "session"),
+                (42, "AC", "completed", None, "session"),
+                (1, "WA", "completed", "wrong_answer", "contestant"),
+                (2, "WA", "completed", "wrong_answer", "contestant"),
+                (43, "WA", "completed", "wrong_answer", "contestant"),
+                (7, None, "completed", "judge_failure", "checker"),
+            ):
+                with self.subTest(returncode=returncode):
+                    result = run_checker_to_files(
+                        [sys.executable, str(checker_path), str(returncode)],
+                        input_path,
+                        answer_path,
+                        output_path,
+                        timeout=2,
+                        cwd=root,
+                        output_limit_bytes=1024 * 1024,
+                    )
+                self.assertEqual(result["verdict"], verdict)
+                self.assertEqual(result["execution_status"], execution_status)
+                self.assertEqual(result["failure_kind"], failure_kind)
+                self.assertEqual(result["actor"], actor)
+                self.assertEqual(result["termination_reason"], "completed")
+                self.assertEqual(result["message"], "checker feedback")
+                self.assertEqual(result["feedback_message"], "checker feedback")
+
+    def test_checker_core_output_control_failure_is_structured(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch(
+            "probhub.special_judges.run_managed_to_files",
+            side_effect=stressing.OutputBudgetError("feedback is not regular"),
+        ):
+            root = Path(temp)
+            for name in ("case.in", "case.ans", "contestant.out"):
+                (root / name).write_bytes(b"")
+            result = run_checker_to_files(
+                ["checker"],
+                root / "case.in",
+                root / "case.ans",
+                root / "contestant.out",
+                timeout=1,
+                cwd=root,
+                output_limit_bytes=1024,
+            )
+        self.assertIsNone(result["verdict"])
+        self.assertEqual(result["execution_status"], "output_control_error")
+        self.assertEqual(result["failure_kind"], "control_failure")
+        self.assertEqual(result["actor"], "supervisor")
+        self.assertEqual(result["termination_reason"], "output_control_error")
+        self.assertIn("not regular", result["message"])
 
     def create_workspace(self, root, judge_type="standard"):
         write_yaml(root / ".probhub/workspace.yaml", {

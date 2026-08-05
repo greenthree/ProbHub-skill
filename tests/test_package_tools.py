@@ -587,6 +587,43 @@ class PackageToolsTests(unittest.TestCase):
             "judge": {"type": "checker", "checker": "code/checker.cpp"},
         }
 
+    def test_output_validator_rejects_unsafe_checker_sources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "A"
+            config = self.create_checker_problem(problem)
+            for source in (None, "", "   "):
+                with self.subTest(source=source):
+                    config["judge"]["checker"] = source
+                    with self.assertRaises(ProbHubError) as raised:
+                        validate_output_validator_source(problem, config)
+                    self.assertEqual(raised.exception.code, "unsafe_package_source")
+                    self.assertEqual(str(raised.exception), "judge.checker is required")
+
+            for source in ("../outside.cpp", r"..\outside.cpp", r"C:relative.cpp"):
+                with self.subTest(source=source):
+                    config["judge"]["checker"] = source
+                    with self.assertRaises(ProbHubError) as raised:
+                        validate_output_validator_source(problem, config)
+                    self.assertEqual(raised.exception.code, "unsafe_package_source")
+                    self.assertIn(
+                        "judge.checker must stay inside the problem directory",
+                        str(raised.exception),
+                    )
+
+            checker_link = problem / "code/checker-link.cpp"
+            try:
+                checker_link.symlink_to(problem / "code/checker.cpp")
+            except (NotImplementedError, OSError):
+                return
+            config["judge"]["checker"] = "code/checker-link.cpp"
+            with self.assertRaises(ProbHubError) as raised:
+                validate_output_validator_source(problem, config)
+            self.assertEqual(raised.exception.code, "unsafe_package_source")
+            self.assertEqual(
+                str(raised.exception),
+                "judge.checker must be a regular file: code/checker-link.cpp",
+            )
+
     def test_output_validator_compile_uses_managed_limits(self):
         with tempfile.TemporaryDirectory() as temp:
             problem = Path(temp) / "A"
