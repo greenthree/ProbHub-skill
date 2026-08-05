@@ -32,6 +32,9 @@ from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
     OutputBudgetError,
     ProcessCancelled,
+    VALIDATOR_MEMORY_LIMIT_MB,
+    VALIDATOR_OUTPUT_LIMIT_BYTES,
+    VALIDATOR_TIMEOUT_SECONDS,
     cancellation_requested,
     run_managed_to_files,
 )
@@ -1182,7 +1185,7 @@ def run_testcase(
     )
     return status, elapsed, memory, memory_enforced, message, details
 
-def run_validator(val_bin, in_file, timeout=5.0):
+def run_validator(val_bin, in_file, timeout=VALIDATOR_TIMEOUT_SECONDS):
     """Validate LF-normalized input under the shared process-tree controller."""
     try:
         with open(in_file, "rb") as fin:
@@ -1196,8 +1199,8 @@ def run_validator(val_bin, in_file, timeout=5.0):
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 timeout=timeout,
-                memory_limit_mb=512,
-                output_limit_bytes=8 * 1024 * 1024,
+                memory_limit_mb=VALIDATOR_MEMORY_LIMIT_MB,
+                output_limit_bytes=VALIDATOR_OUTPUT_LIMIT_BYTES,
                 process_limit=DEFAULT_PROCESS_LIMIT,
             )
             try:

@@ -964,6 +964,64 @@ class ProcessControlTests(unittest.TestCase):
             self.assertTrue(started_pid, "managed process did not start")
             self.wait_until_dead(started_pid[0])
 
+    def test_custom_cancel_check_stops_managed_process_and_descendant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            parent_pid_file = root / "parent.pid"
+            child_pid_file = root / "child.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(child_pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            parent = (
+                "import os,pathlib,subprocess,sys,time;"
+                f"pathlib.Path({str(parent_pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]);"
+                "time.sleep(30)"
+            )
+
+            def cancel_check():
+                return parent_pid_file.is_file() and child_pid_file.is_file()
+
+            with self.assertRaisesRegex(ProcessCancelled, "execution cancelled"):
+                run_managed_to_files(
+                    [sys.executable, "-c", parent],
+                    input_data=b"",
+                    stdout_path=root / "stdout.txt",
+                    stderr_path=root / "stderr.txt",
+                    timeout=10,
+                    memory_limit_mb=256,
+                    output_limit_bytes=1024,
+                    process_limit=8,
+                    cwd=root,
+                    cancel_check=cancel_check,
+                )
+
+            self.assertTrue(parent_pid_file.is_file(), "managed process did not start")
+            self.assertTrue(child_pid_file.is_file(), "managed descendant did not start")
+            self.wait_until_dead(int(parent_pid_file.read_text(encoding="utf-8")))
+            self.wait_until_dead(int(child_pid_file.read_text(encoding="utf-8")))
+
+    def test_explicit_cancel_check_replaces_default_cancel_source(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            process_control, "cancellation_requested", return_value=True
+        ) as default_cancel:
+            root = Path(temp)
+            result = run_managed_to_files(
+                [sys.executable, "-c", "print('ok')"],
+                stdout_path=root / "stdout.txt",
+                stderr_path=root / "stderr.txt",
+                timeout=5,
+                memory_limit_mb=256,
+                output_limit_bytes=1024,
+                process_limit=8,
+                cwd=root,
+                cancel_check=lambda: False,
+            )
+        self.assertEqual(result["reason"], "completed", result)
+        default_cancel.assert_not_called()
+
     def test_external_force_cancel_kills_detached_descendant(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

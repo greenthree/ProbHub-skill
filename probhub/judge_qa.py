@@ -20,6 +20,8 @@ _CHECKER_STATUSES = {"AC", "WA"}
 _INTERACTOR_STATUSES = {"AC", "WA", "RE", "TLE", "MLE", "OLE"}
 _INTERACTOR_BEHAVIORS = {"early-eof", "idle", "output-flood"}
 _ROBUSTNESS_PROBES = {"empty", "truncated", "extra-token", "oversized"}
+_JUDGE_QA_OFFICIAL_SOURCE_SUFFIXES = {".cpp"}
+_JUDGE_QA_CONTESTANT_SOURCE_SUFFIXES = {".cpp", ".py"}
 _PATH_REASON_CODES = {
     "invalid": "judge_qa_fixture_path_invalid",
     "outside": "judge_qa_fixture_path_outside",
@@ -53,18 +55,20 @@ def _under_prefix(relative, prefix):
     return path_parts[:len(prefix_parts)] == prefix_parts and len(path_parts) > len(prefix_parts)
 
 
-def judge_fixture_tree_paths(problem_dir):
+def judge_fixture_tree_paths(problem_dir, *, check=None):
     """Return regular non-link files stored under judge-fixtures/."""
 
-    return _judge_qa_tree_paths(problem_dir, "judge-fixtures")
+    return _judge_qa_tree_paths(problem_dir, "judge-fixtures", check=check)
 
 
-def _judge_qa_tree_paths(problem_dir, relative_root):
+def _judge_qa_tree_paths(problem_dir, relative_root, *, check=None):
     root = Path(problem_dir).resolve() / relative_root
     if not root.is_dir() or root.is_symlink():
         return []
     paths = []
     for candidate in root.rglob("*"):
+        if check is not None:
+            check()
         try:
             relative = candidate.relative_to(Path(problem_dir).resolve()).as_posix()
             resolved = resolve_problem_regular_file(problem_dir, relative)
@@ -74,10 +78,12 @@ def _judge_qa_tree_paths(problem_dir, relative_root):
     return paths
 
 
-def _hash_fixture_files(files):
+def _hash_fixture_files(files, *, check=None):
     digest = hashlib.sha256()
     digest.update(b"probhub-judge-qa-fixtures-v1\0")
     for item in sorted(files, key=lambda value: value["path"]):
+        if check is not None:
+            check()
         relative = item["path"].encode("utf-8")
         expected_size = item["size"]
         digest.update(len(relative).to_bytes(4, "big"))
@@ -86,6 +92,8 @@ def _hash_fixture_files(files):
         observed_size = 0
         with item["absolute"].open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                if check is not None:
+                    check()
                 observed_size += len(chunk)
                 digest.update(chunk)
         after = item["absolute"].stat()
@@ -107,10 +115,12 @@ def _hash_fixture_files(files):
     return digest.hexdigest()
 
 
-def inspect_judge_qa(problem_dir, config):
+def inspect_judge_qa(problem_dir, config, *, check=None):
     """Parse Judge QA Schema v1 without executing any fixture."""
 
     problem_dir = Path(problem_dir).resolve()
+    if check is not None:
+        check()
     judge = config.get("judge")
     if not isinstance(judge, dict) or "qa" not in judge:
         return {
@@ -157,6 +167,8 @@ def inspect_judge_qa(problem_dir, config):
         if not isinstance(value, dict):
             return
         for key in sorted(set(value) - set(allowed), key=str):
+            if check is not None:
+                check()
             add(
                 "judge_qa_unknown_field",
                 f"{field} contains unsupported field: {key}",
@@ -264,9 +276,24 @@ def inspect_judge_qa(problem_dir, config):
             field="judge.type",
             judge_type=judge_type,
         )
+    required_programs = ["validator"]
+    required_programs.append("checker" if judge_type == "custom" else "interactor")
+    for program_key in required_programs:
+        program = judge.get(program_key)
+        if (
+            isinstance(program, str)
+            and PurePosixPath(program.replace("\\", "/")).suffix.casefold()
+            not in _JUDGE_QA_OFFICIAL_SOURCE_SUFFIXES
+        ):
+            add(
+                "judge_qa_program_type_unsupported",
+                f"judge.{program_key} must be a reproducible .cpp source for Judge QA",
+                field=f"judge.{program_key}",
+                path=program,
+            )
 
     for tree_name in ("judge-fixtures", "code/judge-qa"):
-        for path in _judge_qa_tree_paths(problem_dir, tree_name):
+        for path in _judge_qa_tree_paths(problem_dir, tree_name, check=check):
             register_file("judge.qa.fixture_tree", path)
 
     raw_cases = raw_qa.get("cases")
@@ -287,6 +314,8 @@ def inspect_judge_qa(problem_dir, config):
     seen_ids = {}
     expected_by_id = {}
     for index, raw_case in enumerate(raw_cases[:MAX_JUDGE_QA_CASES]):
+        if check is not None:
+            check()
         field = f"judge.qa.cases[{index}]"
         if not isinstance(raw_case, dict):
             add("judge_qa_case_invalid", f"{field} must be a mapping", field=field)
@@ -519,14 +548,27 @@ def inspect_judge_qa(problem_dir, config):
                         **({"case_id": case_id} if case_id else {}),
                     )
                 elif source is not None:
+                    resolved_source = resolve_file(
+                        f"{field}.contestant.source",
+                        source,
+                        required_prefix="code/judge-qa",
+                        case_id=case_id,
+                    )
                     parsed["contestant"] = {
-                        "source": resolve_file(
-                            f"{field}.contestant.source",
-                            source,
-                            required_prefix="code/judge-qa",
-                            case_id=case_id,
-                        ),
+                        "source": resolved_source,
                     }
+                    if (
+                        isinstance(resolved_source, str)
+                        and PurePosixPath(resolved_source).suffix.casefold()
+                        not in _JUDGE_QA_CONTESTANT_SOURCE_SUFFIXES
+                    ):
+                        add(
+                            "judge_qa_program_type_unsupported",
+                            f"{field}.contestant.source must be a reproducible .cpp or .py source",
+                            field=f"{field}.contestant.source",
+                            path=resolved_source,
+                            **({"case_id": case_id} if case_id else {}),
+                        )
                 elif (
                     not isinstance(behavior, str)
                     or behavior not in _INTERACTOR_BEHAVIORS
@@ -658,7 +700,7 @@ def inspect_judge_qa(problem_dir, config):
     fixture_hash = None
     if not diagnostics:
         try:
-            fixture_hash = _hash_fixture_files(resolved_files.values())
+            fixture_hash = _hash_fixture_files(resolved_files.values(), check=check)
         except OSError as exc:
             add(
                 "judge_qa_fixture_changed",
@@ -684,3 +726,11 @@ def inspect_judge_qa(problem_dir, config):
         },
         "diagnostics": diagnostics,
     }
+
+
+def judge_qa_problem(*args, **kwargs):
+    """Execute Judge QA through a lazy import to avoid linting import cycles."""
+
+    from .judge_qa_runtime import judge_qa_problem as execute
+
+    return execute(*args, **kwargs)
