@@ -89,6 +89,59 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
         self.assertNotIn("failed to start", message)
         self.assertEqual(details["checker_termination_reason"], "output_control_error")
 
+    def test_checker_uses_relative_file_arguments_under_unicode_cwd(self):
+        captured = {}
+
+        def run_checker(command, **kwargs):
+            captured["command"] = command
+            captured["cwd"] = kwargs["cwd"]
+            feedback = Path(kwargs["cwd"], command[-1])
+            (feedback / "judgemessage.txt").write_text("accepted", encoding="utf-8")
+            return {
+                "reason": "completed",
+                "returncode": 0,
+                "time": 0.01,
+                "memory": 1,
+                "memory_enforced": True,
+                "process_limit_enforced": True,
+                "output_bytes": 8,
+                "retained_output_bytes": 8,
+                "stdout_retained_bytes": 0,
+                "stderr_retained_bytes": 0,
+                "output_truncated": False,
+            }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "\u4e2d\u6587 workspace"
+            root.mkdir()
+            input_path = root / "case.in"
+            answer_path = root / "case.ans"
+            output_path = root / "contestant.out"
+            for path in (input_path, answer_path, output_path):
+                path.write_bytes(b"1\n")
+            with mock.patch.object(
+                SPECIAL_JUDGES, "run_managed_to_files", side_effect=run_checker
+            ):
+                result = SPECIAL_JUDGES.run_checker_to_files(
+                    ["checker"],
+                    input_path,
+                    answer_path,
+                    output_path,
+                    timeout=1,
+                    cwd=root,
+                )
+
+        self.assertEqual(result["verdict"], "AC")
+        self.assertEqual(captured["cwd"], root)
+        for argument, expected in zip(
+            captured["command"][-3:],
+            (input_path, answer_path, None),
+        ):
+            self.assertFalse(Path(argument).is_absolute(), argument)
+            if expected is not None:
+                self.assertEqual((root / argument).resolve(), expected.resolve())
+
+
     def test_custom_contestant_failure_fields_are_normalized_before_checker(self):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root, True)
@@ -381,10 +434,13 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
 
         spawned = []
 
-        def fake_spawn(command, **_kwargs):
+        def fake_spawn(command, **kwargs):
             managed = FakeManaged()
             if spawned:
-                Path(command[-1], "judgemessage.txt").mkdir()
+                feedback = Path(command[-1])
+                if not feedback.is_absolute():
+                    feedback = Path(kwargs["cwd"]) / feedback
+                (feedback / "judgemessage.txt").mkdir()
             spawned.append(managed)
             return managed
 

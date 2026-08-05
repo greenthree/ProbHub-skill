@@ -105,6 +105,18 @@ def _feedback_message(feedback_dir, fallback="", limit_bytes=MAX_CHECKER_DIAGNOS
     }
 
 
+def _child_path_argument(path, cwd):
+    """Prefer a relative argument so narrow-path Judge runtimes avoid Unicode parents."""
+    value = os.fspath(path)
+    if cwd is None or not os.path.isabs(value):
+        return value
+    try:
+        return os.path.relpath(value, start=os.fspath(cwd))
+    except ValueError:
+        # Windows cannot form a relative path across drives.
+        return value
+
+
 def _failed_checker_result(reason, message, diagnostic_limit_bytes):
     stderr = str(message).encode("utf-8", errors="replace")
     retained = stderr[: max(int(diagnostic_limit_bytes), 0)]
@@ -199,9 +211,9 @@ def run_checker_to_files(
             execution = run_managed_to_files(
                 [
                     *checker_command,
-                    os.fspath(input_path),
-                    os.fspath(answer_path),
-                    os.fspath(feedback_dir),
+                    _child_path_argument(input_path, cwd),
+                    _child_path_argument(answer_path, cwd),
+                    _child_path_argument(feedback_dir, cwd),
                 ],
                 input_path=contestant_output_path,
                 stdout_path=stdout_path,
@@ -703,9 +715,9 @@ def execute_interactive_session(
             interactor_managed = spawn_managed(
                 [
                     *_command_list(interactor_command),
-                    os.fspath(input_path),
-                    os.fspath(answer_path),
-                    os.fspath(feedback_dir),
+                    _child_path_argument(input_path, work_dir),
+                    _child_path_argument(answer_path, work_dir),
+                    _child_path_argument(feedback_dir, work_dir),
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
