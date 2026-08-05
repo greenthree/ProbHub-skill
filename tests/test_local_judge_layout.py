@@ -102,7 +102,7 @@ class LocalJudgeLayoutTests(unittest.TestCase):
             self.assertIsNone(MODULE.resolve_problem_path(problem, str(outside)))
             self.assertEqual(
                 Path(MODULE.resolve_problem_path(problem, "code/checker.cpp")),
-                (code / "checker.cpp").resolve(),
+                (code / "checker.cpp").absolute(),
             )
 
             link = code / "linked-checker.cpp"

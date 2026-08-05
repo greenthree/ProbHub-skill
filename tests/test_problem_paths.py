@@ -22,7 +22,7 @@ class ProblemPathTests(unittest.TestCase):
             source.parent.mkdir(parents=True)
             source.write_text("int main() {}\n", encoding="utf-8")
 
-            expected = source.resolve()
+            expected = source.absolute()
             self.assertEqual(
                 resolve_problem_regular_file(problem, "code/checker.cpp"),
                 expected,
