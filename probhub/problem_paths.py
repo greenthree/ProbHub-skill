@@ -33,7 +33,8 @@ def resolve_problem_regular_file(problem_dir, value):
         raise ProblemPathError("outside")
 
     try:
-        problem_root = Path(problem_dir).resolve(strict=True)
+        access_root = Path(os.path.abspath(os.fspath(problem_dir)))
+        problem_root = access_root.resolve(strict=True)
     except (TypeError, ValueError) as exc:
         raise ProblemPathError("invalid") from exc
     except (OSError, RuntimeError) as exc:
@@ -45,7 +46,7 @@ def resolve_problem_regular_file(problem_dir, value):
     if not parts:
         raise ProblemPathError("non_regular")
 
-    current = problem_root
+    current = access_root
     for index, part in enumerate(parts):
         current = current / part
         try:
@@ -78,4 +79,6 @@ def resolve_problem_regular_file(problem_dir, value):
         resolved.relative_to(problem_root)
     except ValueError as exc:
         raise ProblemPathError("outside") from exc
-    return resolved
+    # Keep the caller's absolute spelling (for example Windows 8.3 or SUBST
+    # aliases) after validating the canonical target against problem_root.
+    return current

@@ -32,6 +32,40 @@ class ProblemPathTests(unittest.TestCase):
                 expected,
             )
 
+    def test_preserves_access_spelling_after_canonical_containment_check(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            access_problem = root / "access" / "problem"
+            canonical_problem = root / "canonical" / "problem"
+            access_source = access_problem / "code" / "checker.cpp"
+            canonical_source = canonical_problem / "code" / "checker.cpp"
+            for source in (access_source, canonical_source):
+                source.parent.mkdir(parents=True)
+                source.write_text("int main() {}\n", encoding="utf-8")
+
+            path_type = type(access_problem)
+            real_resolve = path_type.resolve
+
+            def canonicalized(path, strict=False):
+                if path == access_problem:
+                    return canonical_problem
+                if path == access_source:
+                    return canonical_source
+                return real_resolve(path, strict=strict)
+
+            with mock.patch.object(
+                path_type,
+                "resolve",
+                autospec=True,
+                side_effect=canonicalized,
+            ):
+                self.assertEqual(
+                    resolve_problem_regular_file(
+                        access_problem, "code/checker.cpp"
+                    ),
+                    access_source,
+                )
+
     def test_rejects_invalid_values(self):
         with tempfile.TemporaryDirectory() as temp:
             problem = Path(temp)

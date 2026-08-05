@@ -1109,9 +1109,18 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(case["status"], "FAIL", case)
             self.assertEqual(case["actor"], "interactor", case)
-            self.assertEqual(case["execution_status"], "memory_limit", case)
-            self.assertEqual(case["failure_kind"], "resource_limit", case)
-            self.assertEqual(case["termination_reason"], "memory_limit", case)
+            if case["execution_status"] == "memory_limit":
+                self.assertEqual(case["failure_kind"], "resource_limit", case)
+                self.assertEqual(case["termination_reason"], "memory_limit", case)
+            else:
+                # RLIMIT_AS can reject a large allocation before it becomes
+                # resident. Without measured memory evidence, stderr alone must
+                # not turn an Interactor failure into a claimed MLE.
+                self.assertNotEqual(platform.system(), "Windows", case)
+                self.assertEqual(case["execution_status"], "completed", case)
+                self.assertEqual(case["failure_kind"], "judge_failure", case)
+                self.assertEqual(case["termination_reason"], "completed", case)
+                self.assertTrue(case["memory_enforced"], case)
 
     @unittest.skipUnless(platform.system() == "Linux", "Linux /proc peak-memory regression")
     def test_interactive_linux_peak_memory_survives_process_exit(self):
