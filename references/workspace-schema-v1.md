@@ -183,6 +183,62 @@ judge:
 
 `validator` 始终校验输入。`checker` 和 `interactor` 使用 ProbHub 附带的 DOMjudge/testlib 协议；完整参数、退出状态与模板见 `references/checker-interactor.md`。Core 会从规范源码生成 `output_validators/validate/validate.cpp` 和 `testlib.h`，不得手工维护生成目录。
 
+### Judge QA Schema v1
+
+`judge.qa` 是 custom/interactive 题的可选题目级主动测试配置。standard 题不能配置它；未配置的旧题保持兼容，但新 custom/interactive 题在 Agent 交付前必须配置并通过 Judge QA。所有 QA 路径都必须是题目目录内的普通非符号链接文件，fixture 按原始字节参与 `fixture_hash`。
+
+Checker 示例：
+
+```yaml
+judge:
+  type: custom
+  validator: code/validator.cpp
+  checker: code/checker.cpp
+  qa:
+    schema_version: 1
+    robustness:
+      baseline: accepts-alternative
+      probes: [empty, truncated, extra-token, oversized]
+    cases:
+      - id: accepts-alternative
+        purpose: valid alternative output
+        case: sample/basic
+        contestant_output: judge-fixtures/checker/alternative.out
+        expected: {status: AC}
+      - id: rejects-extra-token
+        purpose: extra token
+        input: judge-fixtures/checker/extra.in
+        jury_answer: judge-fixtures/checker/extra.ans
+        contestant_output: judge-fixtures/checker/extra.out
+        expected: {status: WA}
+```
+
+Interactor 示例：
+
+```yaml
+judge:
+  type: interactive
+  validator: code/validator.cpp
+  interactor: code/interactor.cpp
+  qa:
+    schema_version: 1
+    cases:
+      - id: normal-protocol
+        purpose: normal protocol
+        case: secret/basic
+        contestant: {source: code/judge-qa/normal.cpp}
+        expected: {status: AC}
+      - id: idle-player
+        purpose: idle contestant
+        case: secret/basic
+        contestant: {behavior: idle}
+        expected: {status: TLE, timeout_kind: idle}
+```
+
+Checker fixture 的期望状态只能是 `AC`/`WA`；Interactor 可使用 `AC`、`WA`、`RE`、`TLE`、`MLE`、`OLE`，其中 TLE 可声明 `timeout_kind: idle|total`。Interactor 的题目特定模拟选手源码放在 `code/judge-qa/`，内建行为只有 `early-eof`、`idle`、`output-flood`。`judge-fixtures/` 与 `code/judge-qa/` 都属于规范源，会被 source/checkpoint 跟踪，但不进入正式 PDF、ZIP、Manifest 或 DOMjudge 数据。
+
+Schema 固定限制 fixture 数量、单文件大小、总字节、诊断、transcript 和运行时间；ID 与路径按 Windows 大小写不敏感去重。`probhub judge-qa <ID>` 每次真实执行 fixture、Validator 和探针，只缓存内容寻址的编译结果。成功才原子发布 `<problem>/.probhub/judge-qa-evidence-v1.json`；失败、取消、超时、输入变化、锁竞争或发布失败保留上一份成功 evidence。evidence 状态由 lint/status 报告为 `not-configured`、`missing`、`current`、`stale` 或 `invalid`，missing/stale/invalid 是 warning；`seal` 和正式 `build` 对已配置 QA 要求当前通过的 evidence。
+
 ### Stress differential testing
 
 `stress` 是可选的单题差分测试配置：

@@ -40,7 +40,7 @@ probhub checkpoint L10
 probhub seal L10 --no-cache --seed 12345
 ```
 
-`seal` 执行所选题目的 lint、judge，以及配置存在时的 stress。成功后写入带结构化证据的 sealed checkpoint，并自动组装一份完整试卷 generation。
+`seal` 执行所选题目的 lint、judge、已配置的 Judge QA，以及配置存在时的 stress。成功后写入带结构化证据的 sealed checkpoint，并自动组装一份完整试卷 generation。对已配置 `judge.qa` 的题目，QA 必须返回 `passed` 且 evidence 为 `current`；否则不会创建 sealed checkpoint。旧未配置工作区仍保持兼容。
 
 单独组装或查看当前 generation：
 

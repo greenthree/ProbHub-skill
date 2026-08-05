@@ -15,7 +15,11 @@ from .calibration import evaluate_calibration, validate_calibration_config
 from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
 from .hashing import files_under, hash_file, hash_paths
-from .judge_qa import inspect_judge_qa, judge_fixture_tree_paths
+from .judge_qa import (
+    evaluate_judge_qa_evidence,
+    inspect_judge_qa,
+    judge_fixture_tree_paths,
+)
 from .metadata import build_meta, normalize_display_name
 from .problem_paths import ProblemPathError, resolve_problem_regular_file
 from .solutions import analyze_solution_verification
@@ -611,6 +615,15 @@ def lint_problem(root, workspace, entry):
     warnings.extend(solution_verification.get("warnings") or [])
     source_hash = compute_source_hash(problem_dir, config)
     data_hash = compute_data_hash(problem_dir, config)
+    judge_qa_evidence = evaluate_judge_qa_evidence(
+        problem_dir,
+        config,
+        judge_qa,
+        source_hash,
+        data_hash,
+    )
+    judge_qa["evidence"] = judge_qa_evidence
+    warnings.extend(judge_qa_evidence["warnings"])
     calibration = evaluate_calibration(
         problem_dir,
         config,
@@ -623,6 +636,7 @@ def lint_problem(root, workspace, entry):
         *constraint_reconciliation["diagnostics"],
         *(solution_verification.get("diagnostics") or []),
         *judge_qa["diagnostics"],
+        *judge_qa_evidence["diagnostics"],
     ]
     return {
         "id": entry["id"],
@@ -741,6 +755,15 @@ def problem_status(
         "pdf_hash": hash_file(problem_dir / "problem.pdf"),
         "package_hash": hash_file(problem_dir.parent / f"{config['id']}.zip"),
     }
+    judge_qa = inspect_judge_qa(problem_dir, config)
+    judge_qa_evidence = evaluate_judge_qa_evidence(
+        problem_dir,
+        config,
+        judge_qa,
+        current["source_hash"],
+        current["data_hash"],
+    )
+    judge_qa["evidence"] = judge_qa_evidence
     if root is not None and workspace is not None:
         current["workspace_hash"] = (
             compute_workspace_hash(root, workspace)
@@ -781,9 +804,16 @@ def problem_status(
                 if builder_fingerprint_error is not None
                 else {}
             ),
-            "warnings": calibration["warnings"],
-            "diagnostics": calibration["diagnostics"],
+            "warnings": [
+                *calibration["warnings"],
+                *judge_qa_evidence["warnings"],
+            ],
+            "diagnostics": [
+                *calibration["diagnostics"],
+                *judge_qa_evidence["diagnostics"],
+            ],
             "calibration": calibration,
+            "judge_qa": judge_qa,
         }
     stale = []
     if manifest.get("schema_version") != BUILD_MANIFEST_SCHEMA_VERSION:
@@ -828,7 +858,14 @@ def problem_status(
             else {}
         ),
         "manifest": manifest,
-        "warnings": calibration["warnings"],
-        "diagnostics": calibration["diagnostics"],
+        "warnings": [
+            *calibration["warnings"],
+            *judge_qa_evidence["warnings"],
+        ],
+        "diagnostics": [
+            *calibration["diagnostics"],
+            *judge_qa_evidence["diagnostics"],
+        ],
         "calibration": calibration,
+        "judge_qa": judge_qa,
     }

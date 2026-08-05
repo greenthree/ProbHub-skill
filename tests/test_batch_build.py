@@ -1,11 +1,13 @@
 import json
 import os
+import platform
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from probhub import __version__
 from probhub.build_lock import workspace_build_lock, workspace_file_lock
 from probhub.builder_fingerprint import (
     GENERATION_SCHEMA_VERSION,
@@ -14,15 +16,24 @@ from probhub.builder_fingerprint import (
 from probhub.building import (
     _assert_publish_targets_available,
     _recover_build_publish_transactions,
+    assert_collection_seals_unchanged,
     build_workspace,
+    create_build_plan,
     package_workspace,
     publish_build,
+    require_collection_sealed,
 )
+from probhub.calibration import SANDBOX_CACHE_SCHEMA_VERSION
 from probhub.cli import command_status
 from probhub.errors import ProbHubError
 from probhub.generations import checkpoint_revision, create_problem_checkpoint
 from probhub.hashing import hash_file
 from probhub.io import write_yaml
+from probhub.judge_qa import inspect_judge_qa
+from probhub.judge_qa_evidence import (
+    JUDGE_QA_EVIDENCE_SCHEMA_VERSION,
+    JUDGE_QA_POLICY_VERSION,
+)
 from probhub.linting import (
     BUILD_MANIFEST_SCHEMA_VERSION,
     compute_data_hash,
@@ -129,6 +140,94 @@ class BatchBuildTests(unittest.TestCase):
             expected_source_hash=compute_source_hash(problem_dir, config),
             expected_data_hash=compute_data_hash(problem_dir, config),
         )
+
+    def configure_checker_qa(self, root, entry):
+        problem_dir, config = load_problem(root, entry)
+        (problem_dir / "code/checker.cpp").write_text(
+            "int main(){return 0;}\n", encoding="utf-8"
+        )
+        output = problem_dir / "judge-fixtures/checker/accepted.out"
+        output.parent.mkdir(parents=True)
+        output.write_text("1\n", encoding="utf-8")
+        config["judge"].update({
+            "type": "custom",
+            "checker": "code/checker.cpp",
+            "qa": {
+                "schema_version": 1,
+                "cases": [{
+                    "id": "accepted-output",
+                    "purpose": "valid",
+                    "case": "sample/1",
+                    "contestant_output": "judge-fixtures/checker/accepted.out",
+                    "expected": {"status": "AC"},
+                }],
+            },
+        })
+        write_yaml(problem_dir / "probhub.yaml", config)
+        return load_problem(root, entry)
+
+    def checker_qa_evidence(self, problem_dir, config):
+        inspection = inspect_judge_qa(problem_dir, config)
+        return {
+            "status": "passed",
+            "applicable": True,
+            "code": "judge_qa_passed",
+            "schema_version": JUDGE_QA_EVIDENCE_SCHEMA_VERSION,
+            "policy_version": JUDGE_QA_POLICY_VERSION,
+            "sandbox_schema_version": SANDBOX_CACHE_SCHEMA_VERSION,
+            "probhub_version": __version__,
+            "source_hash": compute_source_hash(problem_dir, config),
+            "data_hash": compute_data_hash(problem_dir, config),
+            "fixture_hash": inspection["fixture_hash"],
+            "published_at": "2026-08-05T00:00:00+00:00",
+            "measurement": {
+                "platform": platform.system(),
+                "machine": platform.machine(),
+                "target_guarantee": False,
+            },
+            "limits": {},
+            "cache": {},
+            "compilers": [
+                {
+                    "role": "validator",
+                    "source": "code/validator.cpp",
+                    "kind": "cpp17",
+                    "compiler_identity": "fixture",
+                },
+                {
+                    "role": "checker",
+                    "source": "code/checker.cpp",
+                    "kind": "cpp17",
+                    "compiler_identity": "fixture",
+                },
+            ],
+            "validators": [
+                {
+                    "input": "data/sample/1.in",
+                    "ok": True,
+                    "diagnostic": {
+                        "present": False,
+                        "bytes": 0,
+                        "truncated": False,
+                    },
+                }
+            ],
+            "cases": [{
+                "id": "accepted-output",
+                "purpose": "valid",
+                "expected": {"status": "AC"},
+                "actual": {"status": "AC"},
+                "matched": True,
+                "infrastructure_failed": False,
+                "diagnostic": {
+                    "present": False,
+                    "bytes": 0,
+                    "truncated": False,
+                },
+            }],
+            "probes": [],
+            "cleanup": {"ok": True, "snapshot_removed": True},
+        }
 
     def create_workspace(self, root, *, sealed=True):
         (root / ".probhub").mkdir(parents=True)
@@ -563,6 +662,111 @@ class BatchBuildTests(unittest.TestCase):
             snapshot.assert_not_called()
             for path, content in artifacts.items():
                 self.assertEqual(path.read_bytes(), content)
+
+    def test_build_requires_current_judge_qa_evidence_in_sealed_revision(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp), sealed=False)
+            entries = problem_entries(workspace)
+            self.configure_checker_qa(root, entries[0])
+            self.seal_problem(root, workspace, entries[0])
+            self.seal_problem(root, workspace, entries[1])
+
+            with patch("probhub.building.create_build_snapshot") as snapshot:
+                with self.assertRaises(ProbHubError) as raised:
+                    build_workspace(root, workspace, entries, run_judge=False)
+
+            self.assertEqual(raised.exception.code, "sealed_revision_required")
+            self.assertIn("no passed Judge QA evidence", str(raised.exception))
+            snapshot.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp), sealed=False)
+            entries = problem_entries(workspace)
+            problem_dir, config = self.configure_checker_qa(root, entries[0])
+            qa_evidence = self.checker_qa_evidence(problem_dir, config)
+            create_problem_checkpoint(
+                root,
+                workspace,
+                entries[0],
+                state="sealed",
+                evidence={"judge_qa": qa_evidence},
+                expected_source_hash=compute_source_hash(problem_dir, config),
+                expected_data_hash=compute_data_hash(problem_dir, config),
+            )
+            self.seal_problem(root, workspace, entries[1])
+
+            plan = create_build_plan(root, workspace, entries)
+            checkpoints = require_collection_sealed(plan)
+
+            self.assertEqual(set(checkpoints), {"A", "B"})
+
+    def test_build_rejects_stale_or_invalid_judge_qa_checkpoint_evidence(self):
+        mutations = (
+            ("inputs", lambda evidence: evidence.update(source_hash="stale")),
+            (
+                "structure",
+                lambda evidence: evidence["cases"][0].update(
+                    message="forbidden-feedback"
+                ),
+            ),
+        )
+        for expected, mutate in mutations:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temp:
+                root, workspace = self.create_workspace(Path(temp), sealed=False)
+                entries = problem_entries(workspace)
+                problem_dir, config = self.configure_checker_qa(root, entries[0])
+                qa_evidence = self.checker_qa_evidence(problem_dir, config)
+                mutate(qa_evidence)
+                create_problem_checkpoint(
+                    root,
+                    workspace,
+                    entries[0],
+                    state="sealed",
+                    evidence={"judge_qa": qa_evidence},
+                    expected_source_hash=compute_source_hash(problem_dir, config),
+                    expected_data_hash=compute_data_hash(problem_dir, config),
+                )
+                self.seal_problem(root, workspace, entries[1])
+
+                with patch("probhub.building.create_build_snapshot") as snapshot:
+                    with self.assertRaises(ProbHubError) as raised:
+                        build_workspace(root, workspace, entries, run_judge=False)
+
+                self.assertEqual(raised.exception.code, "sealed_revision_required")
+                self.assertIn(f"sealed Judge QA evidence is {expected}", str(raised.exception))
+                snapshot.assert_not_called()
+
+    def test_build_rechecks_judge_qa_checkpoint_evidence_before_publish(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, workspace = self.create_workspace(Path(temp), sealed=False)
+            entries = problem_entries(workspace)
+            problem_dir, config = self.configure_checker_qa(root, entries[0])
+            qa_evidence = self.checker_qa_evidence(problem_dir, config)
+            create_problem_checkpoint(
+                root,
+                workspace,
+                entries[0],
+                state="sealed",
+                evidence={"judge_qa": qa_evidence},
+                expected_source_hash=compute_source_hash(problem_dir, config),
+                expected_data_hash=compute_data_hash(problem_dir, config),
+            )
+            self.seal_problem(root, workspace, entries[1])
+            plan = create_build_plan(root, workspace, entries)
+            with patch(
+                "probhub.building.validate_judge_qa_evidence_document",
+                side_effect=(
+                    {"state": "current"},
+                    {"state": "stale", "reason": "core"},
+                ),
+            ) as validate:
+                checkpoints = require_collection_sealed(plan)
+                with self.assertRaises(ProbHubError) as raised:
+                    assert_collection_seals_unchanged(plan, checkpoints)
+
+            self.assertEqual(raised.exception.code, "sealed_revision_changed")
+            self.assertIn("sealed Judge QA evidence is core", str(raised.exception))
+            self.assertEqual(validate.call_count, 2)
 
     def test_single_problem_build_rejects_unsealed_collection_peer(self):
         with tempfile.TemporaryDirectory() as temp:
