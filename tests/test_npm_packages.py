@@ -10,6 +10,8 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts.check_release import npm_pack_manifest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,6 +44,14 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertIn("CHANGELOG.md", main["files"])
         self.assertIn("scripts/webui/**", main["files"])
         self.assertIn("!scripts/audit_python_dependencies.py", main["files"])
+
+    def test_judge_qa_runtime_and_contract_are_published(self):
+        main_files = {
+            entry["path"] for entry in npm_pack_manifest(dry_run=True)["files"]
+        }
+        self.assertIn("probhub/judge_qa_evidence.py", main_files)
+        self.assertIn("probhub/judge_qa_runtime.py", main_files)
+        self.assertIn("references/checker-interactor.md", main_files)
 
     def test_both_packages_expose_cli_and_skill_installer(self):
         expected_bins = {
