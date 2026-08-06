@@ -105,6 +105,18 @@ def _feedback_message(feedback_dir, fallback="", limit_bytes=MAX_CHECKER_DIAGNOS
     }
 
 
+def _child_path_argument(path, cwd):
+    """Prefer a relative argument so narrow-path Judge runtimes avoid Unicode parents."""
+    value = os.fspath(path)
+    if cwd is None or not os.path.isabs(value):
+        return value
+    try:
+        return os.path.relpath(value, start=os.fspath(cwd))
+    except ValueError:
+        # Windows cannot form a relative path across drives.
+        return value
+
+
 def _failed_checker_result(reason, message, diagnostic_limit_bytes):
     stderr = str(message).encode("utf-8", errors="replace")
     retained = stderr[: max(int(diagnostic_limit_bytes), 0)]
@@ -155,6 +167,7 @@ def run_checker_to_files(
     process_limit=DEFAULT_PROCESS_LIMIT,
     diagnostic_limit_bytes=None,
     env=None,
+    cancel_check=None,
 ):
     """Run a DOMjudge/testlib Checker and return protocol and execution evidence.
 
@@ -198,9 +211,9 @@ def run_checker_to_files(
             execution = run_managed_to_files(
                 [
                     *checker_command,
-                    os.fspath(input_path),
-                    os.fspath(answer_path),
-                    os.fspath(feedback_dir),
+                    _child_path_argument(input_path, cwd),
+                    _child_path_argument(answer_path, cwd),
+                    _child_path_argument(feedback_dir, cwd),
                 ],
                 input_path=contestant_output_path,
                 stdout_path=stdout_path,
@@ -212,6 +225,7 @@ def run_checker_to_files(
                 process_limit=process_limit,
                 cwd=cwd,
                 env=env,
+                cancel_check=cancel_check,
             )
             cleanup["checker_tree_termination"] = "completed"
         except OutputBudgetError as exc:
@@ -471,6 +485,14 @@ def _interactive_output_classification(evidence, diagnostic_limit_bytes):
     return None
 
 
+def _is_interactor_failure(outcome):
+    return bool(
+        outcome
+        and outcome.get("status") == "FAIL"
+        and outcome.get("actor") == "interactor"
+    )
+
+
 def _interactive_result(
     outcome,
     *,
@@ -558,6 +580,7 @@ def execute_interactive_session(
     output_limit_bytes=64 * MIB,
     process_limit=DEFAULT_PROCESS_LIMIT,
     env=None,
+    cancel_check=None,
 ):
     """Run one contestant/Interactor session with explicit responsibility evidence."""
     monotonic_start = time.monotonic()
@@ -604,6 +627,7 @@ def execute_interactive_session(
     cancelled_error = None
     spawn_actor = "supervisor"
     diagnostic_limit_bytes = min(max(int(output_limit_bytes), 0), MAX_CHECKER_DIAGNOSTIC_BYTES)
+    is_cancelled = cancellation_requested if cancel_check is None else cancel_check
 
     def current_exit_codes():
         return {
@@ -658,6 +682,8 @@ def execute_interactive_session(
         return result
 
     try:
+        if is_cancelled():
+            raise ProcessCancelled("execution cancelled")
         runtime_dir = Path(tempfile.mkdtemp(prefix=".probhub-interactive-", dir=work_dir))
         solution_stderr = runtime_dir / "solution.stderr"
         interactor_stderr = runtime_dir / "interactor.stderr"
@@ -682,14 +708,16 @@ def execute_interactive_session(
             solution_process_limit_enforced = bool(
                 getattr(solution_managed, "process_limit_enforced", False)
             )
+            if is_cancelled():
+                raise ProcessCancelled("execution cancelled")
             spawn_actor = "interactor"
             cleanup["interactor_tree_termination"] = "pending"
             interactor_managed = spawn_managed(
                 [
                     *_command_list(interactor_command),
-                    os.fspath(input_path),
-                    os.fspath(answer_path),
-                    os.fspath(feedback_dir),
+                    _child_path_argument(input_path, work_dir),
+                    _child_path_argument(answer_path, work_dir),
+                    _child_path_argument(feedback_dir, work_dir),
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -742,7 +770,7 @@ def execute_interactive_session(
             last_resource_sample = monotonic_start
             deadline = monotonic_start + float(time_limit)
             while solution_proc.poll() is None or interactor_proc.poll() is None:
-                if cancellation_requested():
+                if is_cancelled():
                     raise ProcessCancelled("execution cancelled")
                 now = time.monotonic()
                 evidence = current_evidence()
@@ -785,8 +813,18 @@ def execute_interactive_session(
                         }
                     elif interactor_proc.poll() is not None:
                         protocol = _protocol_outcome(interactor_proc.returncode, "", "interactor")
-                        if protocol["status"] == "FAIL":
+                        if protocol["status"] == "FAIL" and not _is_interactor_failure(
+                            resource_outcome
+                        ):
                             resource_outcome = protocol
+                if interactor_proc.poll() is not None:
+                    protocol = _protocol_outcome(
+                        interactor_proc.returncode, "", "interactor"
+                    )
+                    if protocol["status"] == "FAIL" and not _is_interactor_failure(
+                        resource_outcome
+                    ):
+                        resource_outcome = protocol
                 if resource_outcome:
                     _terminate_interactive_actor(solution_managed, "contestant", cleanup)
                     solution_managed = None
@@ -869,6 +907,13 @@ def execute_interactive_session(
         interactor_message = _feedback_message(
             feedback_dir, interactor_message, diagnostic_limit_bytes
         )[0]
+        if resource_outcome and resource_outcome.get("status") == "FAIL":
+            return finish(resource_outcome)
+        interactor_protocol = _protocol_outcome(
+            interactor_proc.returncode, interactor_message, "interactor"
+        )
+        if interactor_protocol["status"] == "FAIL":
+            return finish(interactor_protocol)
         if resource_outcome:
             return finish(resource_outcome)
         if solution_proc.returncode != 0:
@@ -892,9 +937,7 @@ def execute_interactive_session(
                     "message": solution_message,
                 }
             return finish(outcome)
-        return finish(_protocol_outcome(
-            interactor_proc.returncode, interactor_message, "interactor"
-        ))
+        return finish(interactor_protocol)
     except ProcessCancelled as exc:
         cancelled_error = exc
         finish({

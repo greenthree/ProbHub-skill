@@ -14,6 +14,9 @@ from pathlib import Path
 
 
 DEFAULT_PROCESS_LIMIT = 32
+VALIDATOR_TIMEOUT_SECONDS = 5.0
+VALIDATOR_MEMORY_LIMIT_MB = 512
+VALIDATOR_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024
 DEFAULT_POLL_INTERVAL = 0.005
 CANCEL_FILE_ENV = "PROBHUB_CANCEL_FILE"
 WINDOWS_CREATE_SUSPENDED = 0x00000004
@@ -89,6 +92,11 @@ def cancellation_requested():
         return Path(path).is_file()
     except OSError:
         return False
+
+
+def _cancellation_requested(cancel_check):
+    check = cancellation_requested if cancel_check is None else cancel_check
+    return bool(check())
 
 
 def _same_executable(left, right):
@@ -899,6 +907,7 @@ def wait_managed(
     optional_output_paths=(),
     output_limit_bytes=None,
     poll_interval=DEFAULT_POLL_INTERVAL,
+    cancel_check=None,
 ):
     """Wait for a managed process and always clean the complete process tree."""
     started = time.perf_counter()
@@ -917,7 +926,7 @@ def wait_managed(
     try:
         while managed.proc.poll() is None:
             now = time.perf_counter()
-            if cancellation_requested():
+            if _cancellation_requested(cancel_check):
                 reason, message = "cancelled", "execution cancelled"
                 break
             count = current_memory = None
@@ -952,7 +961,7 @@ def wait_managed(
         # A short process can exit before the first polling iteration. Recheck
         # file size and deadline after exit so fast output floods cannot bypass OLE.
         observed_output_bytes = _files_size(output_paths, optional_output_paths)
-        if cancellation_requested():
+        if _cancellation_requested(cancel_check):
             reason, message = "cancelled", "execution cancelled"
         elif output_limit_bytes is not None and observed_output_bytes > int(output_limit_bytes):
             reason, message = "output_limit", "output limit exceeded"
@@ -1008,11 +1017,12 @@ def run_managed_to_files(
     process_limit=DEFAULT_PROCESS_LIMIT,
     cwd=None,
     env=None,
+    cancel_check=None,
 ):
     input_stream = None
     temporary_input = None
     try:
-        if cancellation_requested():
+        if _cancellation_requested(cancel_check):
             raise ProcessCancelled("execution cancelled")
         if input_path is not None:
             input_stream = open(input_path, "rb")
@@ -1038,6 +1048,7 @@ def run_managed_to_files(
                 output_paths=(stdout_path, stderr_path),
                 optional_output_paths=tuple(additional_output_paths or ()),
                 output_limit_bytes=output_limit_bytes,
+                cancel_check=cancel_check,
             )
             if result.get("reason") == "cancelled":
                 raise ProcessCancelled(result.get("message") or "execution cancelled")

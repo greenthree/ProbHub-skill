@@ -126,6 +126,25 @@ class JudgeQASchemaTests(unittest.TestCase):
         self.assertIn({"behavior": "idle"}, contestants)
         self.assertIn({"behavior": "output-flood"}, contestants)
 
+    def test_official_qa_programs_require_cpp_and_contestants_allow_python(self):
+        _, _, _, _, problem, config = self.copy_fixture("interactor-qa")
+        config["judge"]["interactor"] = "code/interactor.py"
+        config["judge"]["qa"]["cases"][0]["contestant"]["source"] = (
+            "code/judge-qa/player.exe"
+        )
+        (problem / "code" / "interactor.py").write_text("pass\n", encoding="utf-8")
+        (problem / "code" / "judge-qa" / "player.exe").write_bytes(b"prebuilt")
+        report = inspect_judge_qa(problem, config)
+        diagnostics = [
+            item for item in report["diagnostics"]
+            if item["code"] == "judge_qa_program_type_unsupported"
+        ]
+        self.assertEqual(
+            {item["field"] for item in diagnostics},
+            {"judge.interactor", "judge.qa.cases[0].contestant.source"},
+            diagnostics,
+        )
+
     def test_missing_qa_is_compatible_and_not_reported_as_passed(self):
         _, root, workspace, _, _, _ = self.copy_fixture("custom")
         result = lint_workspace(root, workspace)

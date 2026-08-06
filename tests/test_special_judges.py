@@ -45,6 +45,13 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
         def close(self):
             pass
 
+    def assert_processes_dead(self, pids, timeout=10):
+        deadline = time.time() + timeout
+        while time.time() < deadline and any(process_alive(pid) for pid in pids):
+            time.sleep(0.05)
+        for pid in pids:
+            self.assertFalse(process_alive(pid), f"process {pid} survived cancellation")
+
     def test_output_budget_enforcement_failure_is_infrastructure_fail(self):
         with tempfile.TemporaryDirectory() as temp:
             output = str(Path(temp) / "output.txt")
@@ -81,6 +88,59 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
         self.assertIn("output control failed", message)
         self.assertNotIn("failed to start", message)
         self.assertEqual(details["checker_termination_reason"], "output_control_error")
+
+    def test_checker_uses_relative_file_arguments_under_unicode_cwd(self):
+        captured = {}
+
+        def run_checker(command, **kwargs):
+            captured["command"] = command
+            captured["cwd"] = kwargs["cwd"]
+            feedback = Path(kwargs["cwd"], command[-1])
+            (feedback / "judgemessage.txt").write_text("accepted", encoding="utf-8")
+            return {
+                "reason": "completed",
+                "returncode": 0,
+                "time": 0.01,
+                "memory": 1,
+                "memory_enforced": True,
+                "process_limit_enforced": True,
+                "output_bytes": 8,
+                "retained_output_bytes": 8,
+                "stdout_retained_bytes": 0,
+                "stderr_retained_bytes": 0,
+                "output_truncated": False,
+            }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "\u4e2d\u6587 workspace"
+            root.mkdir()
+            input_path = root / "case.in"
+            answer_path = root / "case.ans"
+            output_path = root / "contestant.out"
+            for path in (input_path, answer_path, output_path):
+                path.write_bytes(b"1\n")
+            with mock.patch.object(
+                SPECIAL_JUDGES, "run_managed_to_files", side_effect=run_checker
+            ):
+                result = SPECIAL_JUDGES.run_checker_to_files(
+                    ["checker"],
+                    input_path,
+                    answer_path,
+                    output_path,
+                    timeout=1,
+                    cwd=root,
+                )
+
+        self.assertEqual(result["verdict"], "AC")
+        self.assertEqual(captured["cwd"], root)
+        for argument, expected in zip(
+            captured["command"][-3:],
+            (input_path, answer_path, None),
+        ):
+            self.assertFalse(Path(argument).is_absolute(), argument)
+            if expected is not None:
+                self.assertEqual((root / argument).resolve(), expected.resolve())
+
 
     def test_custom_contestant_failure_fields_are_normalized_before_checker(self):
         root = Path(tempfile.mkdtemp())
@@ -374,10 +434,13 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
 
         spawned = []
 
-        def fake_spawn(command, **_kwargs):
+        def fake_spawn(command, **kwargs):
             managed = FakeManaged()
             if spawned:
-                Path(command[-1], "judgemessage.txt").mkdir()
+                feedback = Path(command[-1])
+                if not feedback.is_absolute():
+                    feedback = Path(kwargs["cwd"]) / feedback
+                (feedback / "judgemessage.txt").mkdir()
             spawned.append(managed)
             return managed
 
@@ -507,6 +570,50 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
                         cwd=root,
                     )
 
+    def test_checker_custom_cancel_check_cleans_tree_and_runtime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name in ("case.in", "case.ans", "contestant.out"):
+                (root / name).write_bytes(b"")
+            checker_pid_file = root / "checker.pid"
+            child_pid_file = root / "checker-child.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(child_pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            checker = (
+                "import os,pathlib,subprocess,sys,time;"
+                f"pathlib.Path({str(checker_pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]);"
+                "time.sleep(30)"
+            )
+            runtime_dirs = set(root.glob(".probhub-checker-*"))
+
+            def cancel_check():
+                return checker_pid_file.is_file() and child_pid_file.is_file()
+
+            with self.assertRaisesRegex(
+                JUDGE_MODULE.ProcessCancelled, "execution cancelled"
+            ):
+                SPECIAL_JUDGES.run_checker_to_files(
+                    [sys.executable, "-c", checker],
+                    root / "case.in",
+                    root / "case.ans",
+                    root / "contestant.out",
+                    timeout=10,
+                    cwd=root,
+                    cancel_check=cancel_check,
+                )
+
+            self.assertEqual(set(root.glob(".probhub-checker-*")), runtime_dirs)
+            self.assertTrue(checker_pid_file.is_file(), "checker did not start")
+            self.assertTrue(child_pid_file.is_file(), "checker descendant did not start")
+            self.assert_processes_dead([
+                int(checker_pid_file.read_text(encoding="utf-8")),
+                int(child_pid_file.read_text(encoding="utf-8")),
+            ])
+
     def test_interactive_cleanup_failure_does_not_skip_other_cleanup(self):
         class FakeProcess:
             def __init__(self):
@@ -584,7 +691,7 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(
             SPECIAL_JUDGES, "spawn_managed", side_effect=[FakeManaged(), FakeManaged()]
         ), mock.patch.object(
-            SPECIAL_JUDGES, "cancellation_requested", return_value=True
+            SPECIAL_JUDGES, "cancellation_requested", side_effect=[False, True]
         ), mock.patch.object(
             SPECIAL_JUDGES.shutil,
             "rmtree",
@@ -603,6 +710,68 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
         self.assertEqual(
             result["pre_cleanup_result"]["execution_status"], "cancelled"
         )
+
+    def test_interactive_custom_cancel_check_cleans_both_trees_and_runtime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            actor_script = root / "actor.py"
+            actor_script.write_text(
+                "import os, pathlib, subprocess, sys, time\n"
+                "parent_pid = pathlib.Path(sys.argv[1])\n"
+                "child_pid = pathlib.Path(sys.argv[2])\n"
+                "parent_pid.write_text(str(os.getpid()), encoding='utf-8')\n"
+                "child = (\"import os,pathlib,sys,time;\"\n"
+                "         \"pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8');\"\n"
+                "         \"time.sleep(30)\")\n"
+                "subprocess.Popen([sys.executable, '-c', child, os.fspath(child_pid)])\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            actor_pid_files = [
+                root / "contestant.pid",
+                root / "contestant-child.pid",
+                root / "interactor.pid",
+                root / "interactor-child.pid",
+            ]
+            (root / "case.in").write_bytes(b"")
+            (root / "case.ans").write_bytes(b"")
+            runtime_dirs = set(root.glob(".probhub-interactive-*"))
+
+            def cancel_check():
+                return all(path.is_file() for path in actor_pid_files)
+
+            with self.assertRaisesRegex(
+                JUDGE_MODULE.ProcessCancelled, "execution cancelled"
+            ):
+                SPECIAL_JUDGES.execute_interactive_session(
+                    [
+                        sys.executable,
+                        str(actor_script),
+                        str(actor_pid_files[0]),
+                        str(actor_pid_files[1]),
+                    ],
+                    [
+                        sys.executable,
+                        str(actor_script),
+                        str(actor_pid_files[2]),
+                        str(actor_pid_files[3]),
+                    ],
+                    root / "case.in",
+                    root / "case.ans",
+                    work_dir=root,
+                    time_limit=10,
+                    idle_limit=10,
+                    cancel_check=cancel_check,
+                )
+
+            self.assertEqual(set(root.glob(".probhub-interactive-*")), runtime_dirs)
+            self.assertTrue(
+                all(path.is_file() for path in actor_pid_files),
+                "interactive actor or descendant did not start",
+            )
+            self.assert_processes_dead([
+                int(path.read_text(encoding="utf-8")) for path in actor_pid_files
+            ])
 
     def test_interactive_preparation_failure_is_structured_start_error(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(
@@ -666,6 +835,60 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
         self.assertEqual(result["memory"], 100)
         self.assertEqual(result["resources"]["contestant"]["memory"], 5)
         self.assertEqual(result["resources"]["interactor"]["memory"], 100)
+
+    def test_interactor_resource_failure_survives_same_round_exit(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO()
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+        class FakeManaged:
+            memory_enforced = True
+            process_limit_enforced = True
+
+            def __init__(self, memory, exit_during_sample=False):
+                self.peak_memory_mb = memory
+                self.exit_during_sample = exit_during_sample
+                self.proc = FakeProcess()
+
+            def sample(self):
+                if self.exit_during_sample:
+                    self.proc.returncode = 1
+                return 1, self.peak_memory_mb
+
+            def terminate(self):
+                if self.proc.returncode is None:
+                    self.proc.returncode = -1
+
+        managed = iter([FakeManaged(5), FakeManaged(100, exit_during_sample=True)])
+
+        def fake_spawn(*_args, **_kwargs):
+            item = next(managed)
+            if item.exit_during_sample:
+                time.sleep(0.06)
+            return item
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            SPECIAL_JUDGES, "spawn_managed", side_effect=fake_spawn
+        ):
+            root = Path(temp)
+            result = SPECIAL_JUDGES.execute_interactive_session(
+                [str(root / "solution")],
+                [str(root / "interactor")],
+                root / "case.in",
+                root / "case.ans",
+                work_dir=root,
+                memory_limit_mb=50,
+            )
+        self.assertEqual(result["status"], "FAIL", result)
+        self.assertEqual(result["actor"], "interactor", result)
+        self.assertEqual(result["execution_status"], "memory_limit", result)
+        self.assertEqual(result["failure_kind"], "resource_limit", result)
+        self.assertEqual(result["termination_reason"], "memory_limit", result)
 
     def test_interactive_deadlines_exclude_process_setup(self):
         class FakeProcess:
@@ -1029,6 +1252,51 @@ class SpecialJudgeIntegrationTests(unittest.TestCase):
             self.assertEqual(case["actor"], "contestant", case)
             self.assertEqual(case["execution_status"], "completed", case)
             self.assertEqual(case["failure_kind"], "runtime_error", case)
+            self.assertEqual(case["termination_reason"], "completed", case)
+
+    def test_interactor_failure_wins_over_simultaneous_contestant_re(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {"type": "interactive", "interactor": "code/interactor.cpp"},
+                "int main(){ return 7; }",
+                "int main(){ return 7; }",
+                {"interactor.cpp": "int main(){ return 3; }"},
+            )
+            result, events = self.run_judge(problem)
+            self.assertNotEqual(result.returncode, 0)
+            case = next(
+                event for event in events
+                if event.get("type") == "case" and event.get("kind") == "std"
+            )
+            self.assertEqual(case["status"], "FAIL", case)
+            self.assertEqual(case["actor"], "interactor", case)
+            self.assertEqual(case["failure_kind"], "judge_failure", case)
+            self.assertEqual(case["termination_reason"], "completed", case)
+
+    def test_interactor_failure_wins_over_simultaneous_contestant_ole(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = self.write_problem(
+                Path(temp),
+                {"type": "interactive", "interactor": "code/interactor.cpp"},
+                """
+                #include <iostream>
+                int main(){
+                    for (int i = 0; i < 2000000; ++i) std::cout.put('x');
+                }
+                """,
+                "int main(){ return 7; }",
+                {"interactor.cpp": "int main(){ return 3; }"},
+            )
+            result, events = self.run_judge(problem)
+            self.assertNotEqual(result.returncode, 0)
+            case = next(
+                event for event in events
+                if event.get("type") == "case" and event.get("kind") == "std"
+            )
+            self.assertEqual(case["status"], "FAIL", case)
+            self.assertEqual(case["actor"], "interactor", case)
+            self.assertEqual(case["failure_kind"], "judge_failure", case)
             self.assertEqual(case["termination_reason"], "completed", case)
 
     def test_interactive_fast_output_flood_is_ole_after_process_exit(self):

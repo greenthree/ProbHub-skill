@@ -13,7 +13,7 @@ def hash_file(path):
     return digest.hexdigest()
 
 
-def hash_paths(root, paths, *, normalize_lf_suffixes=()):
+def hash_paths(root, paths, *, normalize_lf_suffixes=(), check=None):
     root = Path(root)
     normalize_lf_suffixes = {
         str(suffix).lower() for suffix in normalize_lf_suffixes
@@ -21,6 +21,8 @@ def hash_paths(root, paths, *, normalize_lf_suffixes=()):
     digest = hashlib.sha256()
     existing = []
     for path in sorted({Path(p) for p in paths}, key=lambda p: p.as_posix()):
+        if check is not None:
+            check()
         full = path if path.is_absolute() else root / path
         if not full.is_file():
             continue
@@ -33,6 +35,8 @@ def hash_paths(root, paths, *, normalize_lf_suffixes=()):
             observed_size = 0
             with full.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    if check is not None:
+                        check()
                     observed_size += len(chunk)
                     digest.update(chunk)
             if observed_size != expected_size:
@@ -49,12 +53,14 @@ def hash_paths(root, paths, *, normalize_lf_suffixes=()):
     return digest.hexdigest(), existing
 
 
-def files_under(path, suffixes=None):
+def files_under(path, suffixes=None, *, check=None):
     path = Path(path)
     if not path.exists():
         return []
     result = []
     for item in path.rglob("*"):
+        if check is not None:
+            check()
         if item.is_file() and (suffixes is None or item.suffix in suffixes):
             result.append(item)
     return result

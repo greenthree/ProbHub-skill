@@ -446,6 +446,10 @@ class CalibrationLintStatusTests(unittest.TestCase):
             self.assertIn("**/.probhub/judge-evidence-v1.json.*.tmp", content)
             self.assertIn("**/.probhub/judge-evidence-v2.json", content)
             self.assertIn("**/.probhub/judge-evidence-v2.json.*.tmp", content)
+            self.assertIn("**/.probhub/judge-qa-evidence.lock", content)
+            self.assertIn("**/.probhub/judge-qa-evidence-v1.json", content)
+            self.assertIn("**/.probhub/judge-qa-evidence-v1.json.*.tmp", content)
+            self.assertIn("**/.probhub/judge-qa-tmp/", content)
 
 
 class LocalJudgeCalibrationTests(unittest.TestCase):

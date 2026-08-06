@@ -90,10 +90,12 @@ def _configured_file_error(field, value, reason, missing_label):
     return f"{missing_label} not found: {value}"
 
 
-def problem_statement_asset_paths(problem_dir):
+def problem_statement_asset_paths(problem_dir, *, check=None):
     problem_dir = Path(problem_dir).resolve()
     paths = []
     for path in problem_dir.rglob("*"):
+        if check is not None:
+            check()
         if path.is_symlink() or not path.is_file():
             continue
         relative = path.relative_to(problem_dir)
@@ -113,8 +115,10 @@ def compute_statement_assets_hash(problem_dir):
     return hash_paths(problem_dir, relative_paths)[0]
 
 
-def problem_source_paths(problem_dir, config):
+def problem_source_paths(problem_dir, config, *, check=None):
     problem_dir = Path(problem_dir).resolve()
+    if check is not None:
+        check()
     paths = [problem_dir / "probhub.yaml"]
     statement_config = config.get("statement") or {}
     statement_source = (
@@ -154,30 +158,32 @@ def problem_source_paths(problem_dir, config):
                 paths.append(candidate)
     code_dir = problem_dir / "code"
     if code_dir.is_dir():
-        paths.extend(
-            path
-            for path in code_dir.rglob("*")
-            if path.is_file()
-            and not path.is_symlink()
-            and not any(
-                part.casefold() in CODE_HASH_IGNORED_DIRS
-                for part in path.relative_to(code_dir).parts[:-1]
-            )
-            and path.suffix.lower() not in CODE_HASH_IGNORED_SUFFIXES
-        )
-    paths.extend(judge_fixture_tree_paths(problem_dir))
-    paths.extend(problem_statement_asset_paths(problem_dir))
+        for path in code_dir.rglob("*"):
+            if check is not None:
+                check()
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and not any(
+                    part.casefold() in CODE_HASH_IGNORED_DIRS
+                    for part in path.relative_to(code_dir).parts[:-1]
+                )
+                and path.suffix.lower() not in CODE_HASH_IGNORED_SUFFIXES
+            ):
+                paths.append(path)
+    paths.extend(judge_fixture_tree_paths(problem_dir, check=check))
+    paths.extend(problem_statement_asset_paths(problem_dir, check=check))
     return paths
 
 
-def compute_source_hash(problem_dir, config):
+def compute_source_hash(problem_dir, config, *, check=None):
     problem_dir = Path(problem_dir).resolve()
     relative_paths = [
         path.relative_to(problem_dir)
-        for path in problem_source_paths(problem_dir, config)
+        for path in problem_source_paths(problem_dir, config, check=check)
         if path.exists()
     ]
-    return hash_paths(problem_dir, relative_paths)[0]
+    return hash_paths(problem_dir, relative_paths, check=check)[0]
 
 
 def compute_workspace_hash(root, workspace):
@@ -220,12 +226,20 @@ def compute_collection_hash(root, workspace, loaded_problems=None):
     return hashlib.sha256(payload).hexdigest()
 
 
-def compute_data_hash(problem_dir, config):
+def compute_data_hash(problem_dir, config, *, check=None):
     data = config.get("data") or {}
     paths = []
     for key, default in (("sample_dir", "data/sample"), ("secret_dir", "data/secret")):
-        paths.extend(files_under(problem_dir / data.get(key, default), {".in", ".ans"}))
-    return hash_paths(problem_dir, [path.relative_to(problem_dir) for path in paths])[0]
+        paths.extend(files_under(
+            problem_dir / data.get(key, default),
+            {".in", ".ans"},
+            check=check,
+        ))
+    return hash_paths(
+        problem_dir,
+        [path.relative_to(problem_dir) for path in paths],
+        check=check,
+    )[0]
 
 
 def lint_problem(root, workspace, entry):
