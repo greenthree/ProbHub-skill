@@ -27,6 +27,19 @@ class FixtureCatalogTests(unittest.TestCase):
                 self.assertEqual(len(result["problems"]), 1)
                 self.assertEqual(result["problems"][0]["errors"], [])
 
+    def test_pre_judge_qa_standard_custom_interactive_workspaces_remain_compatible(self):
+        # These fixtures intentionally predate judge.qa. They must remain
+        # lintable and explicitly report not-configured rather than passed.
+        for name in ("standard", "custom", "interactive"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                fixture = copy_workspace_fixture(name, temp)
+                root, workspace = load_workspace(fixture.root)
+                result = lint_workspace(root, workspace)
+                self.assertTrue(result["ok"], result)
+                judge_qa = result["problems"][0]["judge_qa"]
+                self.assertFalse(judge_qa["configured"], judge_qa)
+                self.assertEqual(judge_qa["evidence"]["state"], "not-configured")
+
     def test_committed_fixtures_contain_no_generated_artifacts(self):
         forbidden_names = {
             "build-manifest.json",

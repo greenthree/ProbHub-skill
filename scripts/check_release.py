@@ -189,6 +189,8 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "requirements.txt", "bin/init.js", "bin/probhub.js", "bin/python.js",
         "probhub/__init__.py", "probhub/cli.py", "probhub/install_deps.py",
         "probhub/install_skill.py", "probhub/process_control.py",
+        "probhub/judge_qa.py", "probhub/judge_qa_evidence.py",
+        "probhub/judge_qa_runtime.py",
         "probhub/webui_runtime.py",
         "probhub/assets/fonts/NotoSansCJKsc-Regular.otf",
         "probhub/assets/fonts/OFL.txt",
@@ -204,6 +206,7 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "references/problems.typ", "references/usts.png", "references/testlib.h",
         "references/installation.md",
         "references/aggregate-limit-derivation.md",
+        "references/checker-interactor.md",
         "references/verification-modes.md",
     }
     missing = sorted(required_main - main_paths)

@@ -115,6 +115,38 @@ def _delivery_identity(workspace, status):
     }
 
 
+def _configure_checker_qa(workspace):
+    """Add a small Judge QA contract to the generated custom problem.
+
+    The files are written into the temporary clean-install workspace rather
+    than the package, so this exercises the installed Core without adding test
+    fixtures to the published npm artifact.
+    """
+    problem = Path(workspace) / "E2E"
+    config_path = problem / "probhub.yaml"
+    config = config_path.read_text(encoding="utf-8")
+    marker = "  checker: code/checker.cpp\n"
+    if marker not in config:
+        raise CleanInstallError("generated custom problem has no checker configuration")
+    qa = (
+        "  qa:\n"
+        "    schema_version: 1\n"
+        "    robustness:\n"
+        "      baseline: accepts-sample\n"
+        "      probes: [empty, truncated, extra-token]\n"
+        "    cases:\n"
+        "    - id: accepts-sample\n"
+        "      purpose: valid-alternative\n"
+        "      case: sample/1\n"
+        "      contestant_output: judge-fixtures/checker/accepted.out\n"
+        "      expected: {status: AC}\n"
+    )
+    config_path.write_text(config.replace(marker, marker + qa, 1), encoding="utf-8")
+    output = problem / "judge-fixtures/checker/accepted.out"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(b"3\n")
+
+
 def run_clean_install():
     metadata = validate_metadata()
     npm = shutil.which("npm")
@@ -328,7 +360,12 @@ def run_clean_install():
             raise CleanInstallError(f"installed WebUI version mismatch: {webui!r}")
 
         common = [probhub, "--workspace", workspace, "--json"]
-        _run_json([*common, "new", "E2E", "--name", "干净安装闭环"], cwd=project, env=env)
+        _run_json(
+            [*common, "new", "E2E", "--name", "干净安装闭环", "--judge", "custom"],
+            cwd=project,
+            env=env,
+        )
+        _configure_checker_qa(workspace)
         generated = _run_json([*common, "gen", "E2E", "--apply"], cwd=project, env=env)
         cases = generated.get("results", [])
         if not any(item.get("case") == "random01" and not item.get("manual", False) for item in cases):
@@ -338,6 +375,12 @@ def run_clean_install():
         final = judged["problems"]["E2E"].get("final") or {}
         if final.get("code") != "all_expectations_met":
             raise CleanInstallError(f"judge final event mismatch: {final!r}")
+        judge_qa = _run_json(
+            [*common, "judge-qa", "E2E", "--no-cache"], cwd=project, env=env
+        )
+        qa_result = judge_qa.get("problems", {}).get("E2E", {})
+        if qa_result.get("status") != "passed":
+            raise CleanInstallError(f"Judge QA did not pass: {judge_qa!r}")
         sealed = _run_json([*common, "seal", "E2E"], cwd=project, env=env)
         if sealed.get("checkpoint", {}).get("state") != "sealed":
             raise CleanInstallError(f"seal did not publish a sealed checkpoint: {sealed!r}")
@@ -383,7 +426,10 @@ def run_clean_install():
             "version": metadata["version"],
             "packages": inventories,
             "documented_install": ["skill-install", "doctor", "ui-check"],
-            "workflow": ["doctor", "init", "ui-check", "new", "gen", "judge", "seal", "build", "status", "verify-package"],
+            "workflow": [
+                "doctor", "init", "ui-check", "new", "gen", "judge",
+                "judge-qa", "seal", "build", "status", "verify-package",
+            ],
             "rebuild_equivalent": True,
         }
 
