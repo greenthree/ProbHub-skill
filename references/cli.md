@@ -383,6 +383,20 @@ probhub judge L01 --no-cache
 
 缓存事件包含 `mode`、`compile_hits/misses`、`validator_hits/misses`、`case_hits/misses` 和 `probe_hits/misses`。进程树、OLE、校准探针或资源限制语义变化会提升缓存 Schema，防止旧结果绕过新策略。
 
+## 9.1 `judge-qa`
+
+```powershell
+probhub judge-qa [ID...] [--no-cache]
+```
+
+`judge-qa` 只适用于 `judge.type: custom` 和 `judge.type: interactive` 且已配置 `judge.qa.schema_version: 1` 的题目；standard 题未配置时返回 `ok: true, applicable: false, status: not-configured`。Checker fixture 直接把声明的 contestant output 交给正式 Checker，Interactor fixture 编译并运行题目级模拟选手；二者都先用正式 Validator 验证输入。每个 fixture 都必须得到声明的期望状态，Checker/Interactor 自身 `_fail`、崩溃、资源故障、无法建立完整进程树或清理失败始终是基础设施失败。
+
+自动 Checker 探针可从 AC 基线派生 `empty`、`truncated`、`extra-token`、`oversized`；探针返回 AC 只表示执行成功，状态仍会带 `judge_qa_probe_manual_review_required`，必须由作者确认没有误放行。Interactor 可用 `early-eof`、`idle`、`output-flood` 作为受控模拟行为；题目特定协议必须写入 `code/judge-qa/`。
+
+只缓存内容寻址的编译结果，fixture verdict、Validator 和探针每次都会真实执行；`--no-cache` 强制重新编译但不能跳过 QA。完整成功才原子发布 `<problem>/.probhub/judge-qa-evidence-v1.json`，失败、取消、超时、输入变化、锁竞争或发布失败保留上一份成功 evidence。evidence 只保存有界状态和脱敏摘要，不保存 stdout、stderr、feedback 正文或 transcript 条目。
+
+命令结果状态为 `not-configured`、`passed`、`expectation-failed`、`infrastructure-failed` 或 `cancelled`。lint/status 会把 evidence 映射为 `not-configured`、`missing`、`current`、`stale` 或 `invalid`；missing/stale/invalid 是 warning，不改变正式产物 `current/stale` 或 lint 退出码。`seal` 对已配置 QA 要求命令状态 `passed` 且 evidence `current`，否则返回 `seal_judge_qa_failed`，不创建新的 sealed checkpoint。正式 build 还会拒绝没有当前 QA evidence 的旧 sealed checkpoint。
+
 ## 10. `stress`
 
 ```powershell
@@ -473,10 +487,12 @@ probhub seal L10 --rounds 3000 --seed 12345
 
 1. 单题 lint；
 2. judge，`--no-cache` 时完整重跑；
-3. 若配置了 `stress`，按配置或 `--rounds` 执行固定 seed 差分测试；
-4. 复核 live source/data hash 未在验证期间变化；
-5. 写入 sealed checkpoint 和验证证据；
-6. 使用所有题目的最新 checkpoint 组装完整试卷 generation。
+3. 对已配置 `judge.qa` 的题目运行 Judge QA；
+4. 刷新 lint 视图，确认 QA evidence 为 `current`；
+5. 若配置了 `stress`，按配置或 `--rounds` 执行固定 seed 差分测试；
+6. 复核 live source/data hash 未在验证期间变化；
+7. 写入 sealed checkpoint 和验证证据；
+8. 使用所有题目的最新 checkpoint 组装完整试卷 generation。
 
 单独组装和检查当前 generation：
 
@@ -542,11 +558,12 @@ probhub build [ID...] [--skip-judge] [--no-cache]
 3. 要求 collection 中每道题的最新 checkpoint 均为与 live source/data 匹配的 sealed revision；否则以 `sealed_revision_required` 失败且不创建构建快照。
 4. 复制受控输入快照；后续 judge、排版和打包只读取该快照。
 5. judge 所选题目。
-6. 在快照中编译一次完整 Typst 集合并提取所选单题 PDF。
-7. 在快照中生成 DOMjudge 配置、构建并验证全部所选 ZIP。
-8. 为所有所选题目生成带同一 `batch_id` 与各自 `sealed_revision_id` 的 Manifest。
-9. 发布前重新计算 live 输入哈希，并复核所有 sealed revision；变化时以 `inputs_changed` 或 `sealed_revision_changed` 失败。
-10. 全部准备成功后发布共享产物与所选产物，Manifest 最后替换。
+6. 复核已配置 Judge QA 的 sealed checkpoint 仍包含当前通过的 QA evidence；否则以 `sealed_revision_required` 失败。
+7. 在快照中编译一次完整 Typst 集合并提取所选单题 PDF。
+8. 在快照中生成 DOMjudge 配置、构建并验证全部所选 ZIP。
+9. 为所有所选题目生成带同一 `batch_id` 与各自 `sealed_revision_id` 的 Manifest。
+10. 发布前重新计算 live 输入哈希，并复核所有 sealed revision；变化时以 `inputs_changed` 或 `sealed_revision_changed` 失败。
+11. 全部准备成功后发布共享产物与所选产物，Manifest 最后替换。
 
 即使执行 `build L01`，也会为了题序与页码编译全卷，并要求整场所有题目都已 seal，但只评测、提取、打包和更新 L01。正式发布推荐在全部题目 seal 后一次传入全部 ID。
 
@@ -655,6 +672,14 @@ npm install -g .
 ### `sealed_revision_required`
 
 正式 build 要求整场每道题都已 `seal`，并且 seal 后未再修改 live source/data。对提示中的题目重新运行 `seal <ID>`，待全部题目 sealed 后执行一次多 ID build。
+
+### `seal_judge_qa_failed`
+
+题目配置了 Checker/Interactor 主动测试，但 Judge QA 没有得到 `passed`，或上一次成功 evidence 已不再与当前输入匹配。先检查 `probhub judge-qa <ID> --no-cache` 的结构化结果和 fixture，再修复 `_fail`、协议、期望状态或清理问题后重新 seal。不要把 `FAIL` 当成错解被击杀，也不要手工删除旧 evidence。
+
+### `judge_qa_evidence_missing` / `judge_qa_evidence_stale` / `judge_qa_evidence_invalid`
+
+这些是 lint/status 的非阻断体检 warning。对已配置的题目运行 `probhub judge-qa <ID> --no-cache` 会重新生成 evidence；如果要正式交付或重新 seal，必须让状态回到 `current`。旧未配置工作区不会因为升级 Core 而被强制补 QA。
 
 ### `problem.pdf` 缺失
 

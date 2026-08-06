@@ -13,7 +13,12 @@ from unittest import mock
 from probhub.errors import ProbHubError
 from probhub.build_lock import workspace_file_lock
 from probhub.io import write_yaml
-from probhub.judge_qa import judge_qa_problem
+from probhub.judge_qa import (
+    evaluate_judge_qa_evidence,
+    inspect_judge_qa,
+    judge_qa_problem,
+)
+from probhub.linting import compute_data_hash, compute_source_hash
 from probhub.process_control import process_alive
 import probhub.judge_qa_runtime as runtime
 from tests.fixture_support import FIXTURE_ROOT, copy_workspace_fixture
@@ -62,6 +67,8 @@ class JudgeQAExecutionTests(unittest.TestCase):
             path.relative_to(fixture.root).as_posix(): path.read_bytes()
             for path in fixture.root.rglob("*")
             if path.is_file()
+            and "/.probhub/compile/"
+            not in "/" + path.relative_to(fixture.root).as_posix()
             and not (
                 path.parent.name == ".probhub"
                 and (
@@ -129,6 +136,19 @@ class JudgeQAExecutionTests(unittest.TestCase):
         )
         self.assertTrue(result["evidence"]["cleanup"]["snapshot_removed"])
         self.assert_evidence_has_no_stream_content(result["evidence"])
+        serialized = json.dumps(result["evidence"], ensure_ascii=False)
+        self.assertNotIn("accepted absolute value", serialized)
+        self.assertNotIn("wrong absolute value", serialized)
+        config = fixture.config()
+        inspection = inspect_judge_qa(fixture.problem, config)
+        evaluated = evaluate_judge_qa_evidence(
+            fixture.problem,
+            config,
+            inspection,
+            compute_source_hash(fixture.problem, config),
+            compute_data_hash(fixture.problem, config),
+        )
+        self.assertEqual(evaluated["state"], "current", evaluated)
         self.assertEqual(
             list(evidence_path.parent.glob(f"{evidence_path.name}.*.tmp")),
             [],
@@ -173,6 +193,58 @@ class JudgeQAExecutionTests(unittest.TestCase):
             "manual_review_required" in probe for probe in result["probes"]
         ))
         self.assertEqual(self.formal_workspace_bytes(fixture), before)
+
+    def test_compile_cache_hits_but_fixture_verdicts_execute_every_time(self):
+        fixture = self.copy_fixture("checker-qa")
+        original_checker = runtime.run_checker_to_files
+        calls = []
+
+        def counted_checker(*args, **kwargs):
+            calls.append(Path(args[3]).name)
+            return original_checker(*args, **kwargs)
+
+        with mock.patch.object(
+            runtime,
+            "run_checker_to_files",
+            side_effect=counted_checker,
+        ):
+            first = judge_qa_problem(fixture.root, fixture.problem)
+            first_calls = len(calls)
+            second = judge_qa_problem(fixture.root, fixture.problem)
+            second_calls = len(calls) - first_calls
+            refreshed = judge_qa_problem(
+                fixture.root,
+                fixture.problem,
+                use_cache=False,
+            )
+
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(first["cache"]["compile_hits"], 0, first)
+        self.assertEqual(first["cache"]["compile_misses"], 2, first)
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["cache"]["compile_hits"], 2, second)
+        self.assertEqual(second["cache"]["compile_misses"], 0, second)
+        self.assertEqual(first_calls, 6)
+        self.assertEqual(second_calls, first_calls)
+        self.assertTrue(refreshed["ok"], refreshed)
+        self.assertEqual(refreshed["cache"]["mode"], "refresh")
+        self.assertEqual(refreshed["cache"]["compile_hits"], 0, refreshed)
+        self.assertEqual(refreshed["cache"]["compile_misses"], 2, refreshed)
+
+    def test_corrupt_compile_cache_binary_is_not_executed(self):
+        fixture = self.copy_fixture("checker-qa")
+        first = judge_qa_problem(fixture.root, fixture.problem)
+        self.assertTrue(first["ok"], first)
+        binary = next(
+            (fixture.problem / ".probhub/compile/judge-qa-v1").glob("*.bin")
+        )
+        binary.write_bytes(b"corrupt")
+
+        second = judge_qa_problem(fixture.root, fixture.problem)
+
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["cache"]["compile_hits"], 1, second)
+        self.assertEqual(second["cache"]["compile_misses"], 1, second)
 
     def test_cpp_checker_qa_runs_from_unicode_and_space_path(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -257,6 +329,45 @@ class JudgeQAExecutionTests(unittest.TestCase):
             })
             self.assertTrue(summary["infrastructure_failed"], summary)
             self.assertFalse(summary["matched"], summary)
+
+    def test_untrusted_checker_and_interactor_diagnostics_are_reduced_to_byte_counts(self):
+        case = {"id": "diagnostic", "purpose": "diagnostic", "expected": {"status": "WA"}}
+        sentinel = "judge-feedback-secret-7f2d"
+        checker = runtime._checker_summary(case, {
+            "verdict": "WA",
+            "execution_status": "completed",
+            "failure_kind": None,
+            "actor": "checker",
+            "message": sentinel,
+            "cleanup": {"ok": True, "errors": []},
+        })
+        interactor = runtime._interactor_summary(case, {
+            "status": "WA",
+            "actor": "interactor",
+            "execution_status": "completed",
+            "failure_kind": None,
+            "message": sentinel,
+            "cleanup": {"ok": True, "errors": []},
+        })
+        for summary in (checker, interactor):
+            serialized = json.dumps(summary, ensure_ascii=False)
+            self.assertNotIn(sentinel, serialized)
+            self.assertEqual(summary["diagnostic"]["bytes"], len(sentinel.encode("utf-8")))
+            self.assertTrue(summary["diagnostic"]["present"])
+            self.assertFalse(summary["diagnostic"]["truncated"])
+
+        oversized = runtime._checker_summary(case, {
+            "verdict": "WA",
+            "execution_status": "completed",
+            "failure_kind": None,
+            "actor": "checker",
+            "message": "x" * (runtime.DIAGNOSTIC_LIMIT_BYTES + 1),
+            "cleanup": {"ok": True, "errors": []},
+        })
+        self.assertEqual(
+            oversized["diagnostic"]["bytes"], runtime.DIAGNOSTIC_LIMIT_BYTES
+        )
+        self.assertTrue(oversized["diagnostic"]["truncated"])
 
     def test_checker_timeout_matches_formal_judge_policy(self):
         fixture = self.copy_fixture("checker-qa")
@@ -839,10 +950,14 @@ class JudgeQAExecutionTests(unittest.TestCase):
             mock.patch.object(runtime, "_compile_program", side_effect=fake_compile),
             mock.patch.object(runtime.tempfile, "mkdtemp", side_effect=make_temporary),
         ):
+            # Leave enough startup budget for the controlled checker to publish
+            # both PID markers on busy Windows runners; the checker still sleeps
+            # beyond the overall deadline, so the timeout/cleanup assertion is
+            # unchanged.
             result = judge_qa_problem(
                 fixture.root,
                 fixture.problem,
-                timeout=1.5,
+                timeout=5.0,
             )
 
         self.assertFalse(result["ok"], result)

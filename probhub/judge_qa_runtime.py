@@ -1,11 +1,14 @@
 import hashlib
+import json
 import math
 import os
 import platform
 import shutil
+import stat
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,9 +16,16 @@ from . import __version__
 from .build_lock import workspace_file_lock
 from .calibration import SANDBOX_CACHE_SCHEMA_VERSION
 from .errors import ProbHubError
-from .hashing import files_under
+from .hashing import files_under, hash_file
 from .io import atomic_write_json, normalize_newlines, read_bounded_text, read_yaml
 from .judge_qa import inspect_judge_qa
+from .judge_qa_evidence import (
+    JUDGE_QA_EVIDENCE_FILENAME,
+    JUDGE_QA_EVIDENCE_LOCK_FILENAME,
+    JUDGE_QA_EVIDENCE_SCHEMA_VERSION,
+    JUDGE_QA_POLICY_VERSION,
+    evidence_path,
+)
 from .linting import compute_data_hash, compute_source_hash, problem_source_paths
 from .problem_paths import ProblemPathError, resolve_problem_regular_file
 from .process_control import (
@@ -32,10 +42,6 @@ from .process_control import (
 from .special_judges import execute_interactive_session, run_checker_to_files
 
 
-JUDGE_QA_EVIDENCE_SCHEMA_VERSION = 1
-JUDGE_QA_POLICY_VERSION = 1
-JUDGE_QA_EVIDENCE_FILENAME = "judge-qa-evidence-v1.json"
-JUDGE_QA_EVIDENCE_LOCK_FILENAME = "judge-qa-evidence.lock"
 DEFAULT_JUDGE_QA_TIMEOUT_SECONDS = 600.0
 MAX_JUDGE_QA_TIMEOUT_SECONDS = 3600.0
 DEFAULT_TOOL_TIMEOUT_SECONDS = 10.0
@@ -48,6 +54,10 @@ ROBUSTNESS_OVERSIZED_BYTES = 1024 * 1024 + 1
 MAX_JUDGE_QA_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_JUDGE_QA_TRANSCRIPT_BYTES = 1024 * 1024
 MIN_JUDGE_QA_IDLE_SECONDS = 0.1
+JUDGE_QA_COMPILE_CACHE_SCHEMA_VERSION = 1
+MAX_JUDGE_QA_COMPILE_CACHE_ENTRIES = 64
+MAX_JUDGE_QA_COMPILE_CACHE_BINARY_BYTES = 128 * 1024 * 1024
+MAX_JUDGE_QA_COMPILE_CACHE_METADATA_BYTES = 64 * 1024
 
 
 class _OverallTimeout(Exception):
@@ -110,6 +120,19 @@ def _bounded_message(value):
     return retained.decode("utf-8", errors="replace") + "..."
 
 
+def _diagnostic_summary(value):
+    """Keep only whether untrusted diagnostic text existed and its byte count."""
+
+    if value is None:
+        return {"present": False, "bytes": 0, "truncated": False}
+    raw = str(value).encode("utf-8", errors="replace")
+    return {
+        "present": bool(raw),
+        "bytes": min(len(raw), DIAGNOSTIC_LIMIT_BYTES),
+        "truncated": len(raw) > DIAGNOSTIC_LIMIT_BYTES,
+    }
+
+
 def _cleanup_summary(cleanup):
     cleanup = cleanup if isinstance(cleanup, dict) else {}
     states = {
@@ -127,7 +150,7 @@ def _cleanup_summary(cleanup):
             {
                 "stage": item.get("stage"),
                 "actor": item.get("actor"),
-                "message": _bounded_message(item.get("message")),
+                "diagnostic": _diagnostic_summary(item.get("message")),
             }
             for item in errors[:8]
             if isinstance(item, dict)
@@ -279,6 +302,239 @@ def _compiler_identity(cancellation):
         return identity
 
 
+def _compiler_cache_identity():
+    executable = shutil.which("g++")
+    if not executable:
+        raise ProbHubError(
+            "failed to identify the Judge QA compiler: g++ was not found",
+            code="compiler_identity_failed",
+        )
+    try:
+        path = Path(executable).resolve(strict=True)
+        info = path.stat()
+        if not path.is_file():
+            raise OSError("compiler path is not a regular file")
+        return (
+            f"sha256:{hash_file(path)};size:{info.st_size};"
+            f"path:{path.as_posix()}"
+        )
+    except OSError as exc:
+        raise ProbHubError(
+            f"failed to identify the Judge QA compiler: {_bounded_message(exc)}",
+            code="compiler_identity_failed",
+        ) from exc
+
+
+def _link_like(info):
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(info.st_mode) or (
+        reparse and getattr(info, "st_file_attributes", 0) & reparse
+    )
+
+
+def _compile_cache_root(problem_dir):
+    problem_dir = Path(problem_dir).resolve()
+    current = problem_dir
+    for part in (".probhub", "compile", "judge-qa-v1"):
+        current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+            info = current.lstat()
+        if _link_like(info) or not stat.S_ISDIR(info.st_mode):
+            raise ProbHubError(
+                f"Judge QA compile cache path is unsafe: {current}",
+                code="judge_qa_cache_unsafe",
+            )
+    return current
+
+
+def _new_compile_cache(problem_dir, source_hash, use_cache):
+    return {
+        "root": _compile_cache_root(problem_dir),
+        "source_hash": source_hash,
+        "use_cache": bool(use_cache),
+        "mode": "normal" if use_cache else "refresh",
+        "compiler_identity": None,
+        "compile_hits": 0,
+        "compile_misses": 0,
+        "write_errors": [],
+    }
+
+
+def _compile_cache_summary(cache):
+    if cache is None:
+        return {
+            "mode": "disabled",
+            "compile_hits": 0,
+            "compile_misses": 0,
+            "write_errors": [],
+        }
+    return {
+        key: cache[key]
+        for key in ("mode", "compile_hits", "compile_misses", "write_errors")
+    }
+
+
+def _program_output_path(source, build_dir, role):
+    digest = hashlib.sha256(f"{role}\0{source}".encode("utf-8")).hexdigest()[:16]
+    return Path(build_dir) / (
+        f"{role}-{digest}.exe" if os.name == "nt" else f"{role}-{digest}"
+    )
+
+
+def _compile_cache_key(source, build_dir, role, cache, cancellation):
+    if cache["compiler_identity"] is None:
+        cancellation.remaining()
+        cache["compiler_identity"] = _compiler_cache_identity()
+    relative = Path(source).relative_to(Path(build_dir).parent).as_posix()
+    testlib = Path(__file__).resolve().parents[1] / "references" / "testlib.h"
+    identity = {
+        "schema_version": JUDGE_QA_COMPILE_CACHE_SCHEMA_VERSION,
+        "policy_version": JUDGE_QA_POLICY_VERSION,
+        "source_hash": cache["source_hash"],
+        "source": relative,
+        "role": role,
+        "compiler_identity": cache["compiler_identity"],
+        "platform": platform.system(),
+        "machine": platform.machine(),
+        "static": platform.system() == "Windows",
+        "for_linux": platform.system() == "Windows" and role == "validator",
+        "testlib_hash": hash_file(testlib),
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), identity
+
+
+def _regular_cache_file(path, maximum):
+    try:
+        info = Path(path).lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(info.st_mode)
+        and not _link_like(info)
+        and 0 <= info.st_size <= maximum
+    )
+
+
+def _restore_cached_binary(cache, key, identity, destination):
+    metadata_path = cache["root"] / f"{key}.json"
+    binary_path = cache["root"] / f"{key}.bin"
+    if not _regular_cache_file(
+        metadata_path, MAX_JUDGE_QA_COMPILE_CACHE_METADATA_BYTES
+    ) or not _regular_cache_file(
+        binary_path, MAX_JUDGE_QA_COMPILE_CACHE_BINARY_BYTES
+    ):
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("schema_version") != JUDGE_QA_COMPILE_CACHE_SCHEMA_VERSION
+            or metadata.get("key") != key
+            or metadata.get("identity") != identity
+            or metadata.get("binary_bytes") != binary_path.stat().st_size
+            or metadata.get("binary_sha256") != hash_file(binary_path)
+        ):
+            return False
+        shutil.copyfile(binary_path, destination)
+        if os.name != "nt":
+            os.chmod(destination, 0o755)
+        return hash_file(destination) == metadata["binary_sha256"]
+    except (OSError, UnicodeError, ValueError, TypeError):
+        Path(destination).unlink(missing_ok=True)
+        return False
+
+
+def _prune_compile_cache(cache):
+    try:
+        records = sorted(
+            (
+                path
+                for path in cache["root"].glob("*.json")
+                if _regular_cache_file(
+                    path, MAX_JUDGE_QA_COMPILE_CACHE_METADATA_BYTES
+                )
+            ),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for metadata_path in records[MAX_JUDGE_QA_COMPILE_CACHE_ENTRIES:]:
+            key = metadata_path.stem
+            metadata_path.unlink(missing_ok=True)
+            (cache["root"] / f"{key}.bin").unlink(missing_ok=True)
+    except OSError as exc:
+        cache["write_errors"].append(_bounded_message(exc))
+
+
+def _publish_cached_binary(cache, key, identity, binary):
+    binary = Path(binary)
+    try:
+        size = binary.stat().st_size
+        if size > MAX_JUDGE_QA_COMPILE_CACHE_BINARY_BYTES:
+            raise OSError(
+                f"compiled binary is {size} bytes; cache limit is "
+                f"{MAX_JUDGE_QA_COMPILE_CACHE_BINARY_BYTES}"
+            )
+        destination = cache["root"] / f"{key}.bin"
+        temporary = cache["root"] / f"{key}.{uuid.uuid4().hex}.tmp"
+        try:
+            shutil.copyfile(binary, temporary)
+            digest = hash_file(temporary)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        atomic_write_json(cache["root"] / f"{key}.json", {
+            "schema_version": JUDGE_QA_COMPILE_CACHE_SCHEMA_VERSION,
+            "key": key,
+            "identity": identity,
+            "binary_bytes": size,
+            "binary_sha256": digest,
+        })
+        _prune_compile_cache(cache)
+    except OSError as exc:
+        cache["write_errors"].append(_bounded_message(exc))
+
+
+def _compile_program_cached(source, build_dir, role, cancellation, cache=None):
+    source = Path(source)
+    if cache is None or source.suffix.casefold() != ".cpp":
+        return _compile_program(source, build_dir, role, cancellation)
+    key, identity = _compile_cache_key(
+        source, build_dir, role, cache, cancellation
+    )
+    output = _program_output_path(source, build_dir, role)
+    if cache["use_cache"] and _restore_cached_binary(
+        cache, key, identity, output
+    ):
+        cache["compile_hits"] += 1
+        return [str(output)], {
+            "role": role,
+            "source": identity["source"],
+            "kind": "cpp17",
+            "compiler": "g++",
+            "compiler_path": shutil.which("g++"),
+            "compiler_identity": cache["compiler_identity"],
+            "cache_hit": True,
+        }
+    cache["compile_misses"] += 1
+    command, info = _compile_program(source, build_dir, role, cancellation)
+    info["compiler_identity"] = cache["compiler_identity"]
+    info["cache_hit"] = False
+    _publish_cached_binary(cache, key, identity, command[0])
+    return command, info
+
+
 def _compile_program(source, build_dir, role, cancellation):
     source = Path(source)
     try:
@@ -306,7 +562,7 @@ def _compile_program(source, build_dir, role, cancellation):
         )
 
     digest = hashlib.sha256(f"{role}\0{source}".encode("utf-8")).hexdigest()[:16]
-    output = Path(build_dir) / (f"{role}-{digest}.exe" if os.name == "nt" else f"{role}-{digest}")
+    output = _program_output_path(source, build_dir, role)
     include_dir = Path(build_dir) / "include"
     include_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(
@@ -479,12 +735,13 @@ def _validate_inputs(validator_command, problem_dir, cases, cancellation):
                 "execution_status": execution.get("reason"),
                 "returncode": execution.get("returncode"),
                 "time": execution.get("time"),
-                "message": _bounded_message(message or execution.get("message")),
+                "diagnostic": _diagnostic_summary(message or execution.get("message")),
             }
             results.append(summary)
             if not summary["ok"]:
                 raise ProbHubError(
-                    f"Validator rejected Judge QA input {relative}: {summary['message']}",
+                    f"Validator rejected Judge QA input {relative}: "
+                    f"{summary['execution_status'] or 'unknown'}",
                     code="judge_qa_validator_failed",
                 )
     finally:
@@ -510,7 +767,7 @@ def _checker_summary(case, result):
         },
         "matched": matched,
         "infrastructure_failed": infrastructure,
-        "message": _bounded_message(result.get("message")),
+        "diagnostic": _diagnostic_summary(result.get("message")),
         "resources": {
             key: result.get(key)
             for key in (
@@ -546,7 +803,7 @@ def _interactor_summary(case, result):
         "actual": actual,
         "matched": matched,
         "infrastructure_failed": infrastructure,
-        "message": _bounded_message(result.get("message")),
+        "diagnostic": _diagnostic_summary(result.get("message")),
         "resources": result.get("resources") or {},
         "traffic": result.get("traffic") or {},
         "transcript": {
@@ -727,7 +984,7 @@ def _live_identity(problem_dir, cancellation=None):
 
 
 def _evidence_path(problem_dir):
-    return Path(problem_dir) / ".probhub" / JUDGE_QA_EVIDENCE_FILENAME
+    return evidence_path(problem_dir)
 
 
 def _publish_evidence(problem_dir, evidence, expected_identity, cancellation):
@@ -759,6 +1016,7 @@ def _build_evidence(
     probes,
     elapsed,
     overall_timeout,
+    cache=None,
 ):
     now = datetime.now(timezone.utc).isoformat()
     return {
@@ -809,6 +1067,7 @@ def _build_evidence(
             ),
         },
         "elapsed": elapsed,
+        "cache": _compile_cache_summary(cache),
         "compilers": compilers,
         "validators": validators,
         "cases": cases,
@@ -817,13 +1076,24 @@ def _build_evidence(
     }
 
 
-def _execute_snapshot(snapshot_problem, config, report, cancellation):
+def _execute_snapshot(
+    snapshot_problem,
+    config,
+    report,
+    cancellation,
+    *,
+    compile_cache=None,
+):
     limits = _runtime_limits(config)
     build_dir = Path(snapshot_problem) / ".judge-qa-build"
     build_dir.mkdir(parents=True, exist_ok=True)
     compiled = []
-    validator_command, compile_info = _compile_program(
-        _program_path(snapshot_problem, config, "validator"), build_dir, "validator", cancellation
+    validator_command, compile_info = _compile_program_cached(
+        _program_path(snapshot_problem, config, "validator"),
+        build_dir,
+        "validator",
+        cancellation,
+        compile_cache,
     )
     compiled.append(compile_info)
     validators = _validate_inputs(
@@ -831,8 +1101,12 @@ def _execute_snapshot(snapshot_problem, config, report, cancellation):
     )
 
     if report["judge_type"] == "custom":
-        checker_command, compile_info = _compile_program(
-            _program_path(snapshot_problem, config, "checker"), build_dir, "checker", cancellation
+        checker_command, compile_info = _compile_program_cached(
+            _program_path(snapshot_problem, config, "checker"),
+            build_dir,
+            "checker",
+            cancellation,
+            compile_cache,
         )
         compiled.append(compile_info)
         cases, probes, status = _run_checker_qa(
@@ -840,8 +1114,12 @@ def _execute_snapshot(snapshot_problem, config, report, cancellation):
         )
     else:
         limits.update(_interactive_limits(config, limits))
-        interactor_command, compile_info = _compile_program(
-            _program_path(snapshot_problem, config, "interactor"), build_dir, "interactor", cancellation
+        interactor_command, compile_info = _compile_program_cached(
+            _program_path(snapshot_problem, config, "interactor"),
+            build_dir,
+            "interactor",
+            cancellation,
+            compile_cache,
         )
         compiled.append(compile_info)
         contestant_commands = {}
@@ -849,11 +1127,12 @@ def _execute_snapshot(snapshot_problem, config, report, cancellation):
             source = (case.get("contestant") or {}).get("source")
             if not source or source.casefold() in contestant_commands:
                 continue
-            command, compile_info = _compile_program(
+            command, compile_info = _compile_program_cached(
                 resolve_problem_regular_file(snapshot_problem, source),
                 build_dir,
                 "contestant",
                 cancellation,
+                compile_cache,
             )
             contestant_commands[source.casefold()] = command
             compiled.append(compile_info)
@@ -867,11 +1146,6 @@ def _execute_snapshot(snapshot_problem, config, report, cancellation):
             cancellation,
         )
         probes = []
-    if any(item.get("kind") == "cpp17" for item in compiled):
-        compiler_identity = _compiler_identity(cancellation)
-        for item in compiled:
-            if item.get("kind") == "cpp17":
-                item["compiler_identity"] = compiler_identity
     return limits, validators, compiled, cases, probes, status
 
 
@@ -881,6 +1155,7 @@ def judge_qa_problem(
     *,
     timeout=DEFAULT_JUDGE_QA_TIMEOUT_SECONDS,
     cancel_check=None,
+    use_cache=True,
 ):
     """Execute configured Checker/Interactor fixtures without mutating formal artifacts."""
 
@@ -947,6 +1222,11 @@ def judge_qa_problem(
                 ),
                 report.get("fixture_hash"),
             )
+            compile_cache = _new_compile_cache(
+                problem_dir,
+                identity[0],
+                use_cache,
+            )
             temporary_root = Path(tempfile.mkdtemp(prefix="probhub-judge-qa-"))
             snapshot_problem = temporary_root / "problem"
             execution = None
@@ -962,7 +1242,11 @@ def judge_qa_problem(
                     cancellation,
                 )
                 execution = _execute_snapshot(
-                    snapshot_problem, copied_config, copied_report, cancellation
+                    snapshot_problem,
+                    copied_config,
+                    copied_report,
+                    cancellation,
+                    compile_cache=compile_cache,
                 )
                 _, _, snapshot_identity = _live_identity(
                     snapshot_problem, cancellation
@@ -1019,6 +1303,7 @@ def judge_qa_problem(
                     cases=cases,
                     probes=probes,
                     validators=validators,
+                    cache=_compile_cache_summary(compile_cache),
                 )
             elapsed = time.monotonic() - started
             evidence = _build_evidence(
@@ -1030,6 +1315,7 @@ def judge_qa_problem(
                 probes,
                 elapsed,
                 timeout,
+                compile_cache,
             )
             _publish_evidence(problem_dir, evidence, identity, cancellation)
             return _result(
@@ -1042,6 +1328,7 @@ def judge_qa_problem(
                 evidence=evidence,
                 evidence_path=str(_evidence_path(problem_dir)),
                 evidence_published=True,
+                cache=_compile_cache_summary(compile_cache),
             )
     except ProcessCancelled as exc:
         if cancellation.cause == "overall_timeout":

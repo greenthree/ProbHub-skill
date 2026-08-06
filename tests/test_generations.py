@@ -28,6 +28,7 @@ from probhub.io import write_yaml
 from probhub.linting import compute_data_hash, compute_source_hash
 from probhub.workspace import load_problem
 from probhub.workspace import load_workspace, problem_entries
+from tests.fixture_support import copy_workspace_fixture
 
 
 class GenerationTests(unittest.TestCase):
@@ -502,9 +503,29 @@ class GenerationTests(unittest.TestCase):
                 "rounds_completed": 7,
                 "master_seed": 99,
             }
+            order = []
+
+            def run_judge(*_args, **_kwargs):
+                order.append("judge")
+                return judge_result
+
+            def run_qa(*_args, **_kwargs):
+                order.append("judge-qa")
+                return {
+                    "ok": True,
+                    "applicable": False,
+                    "status": "not-configured",
+                    "judge_type": "standard",
+                }
+
+            def run_stress(*_args, **_kwargs):
+                order.append("stress")
+                return stress_result
+
             with (
-                patch("probhub.cli.judge_problem", return_value=judge_result),
-                patch("probhub.cli.stress_problem", return_value=stress_result) as stress,
+                patch("probhub.cli.judge_problem", side_effect=run_judge),
+                patch("probhub.cli.judge_qa_problem", side_effect=run_qa),
+                patch("probhub.cli.stress_problem", side_effect=run_stress) as stress,
                 patch(
                     "probhub.cli.assemble_exam_generation",
                     return_value={"ok": True, "generation_id": "fixture-generation"},
@@ -532,7 +553,12 @@ class GenerationTests(unittest.TestCase):
             checkpoint = payload["checkpoint"]
             self.assertEqual(checkpoint["state"], "sealed")
             self.assertTrue(checkpoint["evidence"]["judge"]["ok"])
+            self.assertEqual(
+                checkpoint["evidence"]["judge_qa"]["status"],
+                "not-configured",
+            )
             self.assertEqual(checkpoint["evidence"]["stress"]["rounds_completed"], 7)
+            self.assertEqual(order, ["judge", "judge-qa", "stress"])
             self.assertEqual(payload["generation"]["generation_id"], "fixture-generation")
             self.assertEqual(stress.call_args.kwargs["rounds"], 7)
             self.assertEqual(stress.call_args.kwargs["master_seed"], 99)
@@ -540,6 +566,96 @@ class GenerationTests(unittest.TestCase):
                 assemble.call_args.kwargs["expected_builder_fingerprint"],
                 self.builder_fingerprint,
             )
+
+    def test_configured_judge_qa_failure_does_not_create_sealed_checkpoint(self):
+        judge_result = {
+            "ok": True,
+            "returncode": 0,
+            "final": {
+                "type": "final",
+                "status": "passed",
+                "code": "all_expectations_met",
+            },
+            "cache": {},
+        }
+        for status in (
+            "expectation-failed",
+            "infrastructure-failed",
+            "cancelled",
+            "not-configured",
+        ):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp:
+                fixture = copy_workspace_fixture("checker-qa", temp)
+                output = io.StringIO()
+                with (
+                    patch("probhub.cli.judge_problem", return_value=judge_result),
+                    patch("probhub.cli.judge_qa_problem", return_value={
+                        "ok": status == "not-configured",
+                        "applicable": status != "not-configured",
+                        "status": status,
+                        "code": "fixture-failure",
+                    }),
+                    patch(
+                        "probhub.cli.compute_builder_fingerprint",
+                        return_value=self.builder_fingerprint,
+                    ),
+                    patch("probhub.cli.assemble_exam_generation") as assemble,
+                    redirect_stdout(output),
+                ):
+                    code = cli_main([
+                        "--workspace",
+                        str(fixture.root),
+                        "--json",
+                        "seal",
+                        "F06",
+                        "--no-cache",
+                    ])
+
+                self.assertEqual(code, 1, output.getvalue())
+                payload = json.loads(output.getvalue())
+                self.assertEqual(payload["code"], "seal_judge_qa_failed")
+                self.assertIsNone(latest_checkpoint(fixture.root, "F06"))
+                assemble.assert_not_called()
+
+    def test_configured_judge_qa_success_records_current_evidence(self):
+        judge_result = {
+            "ok": True,
+            "returncode": 0,
+            "final": {
+                "type": "final",
+                "status": "passed",
+                "code": "all_expectations_met",
+            },
+            "cache": {},
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = copy_workspace_fixture("checker-qa", temp)
+            output = io.StringIO()
+            with (
+                patch("probhub.cli.judge_problem", return_value=judge_result),
+                patch("probhub.cli.compute_builder_fingerprint", return_value=self.builder_fingerprint),
+                patch(
+                    "probhub.cli.assemble_exam_generation",
+                    return_value={"ok": True, "generation_id": "qa-generation"},
+                ),
+                redirect_stdout(output),
+            ):
+                code = cli_main([
+                    "--workspace",
+                    str(fixture.root),
+                    "--json",
+                    "seal",
+                    "F06",
+                    "--no-cache",
+                ])
+
+            self.assertEqual(code, 0, output.getvalue())
+            payload = json.loads(output.getvalue())
+            checkpoint = payload["checkpoint"]
+            self.assertEqual(checkpoint["state"], "sealed")
+            self.assertEqual(checkpoint["evidence"]["judge_qa"]["status"], "passed")
+            self.assertEqual(payload["generation"]["generation_id"], "qa-generation")
+            self.assertIsNotNone(latest_checkpoint(fixture.root, "F06"))
 
     def test_generation_status_reports_schema_and_builder_staleness(self):
         with tempfile.TemporaryDirectory() as temp:

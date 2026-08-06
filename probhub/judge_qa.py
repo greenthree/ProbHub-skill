@@ -3,6 +3,10 @@ import re
 import unicodedata
 from pathlib import Path, PurePosixPath
 
+from .judge_qa_evidence import (
+    evaluate_judge_qa_evidence,
+    validate_judge_qa_evidence_document,
+)
 from .problem_paths import ProblemPathError, resolve_problem_regular_file
 
 

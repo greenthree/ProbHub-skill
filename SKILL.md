@@ -95,6 +95,7 @@ probhub build
 | `report [ID...]` | 只读汇总难度、数据画像、recipe、TL 余量和错解击杀矩阵；`--format markdown` 输出 Markdown |
 | `sample-check [ID...]` | 只运行样例与首个 accepted，严格核对 `.ans`；不发布 Judge 校准 evidence |
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
+| `judge-qa [ID...]` | 对已配置的 Checker/Interactor fixture 和鲁棒性探针做主动 Judge QA；只缓存编译结果 |
 | `stress ID...` | 反复生成小数据，对拍 accepted 与 brute，保存首个可重放反例；`--against <解法>` 反向找刀，`--fixate <case>` 把命中一步固化为 secret 数据 + 配方 + 定向数据组 |
 | `checkpoint ID` | 发布当前题目的不可变 draft checkpoint，供并行组卷使用 |
 | `seal ID` | lint、judge、stress 后冻结 revision，并自动生成一版完整试卷 |
@@ -138,6 +139,14 @@ probhub build L01 --no-cache
 ```powershell
 probhub build L01 --skip-judge
 ```
+
+对 `judge.type: custom` 或 `judge.type: interactive` 的新题、以及修改过 Checker/Interactor 的题，必须在 `judge.qa` 中登记题目级 fixture 后执行：
+
+```powershell
+probhub judge-qa L01 --no-cache
+```
+
+Judge QA 每次都会重新执行 fixture 和内建探针；`--no-cache` 只额外强制重编官方 Judge 与模拟选手。成功会原子发布题目本地的 `judge-qa-evidence-v1.json`，该文件不进入 ZIP、PDF、Manifest 或正式数据。没有配置 QA 的旧题仍保持 Core 兼容，但 Agent 不得把 `not-configured` 当作新 custom/interactive 题的交付完成。
 
 完整语法、产物、退出码和故障处理见 `references/cli.md`。配置或执行差分测试前读取 `references/stress.md`；修改资源限制、解释 OLE 或排查残留进程时读取 `references/process-control.md`。
 
@@ -184,6 +193,8 @@ probhub build L01 --skip-judge
 
    发现反例后先用输出的 `replay_command` 固定复现，再修复并重跑；完整协议见 `references/stress.md`。
 
+   对已配置 `judge.qa` 的 custom/interactive 题，再执行 `probhub judge-qa <ID> --no-cache`，确认最终状态为 `passed`；自动探针若返回 `AC`，还必须人工确认这不是 Checker/Interactor 误放行。
+
 6. 完成后执行：
 
    ```powershell
@@ -197,7 +208,7 @@ probhub build L01 --skip-judge
    probhub build <ID> --no-cache
    ```
 
-8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、ZIP 深度验证成功且 `status` 为 `current` 时才可交付。独立复核正式包时使用 `probhub --workspace <工作区> verify-package <ID>.zip --require-pdf --problem <ID>`；不带 `--problem` 的 `verification_scope: structural` 不能替代题名、限制、数据和输入 Validator 对账。Manifest 的 `collection_hash` 会跟踪整场排版输入；其他题题面、题面媒体、样例、题序或模板变化后，受影响题目也必须重新构建。
+8. 只有命令退出码为 `0`、沙箱最终事件为 `all_expectations_met`、已配置 Judge QA 的最终状态为 `passed` 且 evidence 为 `current`、ZIP 深度验证成功且 `status` 为 `current` 时才可交付。独立复核正式包时使用 `probhub --workspace <工作区> verify-package <ID>.zip --require-pdf --problem <ID>`；不带 `--problem` 的 `verification_scope: structural` 不能替代题名、限制、数据和输入 Validator 对账。Manifest 的 `collection_hash` 会跟踪整场排版输入；其他题题面、题面媒体、样例、题序或模板变化后，受影响题目也必须重新构建。
 9. 查看 judge summary 与 lint/status 的 `calibration`、`diagnostics`：默认 accepted 应满足 `max_time × 3 <= TL`，期望 TLE 的目标用例应有至少 `1.5 × TL` 的延长探针证据。缺失或低余量 warning 必须在交付前人工处理或在题目 `calibration` 中有意识地调整阈值。
 
 本地 `max_time`、内存和输出余量不是正式评测承诺。Windows 与 Linux/DOMjudge 的启动、链接、调度、计时和内存口径不同；正式 TL/ML/OL 必须在目标 Linux 评测环境重新校准，结构化结果中的 `target_guarantee` 固定为 `false`。
@@ -220,6 +231,7 @@ probhub build L01 --skip-judge
 - 普通唯一答案题使用 `judge.type: standard`：忽略整个输出首尾空白和每行末尾空格/Tab，但行内空格与内部换行仍需一致。需要 Token 级宽松比较时改用 Checker。
 - 非唯一答案和浮点题使用 `judge.type: custom` 与 `code/checker.cpp`；交互题使用 `judge.type: interactive` 与 `code/interactor.cpp`。实现前读取 `references/checker-interactor.md`。
 - Checker/Interactor 必须使用附带的 DOMjudge/testlib 协议；交互题按需设置 `judge.interactive.idle_limit` 和 `transcript_limit`。Core 负责本地编译以及生成 `output_validators/validate/`，不得手工维护该生成目录。
+- Checker/Interactor 题应在 `judge.qa` 中登记真实 fixture；Checker 可声明 `AC/WA`，Interactor 可声明 `AC/WA/RE/TLE/MLE/OLE`，并可使用 `early-eof`、`idle`、`output-flood` 内建模拟行为。fixture 文件放在 `judge-fixtures/`，交互模拟选手源码放在 `code/judge-qa/`，都会按原始字节进入 `fixture_hash`，但永远不会进入正式题目包。
 - 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
 - 样例 `.ans` 必须由配置顺序中的首个 accepted 精确复现；只归一 CRLF/CR 为 LF，尾空格、缺少尾换行和其他字节差异仍失败。Custom Checker 的非唯一输出语义不能替代这条样例不变量；交互题明确不适用。
 - 题面只能有一个 H1，必需 H2 依次为题目描述、输入格式、输出格式且内容非空；提示位于输出之后，样例输入/输出只来自 `data/sample`。lint 的约束对账会保守识别直接 LaTeX/中文累计上限与 Validator 直接累加器，并在多测但未发现累计上限时提示复核；结果始终是 `analysis_state: partial`，启发式 mismatch 只能 warning，不能替代复杂度分析或正确性证明。

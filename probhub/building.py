@@ -26,6 +26,12 @@ from .errors import ProbHubError
 from .generations import checkpoint_revision, latest_checkpoint
 from .hashing import hash_file
 from .io import write_json
+from .judge_qa import inspect_judge_qa
+from .judge_qa_evidence import (
+    JUDGE_QA_EVIDENCE_FILENAME,
+    JUDGE_QA_EVIDENCE_LOCK_FILENAME,
+    validate_judge_qa_evidence_document,
+)
 from .judging import judge_problem
 from .linting import (
     BUILD_MANIFEST_SCHEMA_VERSION,
@@ -211,6 +217,9 @@ def require_collection_sealed(plan):
                 f"{problem_id}: sealed revision does not match live {', '.join(mismatches)}"
             )
             continue
+        if (qa_error := _sealed_judge_qa_error(item, checkpoint)) is not None:
+            rejected.append(f"{problem_id}: {qa_error}")
+            continue
         checkpoints[problem_id] = checkpoint
 
     if rejected:
@@ -220,6 +229,27 @@ def require_collection_sealed(plan):
             code="sealed_revision_required",
         )
     return checkpoints
+
+
+def _sealed_judge_qa_error(item, checkpoint):
+    inspection = inspect_judge_qa(item.problem_dir, item.config)
+    if not inspection.get("configured"):
+        return None
+    evidence = checkpoint.get("evidence")
+    judge_qa = evidence.get("judge_qa") if isinstance(evidence, dict) else None
+    if not isinstance(judge_qa, dict) or judge_qa.get("status") != "passed":
+        return "sealed revision has no passed Judge QA evidence"
+    evaluated = validate_judge_qa_evidence_document(
+        judge_qa,
+        item.config,
+        inspection,
+        item.source_hash,
+        item.data_hash,
+    )
+    if evaluated.get("state") != "current":
+        reason = evaluated.get("reason") or evaluated.get("state") or "invalid"
+        return f"sealed Judge QA evidence is {reason}"
+    return None
 
 
 def assert_collection_seals_unchanged(plan, checkpoints):
@@ -252,6 +282,8 @@ def assert_collection_seals_unchanged(plan, checkpoints):
             or checkpoint.get("data_hash") != item.data_hash
         ):
             rejected.append(f"{problem_id}: sealed revision changed during build")
+        elif (qa_error := _sealed_judge_qa_error(item, checkpoint)) is not None:
+            rejected.append(f"{problem_id}: {qa_error}")
     if rejected:
         raise ProbHubError(
             "sealed build evidence changed during the run: " + "; ".join(rejected),
@@ -298,6 +330,9 @@ def _snapshot_ignore(plan):
         "generation.lock",
         "generations",
         EVIDENCE_LOCK_FILENAME,
+        JUDGE_QA_EVIDENCE_FILENAME,
+        JUDGE_QA_EVIDENCE_LOCK_FILENAME,
+        "compile",
         "sandbox-cache-v1.json.tmp",
         "stress",
         "submissions",
@@ -320,6 +355,10 @@ def _snapshot_ignore(plan):
             if directory.name == ".probhub" and name.startswith("build-publish-"):
                 result.append(name)
             if directory.name == ".probhub" and name.startswith(EVIDENCE_FILENAME + "."):
+                result.append(name)
+            if directory.name == ".probhub" and name.startswith(
+                JUDGE_QA_EVIDENCE_FILENAME + "."
+            ):
                 result.append(name)
         return result
 

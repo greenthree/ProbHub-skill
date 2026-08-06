@@ -360,6 +360,50 @@ def _calibration_profile(calibration):
     }
 
 
+def _judge_qa_profile(lint_result):
+    inspection = (lint_result or {}).get("judge_qa") or {}
+    evidence = inspection.get("evidence") or {}
+    keys = (
+        "state",
+        "configured",
+        "applicable",
+        "judge_type",
+        "target_guarantee",
+        "published_at",
+        "platform",
+        "declared_cases",
+        "evidence_cases",
+        "matched_cases",
+        "declared_probes",
+        "evidence_probes",
+        "manual_review_probes",
+        "cases",
+        "probes",
+    )
+    defaults = {
+        "state": "not-configured",
+        "configured": False,
+        "applicable": bool(inspection.get("applicable")),
+        "judge_type": inspection.get("judge_type"),
+        "target_guarantee": False,
+        "declared_cases": len(inspection.get("cases") or []),
+        "evidence_cases": 0,
+        "matched_cases": 0,
+        "declared_probes": len(
+            (inspection.get("robustness") or {}).get("probes") or []
+        ),
+        "evidence_probes": 0,
+        "manual_review_probes": 0,
+        "cases": [],
+        "probes": [],
+    }
+    return {
+        key: evidence.get(key, defaults.get(key))
+        for key in keys
+        if key in evidence or key in defaults
+    }
+
+
 def _kill_matrix(config, groups, cases, calibration):
     wrong_entries = normalize_solution_entries(config)["wrong"]
     evidence_state = (calibration or {}).get("state", "missing")
@@ -510,6 +554,7 @@ def _problem_report(root, workspace, entry, position, lint_result):
             },
         },
         "calibration": _calibration_profile(calibration),
+        "judge_qa": _judge_qa_profile(lint_result),
         "solution_verification": (lint_result or {}).get("solution_verification") or {},
         "kill_matrix": _kill_matrix(config, groups, cases, calibration),
         "diagnostics": report_diagnostics,
@@ -561,6 +606,9 @@ def build_workspace_report(root, workspace, selected=None):
         "calibration_states": dict(Counter(
             problem["calibration"]["state"] for problem in problems
         )),
+        "judge_qa_states": dict(Counter(
+            problem["judge_qa"]["state"] for problem in problems
+        )),
         "warnings": sum(item.get("severity") == "warning" for item in diagnostics),
         "errors": sum(item.get("severity") == "error" for item in diagnostics)
         + sum(len(problem["lint"]["errors"]) for problem in problems),
@@ -594,6 +642,20 @@ def _format_headroom(value):
     return "—" if value is None else f"{float(value):.3g}x"
 
 
+def _format_qa_actual(value):
+    value = value if isinstance(value, dict) else {}
+    parts = [value.get("status") or "—"]
+    if value.get("timeout_kind"):
+        parts.append(str(value["timeout_kind"]))
+    if value.get("termination_reason"):
+        parts.append(str(value["termination_reason"]))
+    return "/".join(parts)
+
+
+def _format_qa_expected(value):
+    return _format_qa_actual(value)
+
+
 def render_markdown_report(report):
     workspace = report["workspace"]
     summary = report["summary"]
@@ -607,12 +669,12 @@ def render_markdown_report(report):
         "",
         "## 题目概览",
         "",
-        "| 题号 | ID | 题名 | 难度 | 标签 | Sample | Secret | Recipe 覆盖 | TL 余量 |",
-        "|---|---|---|---:|---|---:|---:|---:|---:|",
+        "| 题号 | ID | 题名 | 难度 | 标签 | Sample | Secret | Recipe 覆盖 | TL 余量 | Judge QA |",
+        "|---|---|---|---:|---|---:|---:|---:|---:|---|",
     ]
     for problem in report["problems"]:
         lines.append(
-            "| {label} | {id} | {name} | {difficulty} | {tags} | {sample} | {secret} | {recipes} | {headroom} |".format(
+            "| {label} | {id} | {name} | {difficulty} | {tags} | {sample} | {secret} | {recipes} | {headroom} | {judge_qa} |".format(
                 label=_markdown_escape(problem["label"]),
                 id=_markdown_escape(problem["id"]),
                 name=_markdown_escape(problem["name"]),
@@ -622,6 +684,7 @@ def render_markdown_report(report):
                 secret=problem["tests"]["secret"]["cases"],
                 recipes=_format_ratio(problem["recipes"]["coverage_ratio"]),
                 headroom=_format_headroom(problem["calibration"]["primary_headroom"]),
+                judge_qa=_markdown_escape(problem["judge_qa"]["state"]),
             )
         )
 
@@ -636,6 +699,10 @@ def render_markdown_report(report):
             f"targeted {recipes['targeted']}/{recipes['total']}；near-boundary {recipes['near_boundary']}/{recipes['total']}",
             f"- 校准：{problem['calibration']['state']}；primary accepted TL 余量 "
             f"{_format_headroom(problem['calibration']['primary_headroom'])}；`target_guarantee: false`",
+            f"- Judge QA：{problem['judge_qa']['state']}；case "
+            f"{problem['judge_qa']['matched_cases']}/{problem['judge_qa']['declared_cases']}；"
+            f"probe {problem['judge_qa']['evidence_probes']}/{problem['judge_qa']['declared_probes']}；"
+            f"人工复核 {problem['judge_qa']['manual_review_probes']}",
             f"- 累计约束：{problem['aggregate_constraints']['state']}；"
             f"matched {problem['aggregate_constraints']['summary']['matched']}；"
             f"statement-only {problem['aggregate_constraints']['summary']['statement_only']}；"
@@ -656,6 +723,31 @@ def render_markdown_report(report):
                     f"{group['sample_cases']} | {group['secret_cases']} | "
                     f"{_format_ratio(group['secret_ratio'])} | "
                     f"{_markdown_escape(', '.join(group['targets']) or '—')} |"
+                )
+        judge_qa = problem["judge_qa"]
+        if judge_qa["state"] == "current" and (
+            judge_qa["cases"] or judge_qa["probes"]
+        ):
+            lines.extend([
+                "",
+                "### Judge QA",
+                "",
+                "| ID | Purpose | Expected | Actual | Result |",
+                "|---|---|---|---|---|",
+            ])
+            for item in judge_qa["cases"]:
+                lines.append(
+                    f"| {_markdown_escape(item.get('id'))} | "
+                    f"{_markdown_escape(item.get('purpose'))} | "
+                    f"{_markdown_escape(_format_qa_expected(item.get('expected')))} | "
+                    f"{_markdown_escape(_format_qa_actual(item.get('actual')))} | passed |"
+                )
+            for item in judge_qa["probes"]:
+                result = "review" if item.get("manual_review_required") else "passed"
+                lines.append(
+                    f"| {_markdown_escape(item.get('id'))} | "
+                    f"{_markdown_escape(item.get('purpose'))} | probe | "
+                    f"{_markdown_escape(_format_qa_actual(item.get('actual')))} | {result} |"
                 )
         matrix = problem["kill_matrix"]
         if matrix["rows"]:
@@ -701,7 +793,8 @@ def render_text_report(report):
         lines.append(
             f"[{problem['label']}] {problem['id']} {problem['name']} | 难度 {problem['difficulty'] if problem['difficulty'] is not None else '—'} "
             f"| 标签 {tags} | sample {problem['tests']['sample']['cases']} / secret {problem['tests']['secret']['cases']} "
-            f"| recipe {_format_ratio(problem['recipes']['coverage_ratio'])} | TL {_format_headroom(problem['calibration']['primary_headroom'])}"
+            f"| recipe {_format_ratio(problem['recipes']['coverage_ratio'])} | TL {_format_headroom(problem['calibration']['primary_headroom'])} "
+            f"| QA {problem['judge_qa']['state']}"
         )
         recipes = problem["recipes"]
         lines.append(
@@ -722,6 +815,27 @@ def render_text_report(report):
             f"validator-only={aggregate['summary']['validator_only']} "
             f"dynamic={aggregate['summary']['dynamic']}"
         )
+        judge_qa = problem["judge_qa"]
+        lines.append(
+            f"  Judge QA: cases={judge_qa['matched_cases']}/{judge_qa['declared_cases']} "
+            f"probes={judge_qa['evidence_probes']}/{judge_qa['declared_probes']} "
+            f"manual-review={judge_qa['manual_review_probes']}"
+        )
+        if judge_qa["state"] == "current":
+            for item in judge_qa["cases"]:
+                lines.append(
+                    f"    case {item.get('id')}: "
+                    f"{_format_qa_expected(item.get('expected'))} -> "
+                    f"{_format_qa_actual(item.get('actual'))} (passed)"
+                )
+            for item in judge_qa["probes"]:
+                disposition = (
+                    "review" if item.get("manual_review_required") else "passed"
+                )
+                lines.append(
+                    f"    probe {item.get('id')}: "
+                    f"{_format_qa_actual(item.get('actual'))} ({disposition})"
+                )
         if problem["groups"]:
             lines.append("  数据组:")
             for group in problem["groups"]:

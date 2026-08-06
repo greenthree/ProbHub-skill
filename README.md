@@ -24,6 +24,7 @@ ProbHub 会在这条流程中提供：
 - 面向 Agent 的 Skill，让 Agent 了解规范文件、验证顺序和交付标准；
 - standard、custom checker、浮点比较和 interactive 四类常见评测场景；
 - AC、WA、TLE、MLE、OLE、RE、FAIL 等结果和完整进程树清理；
+- Checker/Interactor 的题目级主动 Judge QA：fixture、鲁棒性探针、隔离执行和有界 evidence；
 - 可复现的数据生成、差分测试、反例重放和错解击杀矩阵；
 - 题面与 Validator 的范围对账、多组数据累计总量的静态复核提示，以及按复杂度、测试需求和资源余量推导 `T` 与累计上限的 Agent 指引；
 - Typst 全卷排版、单题 PDF、DOMjudge ZIP 和交付前验包；
@@ -172,6 +173,7 @@ Agent 和 WebUI 都会调用同一套 Core。只有需要手动排查或编排�
 | `probhub lint L01` | 检查目录、配置、题面结构和约束对账 |
 | `probhub report L01` | 查看数据画像、错解击杀和累计约束状态 |
 | `probhub judge L01` | 编译并运行 Validator、标程、暴力和错解 |
+| `probhub judge-qa L01 --no-cache` | 主动测试 Checker/Interactor 的 fixture 和鲁棒性 |
 | `probhub stress L01 --rounds 1000 --seed 12345` | 用随机小数据对拍 |
 | `probhub seal L01 --no-cache` | 验证并冻结当前题目版本 |
 | `probhub build L01 --no-cache` | 正式生成 PDF、ZIP 和 Manifest |
@@ -223,6 +225,7 @@ Agent 完成题目后，应明确报告下列结果：
 
 - 命令退出码为 0；
 - Judge 最终结果为 `all_expectations_met`；
+- 对 custom/interactive 题，Judge QA 已配置且最终状态为 `passed`，evidence 为 `current`；
 - `status` 为 `current`；
 - ZIP 深度验证没有错误；
 - 人工检查过单题 PDF 和整场 PDF。
@@ -230,6 +233,8 @@ Agent 完成题目后，应明确报告下列结果：
 最终交付文件通常是整场 `main.pdf`、每题的 `problem.pdf` 和工作区根目录下的 `<ID>.zip`。如果题目、数据或模板发生变化，应由 Agent 重新验证和构建，不要手工修改生成物。
 
 本机通过不等于目标 DOMjudge 机器一定具有相同速度。时间限制和内存限制仍应在目标 Linux/DOMjudge 环境校准。
+
+对 `judge.type: custom` 或 `judge.type: interactive` 的新题，或修改 Checker/Interactor 后，先在 `judge.qa` 中登记题目级 fixture，再运行 `probhub judge-qa <ID> --no-cache`。fixture 每次都会执行，只有编译结果可以缓存；`judge-qa-evidence-v1.json` 是本地有界证据，不会进入 ZIP、PDF 或 Manifest。lint/status 中的 evidence 缺失或过期是体检 warning，但 `seal` 和正式 `build` 不允许已配置题目绕过通过的 Judge QA。
 
 ## 并行出题时怎么做
 
@@ -309,6 +314,20 @@ probhub seal L01 --no-cache --seed 12345
 ```
 
 所有题目完成后再运行多题 `build`。
+
+### `seal` 提示 `seal_judge_qa_failed`
+
+题目已配置 Checker/Interactor 主动测试，但 fixture 没有全部得到期望状态，或 Judge/清理基础设施失败。先运行：
+
+```bash
+probhub judge-qa L01 --no-cache
+```
+
+按结构化结果修复 Checker、Interactor、模拟选手、fixture 或期望状态，再重新执行 `seal`。`FAIL` 表示题目基础设施错误，不是成功击杀错解。
+
+### `lint` 或 `status` 显示 Judge QA evidence warning
+
+`judge_qa_evidence_missing`、`judge_qa_evidence_stale` 和 `judge_qa_evidence_invalid` 不会单独让 lint 失败，但正式交付前必须恢复为 `current`。旧的 standard 题或未配置 QA 的旧工作区仍可继续使用；新的 custom/interactive 题不能以 `not-configured` 交付。
 
 ### `status` 显示 `stale`
 

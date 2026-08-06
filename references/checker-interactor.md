@@ -167,6 +167,39 @@ validation: custom interactive
 
 `output_validators/` 是生成物，不要手工修改。修改 Checker/Interactor 后重新执行 `probhub judge <ID>` 和 `probhub build <ID>`。
 
+## 3.1 Judge QA 主动测试
+
+新题或修改过 Checker/Interactor 后，在 `probhub.yaml` 中增加 `judge.qa`，并把测试素材放在题目目录内：
+
+```text
+<problem>/
+├── judge-fixtures/       # 显式 input、jury_answer、contestant_output
+└── code/judge-qa/        # Interactor 的 C++/Python 模拟选手
+```
+
+配置必须使用 `schema_version: 1`。Checker fixture 可引用 `case: sample/<name>` 或 `secret/<name>`，也可互斥地提供 `input`、`jury_answer`；`contestant_output` 始终是题目目录内 `judge-fixtures/` 下的普通文件，期望状态为 `AC` 或 `WA`。Interactor fixture 的 `contestant` 必须二选一：`source: code/judge-qa/<file>`（`.cpp` 或 `.py`）或内建 `behavior: early-eof|idle|output-flood`，期望状态可为 `AC`、`WA`、`RE`、`TLE`、`MLE`、`OLE`，TLE 可附 `timeout_kind: idle|total`。
+
+Checker 可额外声明：
+
+```yaml
+judge:
+  qa:
+    schema_version: 1
+    robustness:
+      baseline: accepts-alternative
+      probes: [empty, truncated, extra-token, oversized]
+    cases:
+      - id: accepts-alternative
+        purpose: valid alternative
+        case: sample/basic
+        contestant_output: judge-fixtures/checker/alternative.out
+        expected: {status: AC}
+```
+
+`probhub judge-qa <ID> --no-cache` 会以正式 Validator、Checker/Interactor 和进程控制策略执行全部 fixture；每次都执行 fixture verdict，`--no-cache` 只强制重编译。Checker 自身 `_fail`、Interactor 崩溃、资源/进程树/清理故障是基础设施失败，不能用 `expected` 声明为成功。自动 Checker 探针返回 AC 时需要人工确认没有误放行。fixture 以原始字节计算 `fixture_hash`，按 Windows 大小写不敏感 ID/路径去重，并受数量、单文件和总字节上限约束；它们不进入 DOMjudge ZIP。
+
+成功 evidence 只保存有界状态、期望/实际 verdict 和脱敏原因，不保存 stdout、stderr、feedback 正文或 transcript 条目。完整成功原子发布 `judge-qa-evidence-v1.json`；失败、取消、超时、输入变化或发布错误保留上一份成功 evidence。`lint`/`status` 将 evidence 报告为 `not-configured`、`missing`、`current`、`stale` 或 `invalid`，后三者是 warning；已配置题目的 `seal` 仍要求 Judge QA `passed` 且 evidence `current`。
+
 ## 4. 工艺守则
 
 ### Validator
