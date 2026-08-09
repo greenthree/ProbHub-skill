@@ -9,7 +9,17 @@ import tempfile
 from pathlib import Path
 
 from .builder_fingerprint import builder_toolchain_status
+from .mutation_syntax import TREE_SITTER_CPP_VERSION, TREE_SITTER_VERSION
 from .process_control import run_managed_to_files
+
+
+_MUTATION_PARSER_SMOKE = (
+    "import sys; "
+    "sys.path.insert(0, sys.argv[1]); "
+    "from probhub.mutation_syntax import locate_cpp_mutation_syntax; "
+    "locations = locate_cpp_mutation_syntax('int f(int x) { return x < 3; }\\n'); "
+    "assert len(locations.comparisons) == 1"
+)
 
 
 def _command_probe(command, args=("--version",)):
@@ -119,6 +129,44 @@ def _version_tuple(text, *, prefix=""):
     return tuple(map(int, match.groups())) if match else None
 
 
+def _mutation_parser_probe():
+    env = os.environ.copy()
+    for variable in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP"):
+        env.pop(variable, None)
+    package_root = Path(__file__).resolve().parent.parent
+    try:
+        with tempfile.TemporaryDirectory(prefix="probhub-doctor-parser-") as temp:
+            temp_path = Path(temp)
+            stdout_path = temp_path / "stdout"
+            stderr_path = temp_path / "stderr"
+            result = run_managed_to_files(
+                [sys.executable, "-c", _MUTATION_PARSER_SMOKE, str(package_root)],
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=10,
+                memory_limit_mb=None,
+                output_limit_bytes=1024 * 1024,
+                process_limit=8,
+                cwd=temp_path,
+                env=env,
+            )
+            stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
+            stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "diagnostic": str(exc)}
+    if result["reason"] != "completed":
+        diagnostic = (
+            "timed out after 10s"
+            if result["reason"] == "time_limit"
+            else (result.get("message") or result["reason"])
+        )
+        return {"ok": False, "diagnostic": diagnostic}
+    if result["returncode"] != 0:
+        diagnostic = (stderr or stdout or "parser smoke test failed").strip()[-4000:]
+        return {"ok": False, "diagnostic": diagnostic}
+    return {"ok": True, "diagnostic": None}
+
+
 def run_doctor():
     node = _command_version("node")
     node_version = _version_tuple(node["version"], prefix="v")
@@ -168,12 +216,18 @@ def run_doctor():
     }
     modules = {
         name: importlib.util.find_spec(name) is not None
-        for name in ("flask", "yaml", "pypdf")
+        for name in ("flask", "yaml", "pypdf", "tree_sitter", "tree_sitter_cpp")
     }
     modules["pypdf"] = modules["pypdf"] and bool(
         builder_toolchain["pypdf_version"]
     )
-    distributions = {"flask": "Flask", "yaml": "PyYAML", "pypdf": "pypdf"}
+    distributions = {
+        "flask": "Flask",
+        "yaml": "PyYAML",
+        "pypdf": "pypdf",
+        "tree_sitter": "tree-sitter",
+        "tree_sitter_cpp": "tree-sitter-cpp",
+    }
     module_versions = {}
     for name, distribution in distributions.items():
         if not modules[name]:
@@ -187,9 +241,24 @@ def run_doctor():
             )
         except importlib_metadata.PackageNotFoundError:
             module_versions[name] = "unknown"
+    modules["tree_sitter"] = (
+        modules["tree_sitter"]
+        and module_versions["tree_sitter"] == TREE_SITTER_VERSION
+    )
+    modules["tree_sitter_cpp"] = (
+        modules["tree_sitter_cpp"]
+        and module_versions["tree_sitter_cpp"] == TREE_SITTER_CPP_VERSION
+    )
+    parser_probe = {"ok": False, "diagnostic": "parser dependencies are unavailable"}
+    if modules["tree_sitter"] and modules["tree_sitter_cpp"]:
+        parser_probe = _mutation_parser_probe()
+        if not parser_probe["ok"]:
+            modules["tree_sitter"] = False
+            modules["tree_sitter_cpp"] = False
     return {
         "ok": all(item["ok"] for item in tools.values()) and all(modules.values()),
         "tools": tools,
         "python_modules": modules,
         "python_module_versions": module_versions,
+        "mutation_parser": parser_probe,
     }

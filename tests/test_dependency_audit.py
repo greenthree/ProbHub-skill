@@ -104,6 +104,8 @@ class DependencyAuditTests(unittest.TestCase):
                 "markupsafe",
                 "pypdf",
                 "pyyaml",
+                "tree-sitter",
+                "tree-sitter-cpp",
                 "typing_extensions",
                 "werkzeug",
             },

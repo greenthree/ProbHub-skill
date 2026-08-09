@@ -12,7 +12,9 @@
 | `boolean-negation` | 删除 `!` 或取反 `if`/`while` 条件 | 检查布尔分支覆盖 |
 | `integer-boundary` | 只对十进制比较边界的常量尝试 `+1`/`-1` | 检查常量边界附近数据 |
 
-源码先遮罩注释、字符串和字符字面量，再扫描 Token；不支持的 C++ 语法不会被猜测式替换。每个变异有稳定的 `cpp-token-v1` ID，计划由源代码、算子列表、人工排除记录和上限共同决定。
+源码使用固定的 `tree-sitter==0.26.0` 与 `tree-sitter-cpp==0.23.4` 构造 C++ 语法树，只定位函数或 lambda 复合语句体内的真实表达式。模板尖括号、运算符声明、`<=>`、预处理宏、concept/requires、`case` 标签、`static_assert`、`sizeof` / `decltype` / `noexcept` 等非执行或未求值上下文不会生成候选；注释、字符串和字符字面量也不进入语法候选。解析器能报告的失败会以结构化错误终止，不回退到 Token 猜测；当前 `tree-sitter-cpp` 对 `typeid(type)` 等少数合法语法的支持不完整，此时命令保守失败而不猜测位置。
+
+每个变异继续使用稳定的 `cpp-token-v1` ID，计划由源码、`tree-sitter-cpp-v1` locator、算子列表、人工排除记录和上限共同决定。仍然有效的旧 ID 保持不变；旧 Token 扫描器产生但语法树不再接受的误报 ID 会成为 `unmatched`，需要作者复核后移除。解析器切换会使旧 evidence 显示 `stale`，不会把旧执行分类与新候选计划混用。
 
 ## 使用
 
@@ -62,6 +64,6 @@ mutation:
 <ID>/.probhub/mutation-evidence-v2.json
 ```
 
-证据包含 source/data hash、accepted 源路径、算子版本、计划 hash、当前 Core/编译器指纹、raw/excluded/effective/selected 计数、带三态匹配状态和理由的排除记录、变异 ID、击杀用例 ID、分类计数和有界诊断。每个变异最多保留前 16 个命中详情，并用 `hit_cases_total` / `hit_cases_truncated` 说明完整数量；单份 evidence 最多 4 MiB。失败、取消、超时、证据超限、输入变化、锁竞争或发布故障不会覆盖上一份成功 evidence。evidence 过期时 report 重算当前计划与排除三态，但不继续展示旧执行分类。旧 `mutation-evidence-v1.json` 继续被 Git 忽略，但不作为当前证据读取。证据文件只用于本地 `report`，不进入 PDF、ZIP、Manifest，也不应提交到 Git。
+证据包含 source/data hash、accepted 源路径、算子与 locator 版本、计划 hash、当前 Core/编译器/解析器指纹、raw/excluded/effective/selected 计数、带三态匹配状态和理由的排除记录、变异 ID、击杀用例 ID、分类计数和有界诊断。每个变异最多保留前 16 个命中详情，并用 `hit_cases_total` / `hit_cases_truncated` 说明完整数量；单份 evidence 最多 4 MiB。失败、取消、超时、解析错误、证据超限、输入变化、锁竞争或发布故障不会覆盖上一份成功 evidence。evidence 过期时 report 重算当前计划与排除三态，但不继续展示旧执行分类。旧 `mutation-evidence-v1.json` 继续被 Git 忽略，但不作为当前证据读取。证据文件只用于本地 `report`，不进入 PDF、ZIP、Manifest，也不应提交到 Git。
 
-变异体和其临时编译产物始终位于临时快照；命令不会写回题目 `code/`、`probhub.yaml`、`data/` 或任何正式构建产物。mutation score 不作为 `build` 的硬门禁。看到幸存变异时，应阅读命中范围、补充边界/定向数据，再重新运行并比较同一 mutation ID；不要仅凭 score 宣称题目已被证明。
+变异体和其临时编译产物始终位于临时快照；命令不会写回题目 `code/`、`probhub.yaml`、`data/` 或任何正式构建产物。语法定位收紧后 raw/selected/compile-invalid 数量与 score 可能相对旧版本变化，这表示候选集合变化，不代表数据自动变强。mutation score 不作为 `build` 的硬门禁。看到幸存变异时，应阅读命中范围、补充边界/定向数据，再重新运行并比较同一 mutation ID；不要仅凭 score 宣称题目已被证明。

@@ -53,6 +53,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertIn("probhub/judge_qa_runtime.py", main_files)
         self.assertIn("probhub/mutation.py", main_files)
         self.assertIn("probhub/mutation_config.py", main_files)
+        self.assertIn("probhub/mutation_syntax.py", main_files)
         self.assertIn("references/checker-interactor.md", main_files)
         self.assertIn("references/mutation-testing.md", main_files)
 
@@ -438,6 +439,8 @@ class NpmPackageMetadataTests(unittest.TestCase):
             command = install_deps._pip_install_command(requirements, user_install=False)
         self.assertEqual(command[:2], ["C:/node/node.exe", "-e"])
         self.assertEqual(command[3:7], ["C:/python/python.exe", "-m", "pip", "install"])
+        self.assertIn("--only-binary", command)
+        self.assertIn("tree-sitter,tree-sitter-cpp", command)
         self.assertEqual(command[-1], str(requirements))
 
     @unittest.skipUnless(shutil.which("node"), "node is required")

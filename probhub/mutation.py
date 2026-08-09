@@ -36,9 +36,13 @@ from .mutation_config import (
     load_mutation_exclusions,
     normalize_mutation_exclusions,
 )
+from .mutation_syntax import (
+    MUTATION_LOCATOR_VERSION,
+    locate_cpp_mutation_syntax,
+    mutation_parser_identity,
+)
 from .process_control import run_managed_to_files
 from .solutions import (
-    _mask_cpp_non_code,
     normalize_solution_entries,
     resolve_solution_source,
 )
@@ -60,12 +64,6 @@ _MUTATION_CLASSIFICATIONS = frozenset({
     "infrastructure-failed",
 })
 _MUTATION_EXCLUSION_STATUSES = frozenset({"matched", "out-of-scope", "unmatched"})
-@dataclass(frozen=True)
-class CppToken:
-    start: int
-    end: int
-    text: str
-    kind: str
 
 
 @dataclass(frozen=True)
@@ -92,18 +90,10 @@ class Mutation:
         }
 
 
-_TOKEN_RE = re.compile(
-    r"(?:"
-    r"0[xX][0-9A-Fa-f]+[uUlL]*|"
-    r"0[bB][01]+[uUlL]*|"
-    r"0[0-7]*[uUlL]*|"
-    r"[1-9][0-9]*[uUlL]*|"
-    r"[A-Za-z_]\w*|"
-    r"==|!=|<=|>=|&&|\|\||\+\+|--|<<|>>|\+=|-=|\*=|/=|%=|->|::|"
-    r"[^\s]"
-    r")"
+_INTEGER_RE = re.compile(
+    r"(?P<digits>0|[1-9][0-9]*)"
+    r"(?P<suffix>(?:[uU](?:[lL]|ll|LL)?|(?:[lL]|ll|LL)[uU]?))?$"
 )
-_INTEGER_RE = re.compile(r"(?:0|[1-9][0-9]*)[uUlL]*$")
 _COMPARISON_REPLACEMENTS = {
     "<": "<=",
     "<=": "<",
@@ -118,79 +108,25 @@ def mutation_evidence_path(problem_dir):
     return Path(problem_dir) / ".probhub" / MUTATION_EVIDENCE_FILENAME
 
 
-def _is_directive(source, token):
-    offset = token.start() if callable(getattr(token, "start", None)) else token.start
-    line_start = source.rfind("\n", 0, offset) + 1
-    return source[line_start:offset].lstrip().startswith("#")
-
-
-def tokenize_cpp(source):
-    """Tokenize code while masking comments and literals byte-for-byte.
-
-    The mask comes from the existing source verifier and preserves positions,
-    including newlines.  This deliberately is not a C++ parser: unsupported
-    constructs simply produce no mutation instead of guessing.
-    """
-    masked = _mask_cpp_non_code(source)
-    tokens = []
-    for match in _TOKEN_RE.finditer(masked):
-        text = source[match.start():match.end()]
-        if not text or text.isspace() or _is_directive(source, match):
-            continue
-        kind = "identifier"
-        if _INTEGER_RE.fullmatch(text):
-            kind = "integer"
-        elif text in _COMPARISON_REPLACEMENTS or text in {"!", "(", ")", ";"}:
-            kind = "operator" if text in _COMPARISON_REPLACEMENTS or text == "!" else "punct"
-        tokens.append(CppToken(match.start(), match.end(), text, kind))
-    return tokens
-
-
 def _line_column(source, offset):
     line = source.count("\n", 0, offset) + 1
     previous = source.rfind("\n", 0, offset)
     return line, offset - previous
 
 
-def _matching_parenthesis(tokens, opening_index):
-    depth = 0
-    for index in range(opening_index, len(tokens)):
-        text = tokens[index].text
-        if text == "(":
-            depth += 1
-        elif text == ")":
-            depth -= 1
-            if depth == 0:
-                return index
-            if depth < 0:
-                return None
-    return None
+def _normalized_mutation_text(value):
+    return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _condition_is_mutable(tokens, opening_index, closing_index):
-    inner_depth = 0
-    for token in tokens[opening_index + 1:closing_index]:
-        if token.text in {"(", "[", "{"}:
-            inner_depth += 1
-        elif token.text in {")", "]", "}"
-        }:
-            inner_depth = max(0, inner_depth - 1)
-        elif inner_depth == 0 and token.text in {";", "="}:
-            # Declarations in if-init statements and malformed fragments are
-            # intentionally excluded from the first syntax-level slice.
-            return False
-    return opening_index + 1 < closing_index
-
-
-def _mutation_candidates(source, operators):
-    tokens = tokenize_cpp(source)
+def _mutation_candidates(source, operators, *, locations=None):
+    locations = locations or locate_cpp_mutation_syntax(source)
     candidates = []
     selected = set(operators)
     if "comparison-boundary" in selected:
-        for index, token in enumerate(tokens):
+        for comparison in locations.comparisons:
+            token = comparison.operator
             replacement = _COMPARISON_REPLACEMENTS.get(token.text)
-            previous = tokens[index - 1].text if index else None
-            if replacement is not None and previous not in {"operator", "template"}:
+            if replacement is not None:
                 candidates.append((
                     token,
                     "comparison-boundary",
@@ -199,63 +135,55 @@ def _mutation_candidates(source, operators):
                 ))
 
     if "integer-boundary" in selected:
-        for index, token in enumerate(tokens):
-            if token.kind != "integer":
+        for comparison in locations.comparisons:
+            if comparison.operator.text not in _COMPARISON_REPLACEMENTS:
                 continue
-            adjacent_identifier = (
-                index + 1 < len(tokens)
-                and tokens[index + 1].start == token.end
-                and tokens[index + 1].kind == "identifier"
-            )
-            if adjacent_identifier:
-                continue
-            previous = tokens[index - 1].text if index else None
-            following = tokens[index + 1].text if index + 1 < len(tokens) else None
-            if previous not in _COMPARISON_REPLACEMENTS and following not in _COMPARISON_REPLACEMENTS:
-                continue
-            for delta in (1, -1):
-                replacement = f"({token.text} {'+' if delta > 0 else '-'} 1)"
-                candidates.append((
-                    token,
-                    "integer-boundary",
-                    replacement,
-                    f"change integer boundary by {delta:+d}",
-                ))
+            for token in (comparison.left, comparison.right):
+                if token.kind != "number_literal":
+                    continue
+                literal = _INTEGER_RE.fullmatch(token.text)
+                if literal is None:
+                    continue
+                for delta in (1, -1):
+                    replacement = f"({token.text} {'+' if delta > 0 else '-'} 1)"
+                    candidates.append((
+                        token,
+                        "integer-boundary",
+                        replacement,
+                        f"change integer boundary by {delta:+d}",
+                    ))
 
     if "boolean-negation" in selected:
-        for token in tokens:
-            if token.text == "!":
-                candidates.append((
-                    token,
-                    "boolean-negation",
-                    "",
-                    "remove boolean negation",
-                ))
-        for index, token in enumerate(tokens[:-1]):
-            if token.text not in {"if", "while"} or tokens[index + 1].text != "(":
-                continue
-            closing_index = _matching_parenthesis(tokens, index + 1)
-            if closing_index is None or not _condition_is_mutable(tokens, index + 1, closing_index):
-                continue
-            opening = tokens[index + 1]
-            closing = tokens[closing_index]
+        for token in locations.unary_not:
             candidates.append((
-                CppToken(opening.start, closing.end, source[opening.start:closing.end], "condition"),
+                token,
                 "boolean-negation",
-                f"(!({source[opening.end:closing.start]}))",
-                f"negate {token.text} condition",
+                "",
+                "remove boolean negation",
+            ))
+        for located in locations.conditions:
+            token = located.condition
+            if not token.text.startswith("(") or not token.text.endswith(")"):
+                continue
+            candidates.append((
+                token,
+                "boolean-negation",
+                f"(!({token.text[1:-1]}))",
+                f"negate {located.keyword} condition",
             ))
     return candidates
 
 
-def _planned_mutations(source, operators):
-    candidates = _mutation_candidates(source, operators)
+def _planned_mutations(source, operators, *, locations=None):
+    candidates = _mutation_candidates(source, operators, locations=locations)
     candidates.sort(key=lambda item: (item[0].start, item[0].end, item[1], item[2]))
     mutations = []
     for token, operator, replacement, description in candidates:
         line, column = _line_column(source, token.start)
+        identity_original = _normalized_mutation_text(token.text)
+        identity_replacement = _normalized_mutation_text(replacement)
         identity = hashlib.sha256(
-            f"{operator}\0{line}\0{column}\0{token.text}\0{replacement}".encode("utf-8")
+            f"{operator}\0{line}\0{column}\0{identity_original}\0{identity_replacement}".encode("utf-8")
         ).hexdigest()[:16]
         mutation_id = f"{MUTATION_OPERATOR_VERSION}:{operator}:{line}:{column}:{identity}"
         mutations.append(Mutation(
@@ -291,11 +219,12 @@ def plan_mutations(source, *, operators=None, max_mutants=MAX_MUTANTS, exclusion
             code="mutation_limit_invalid",
         )
     exclusion_records = normalize_mutation_exclusions(exclusions)
-    raw_mutations = _planned_mutations(source, selected)
+    locations = locate_cpp_mutation_syntax(source)
+    raw_mutations = _planned_mutations(source, selected, locations=locations)
     all_mutations = (
         raw_mutations
         if selected == list(MUTATION_OPERATORS)
-        else _planned_mutations(source, MUTATION_OPERATORS)
+        else _planned_mutations(source, MUTATION_OPERATORS, locations=locations)
     )
     exclusion_ids = {item["id"] for item in exclusion_records}
     raw_ids = {item.id for item in raw_mutations}
@@ -321,6 +250,7 @@ def plan_mutations(source, *, operators=None, max_mutants=MAX_MUTANTS, exclusion
     mutation_records = [item.as_dict() for item in mutations]
     plan_payload = {
         "operator_version": MUTATION_OPERATOR_VERSION,
+        "locator_version": MUTATION_LOCATOR_VERSION,
         "operators": selected,
         "max_mutants": max_mutants,
         "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
@@ -333,6 +263,7 @@ def plan_mutations(source, *, operators=None, max_mutants=MAX_MUTANTS, exclusion
     return {
         "schema_version": MUTATION_EVIDENCE_SCHEMA_VERSION,
         "operator_version": MUTATION_OPERATOR_VERSION,
+        "locator_version": MUTATION_LOCATOR_VERSION,
         "operators": selected,
         "max_mutants": max_mutants,
         "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
@@ -375,6 +306,7 @@ def _copy_snapshot(source, target):
 
 @lru_cache(maxsize=1)
 def _compiler_fingerprint():
+    parser_identity = mutation_parser_identity()
     with tempfile.TemporaryDirectory(prefix="probhub-mutation-compiler-") as temp:
         stdout = Path(temp) / "stdout"
         stderr = Path(temp) / "stderr"
@@ -398,7 +330,12 @@ def _compiler_fingerprint():
         "compiler": "g++",
         "compiler_identity": identity,
         "compiler_flags": ["-O2", "-std=c++17"],
-        "parser": "mask-cpp-non-code+token-regex",
+        "parser": "tree-sitter-cpp",
+        "locator_version": parser_identity["locator_version"],
+        "parser_versions": {
+            "tree_sitter": parser_identity["tree_sitter_version"],
+            "tree_sitter_cpp": parser_identity["tree_sitter_cpp_version"],
+        },
         "operator_version": MUTATION_OPERATOR_VERSION,
     }
     digest = hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -627,6 +564,7 @@ def mutation_test_problem(
             "data_hash": data_hash,
             "builder_fingerprint": builder_fingerprint,
             "operator_version": MUTATION_OPERATOR_VERSION,
+            "locator_version": MUTATION_LOCATOR_VERSION,
             "operators": plan["operators"],
             "max_mutants": plan["max_mutants"],
             "plan_hash": plan["plan_hash"],
@@ -675,6 +613,7 @@ def mutation_evidence_profile(problem_dir, config):
             "summary": dict(summary or {}),
             "mutants": mutants,
             "operator_version": MUTATION_OPERATOR_VERSION,
+            "locator_version": MUTATION_LOCATOR_VERSION,
             "planning": dict(planning or {
                 "raw": 0,
                 "excluded": 0,
@@ -717,6 +656,13 @@ def mutation_evidence_profile(problem_dir, config):
         or not isinstance(evidence.get("plan_hash"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", evidence["plan_hash"])
         or not isinstance(evidence.get("builder_fingerprint"), dict)
+        or (
+            "locator_version" in evidence
+            and (
+                not isinstance(evidence.get("locator_version"), str)
+                or len(evidence["locator_version"].encode("utf-8", errors="replace")) > 128
+            )
+        )
         or not isinstance(exclusion_records, list)
         or len(exclusion_records) > MAX_MUTATION_EXCLUSIONS
     ):
@@ -815,12 +761,18 @@ def mutation_evidence_profile(problem_dir, config):
     if actual_counts != summary:
         return profile("invalid", mutants=len(mutations))
     fingerprint = evidence["builder_fingerprint"]
-    fingerprint_required = {
+    legacy_fingerprint_required = {
         "schema_version", "probhub_version", "compiler", "compiler_identity",
         "compiler_flags", "parser", "operator_version", "digest", "available",
     }
+    fingerprint_required = legacy_fingerprint_required | {
+        "locator_version", "parser_versions",
+    }
     if (
-        set(fingerprint) != fingerprint_required
+        frozenset(fingerprint) not in {
+            frozenset(legacy_fingerprint_required),
+            frozenset(fingerprint_required),
+        }
         or not isinstance(fingerprint["schema_version"], int)
         or isinstance(fingerprint["schema_version"], bool)
         or fingerprint["schema_version"] != 1
@@ -836,11 +788,19 @@ def mutation_evidence_profile(problem_dir, config):
         or not re.fullmatch(r"[0-9a-f]{64}", fingerprint["digest"])
     ):
         return profile("invalid", mutants=len(mutations))
+    if set(fingerprint) == fingerprint_required and (
+        not isinstance(fingerprint["locator_version"], str)
+        or len(fingerprint["locator_version"].encode("utf-8", errors="replace")) > 128
+        or not isinstance(fingerprint["parser_versions"], dict)
+        or set(fingerprint["parser_versions"]) != {"tree_sitter", "tree_sitter_cpp"}
+        or not all(isinstance(value, str) for value in fingerprint["parser_versions"].values())
+    ):
+        return profile("invalid", mutants=len(mutations))
     # `_compiler_fingerprint` computes the digest over its descriptive fields
     # before adding the runtime `available` bit.
     fingerprint_payload = {
         key: fingerprint[key]
-        for key in fingerprint_required
+        for key in set(fingerprint)
         if key not in {"digest", "available"}
     }
     expected_digest = hashlib.sha256(json.dumps(
@@ -885,6 +845,7 @@ def mutation_evidence_profile(problem_dir, config):
         or evidence.get("source_hash") != current_source
         or evidence.get("data_hash") != current_data
         or evidence.get("operator_version") != MUTATION_OPERATOR_VERSION
+        or evidence.get("locator_version") != MUTATION_LOCATOR_VERSION
         or evidence.get("operators") != plan["operators"]
         or evidence.get("plan_hash") != plan["plan_hash"]
         or evidence.get("raw_planned") != plan["raw_planned"]

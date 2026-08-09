@@ -251,7 +251,7 @@ mutation:
       reason: 该分支在 Validator 保证的 n >= 1 下与原程序等价
 ```
 
-`mutation` 只适用于 `judge.type: standard`。`exclusions` 最多 256 项；每项只能包含当前 `cpp-token-v1` 的稳定 `id` 和不超过 1024 字节的非空 `reason`，ID 不得重复，也不支持通配符。配置字段、版本、ID、重复项、数量和理由错误会由 lint 以稳定诊断阻断。
+`mutation` 只适用于 `judge.type: standard`。`exclusions` 最多 256 项；每项只能包含当前 `cpp-token-v1` 的稳定 `id` 和不超过 1024 字节的非空 `reason`，ID 不得重复，也不支持通配符。ID 前缀保持兼容，但候选由固定 Tree-sitter C++ 语法树定位；仍有效的旧 ID 保持匹配，旧 Token 误报会显示 `unmatched`，不会自动迁移或删除。配置字段、版本、ID、重复项、数量和理由错误会由 lint 以稳定诊断阻断。
 
 先在未排除状态运行 mutation 并审查源码、变异位置和执行结果，再登记排除。排除在 `--max-mutants` 限额之前应用，因此不会占用有效变异的执行配额。仅运行部分算子时，属于其他算子的有效 ID 标为 `out-of-scope`；源码变化后已不在完整计划中的旧 ID 不会被静默删除，而会标为 `unmatched` warning，供作者更新或移除。排除理由参与 source hash 和计划 hash；修改配置会使旧 evidence 过期。
 

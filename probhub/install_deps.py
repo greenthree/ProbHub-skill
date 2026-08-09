@@ -44,6 +44,10 @@ def _pip_install_command(requirements, *, user_install):
     ]
     if user_install:
         command.append("--user")
+    command.extend([
+        "--only-binary",
+        "tree-sitter,tree-sitter-cpp",
+    ])
     command.extend(["-r", str(requirements)])
     if os.name != "nt":
         return command
