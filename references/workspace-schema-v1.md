@@ -239,6 +239,24 @@ Checker fixture 的期望状态只能是 `AC`/`WA`；Interactor 可使用 `AC`�
 
 Schema 固定限制 fixture 数量、单文件大小、总字节、诊断、transcript 和运行时间；ID 与路径按 Windows 大小写不敏感去重。`probhub judge-qa <ID>` 每次真实执行 fixture、Validator 和探针，只缓存内容寻址的编译结果。成功才原子发布 `<problem>/.probhub/judge-qa-evidence-v1.json`；失败、取消、超时、输入变化、锁竞争或发布失败保留上一份成功 evidence。evidence 状态由 lint/status 报告为 `not-configured`、`missing`、`current`、`stale` 或 `invalid`，missing/stale/invalid 是 warning；`seal` 和正式 `build` 对已配置 QA 要求当前通过的 evidence。
 
+### Mutation 人工排除 Schema v1
+
+标准题可以在人工审查稳定 mutation ID 后记录等价或不适用的变异：
+
+```yaml
+mutation:
+  schema_version: 1
+  exclusions:
+    - id: cpp-token-v1:comparison-boundary:42:17:0123456789abcdef
+      reason: 该分支在 Validator 保证的 n >= 1 下与原程序等价
+```
+
+`mutation` 只适用于 `judge.type: standard`。`exclusions` 最多 256 项；每项只能包含当前 `cpp-token-v1` 的稳定 `id` 和不超过 1024 字节的非空 `reason`，ID 不得重复，也不支持通配符。配置字段、版本、ID、重复项、数量和理由错误会由 lint 以稳定诊断阻断。
+
+先在未排除状态运行 mutation 并审查源码、变异位置和执行结果，再登记排除。排除在 `--max-mutants` 限额之前应用，因此不会占用有效变异的执行配额。仅运行部分算子时，属于其他算子的有效 ID 标为 `out-of-scope`；源码变化后已不在完整计划中的旧 ID 不会被静默删除，而会标为 `unmatched` warning，供作者更新或移除。排除理由参与 source hash 和计划 hash；修改配置会使旧 evidence 过期。
+
+人工排除只表达作者对特定生成变异的审查结论。raw、excluded、effective、selected 和最终分类必须并列解释，不得用过滤后的 mutation score 宣称不存在未知错解或算法已经正确。
+
 ### Stress differential testing
 
 `stress` 是可选的单题差分测试配置：

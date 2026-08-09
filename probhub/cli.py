@@ -104,6 +104,8 @@ def _ensure_local_gitignore(root):
         "**/.probhub/mutation.lock",
         "**/.probhub/mutation-evidence-v1.json",
         "**/.probhub/mutation-evidence-v1.json.*.tmp",
+        "**/.probhub/mutation-evidence-v2.json",
+        "**/.probhub/mutation-evidence-v2.json.*.tmp",
         "**/.probhub/sandbox-cache-v1.json",
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",

@@ -17,6 +17,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from . import __version__
@@ -25,6 +26,16 @@ from .errors import ProbHubError
 from .io import atomic_write_json, read_yaml, write_yaml
 from .judging import JUDGE_TIMEOUT_SECONDS, judge_problem
 from .linting import compute_data_hash, compute_source_hash
+from .mutation_config import (
+    MAX_MUTATION_EXCLUSION_ID_BYTES,
+    MAX_MUTATION_EXCLUSION_REASON_BYTES,
+    MAX_MUTATION_EXCLUSIONS,
+    MUTATION_OPERATORS,
+    MUTATION_OPERATOR_VERSION,
+    inspect_mutation_config,
+    load_mutation_exclusions,
+    normalize_mutation_exclusions,
+)
 from .process_control import run_managed_to_files
 from .solutions import (
     _mask_cpp_non_code,
@@ -33,9 +44,8 @@ from .solutions import (
 )
 
 
-MUTATION_EVIDENCE_SCHEMA_VERSION = 1
-MUTATION_OPERATOR_VERSION = "cpp-token-v1"
-MUTATION_EVIDENCE_FILENAME = "mutation-evidence-v1.json"
+MUTATION_EVIDENCE_SCHEMA_VERSION = 2
+MUTATION_EVIDENCE_FILENAME = "mutation-evidence-v2.json"
 MUTATION_LOCK_FILENAME = ".probhub/mutation.lock"
 MAX_MUTANTS = 256
 MAX_DIAGNOSTIC_BYTES = 2048
@@ -49,13 +59,7 @@ _MUTATION_CLASSIFICATIONS = frozenset({
     "compile-invalid",
     "infrastructure-failed",
 })
-MUTATION_OPERATORS = (
-    "comparison-boundary",
-    "boolean-negation",
-    "integer-boundary",
-)
-
-
+_MUTATION_EXCLUSION_STATUSES = frozenset({"matched", "out-of-scope", "unmatched"})
 @dataclass(frozen=True)
 class CppToken:
     start: int
@@ -244,7 +248,31 @@ def _mutation_candidates(source, operators):
     return candidates
 
 
-def plan_mutations(source, *, operators=None, max_mutants=MAX_MUTANTS):
+def _planned_mutations(source, operators):
+    candidates = _mutation_candidates(source, operators)
+    candidates.sort(key=lambda item: (item[0].start, item[0].end, item[1], item[2]))
+    mutations = []
+    for token, operator, replacement, description in candidates:
+        line, column = _line_column(source, token.start)
+        identity = hashlib.sha256(
+            f"{operator}\0{line}\0{column}\0{token.text}\0{replacement}".encode("utf-8")
+        ).hexdigest()[:16]
+        mutation_id = f"{MUTATION_OPERATOR_VERSION}:{operator}:{line}:{column}:{identity}"
+        mutations.append(Mutation(
+            id=mutation_id,
+            operator=operator,
+            start=token.start,
+            end=token.end,
+            line=line,
+            column=column,
+            original=token.text,
+            replacement=replacement,
+            description=description,
+        ))
+    return mutations
+
+
+def plan_mutations(source, *, operators=None, max_mutants=MAX_MUTANTS, exclusions=None):
     if not isinstance(source, str):
         raise ProbHubError("C++ source must be text", code="mutation_source_invalid")
     selected = list(MUTATION_OPERATORS if operators is None else operators)
@@ -262,31 +290,41 @@ def plan_mutations(source, *, operators=None, max_mutants=MAX_MUTANTS):
             f"max_mutants must be an integer in 1..{MAX_MUTANTS}",
             code="mutation_limit_invalid",
         )
-    candidates = _mutation_candidates(source, selected)
-    candidates.sort(key=lambda item: (item[0].start, item[0].end, item[1], item[2]))
-    mutations = []
-    for token, operator, replacement, description in candidates[:max_mutants]:
-        line, column = _line_column(source, token.start)
-        identity = hashlib.sha256(
-            f"{operator}\0{line}\0{column}\0{token.text}\0{replacement}".encode("utf-8")
-        ).hexdigest()[:16]
-        mutation_id = f"{MUTATION_OPERATOR_VERSION}:{operator}:{line}:{column}:{identity}"
-        mutations.append(Mutation(
-            id=mutation_id,
-            operator=operator,
-            start=token.start,
-            end=token.end,
-            line=line,
-            column=column,
-            original=token.text,
-            replacement=replacement,
-            description=description,
-        ))
+    exclusion_records = normalize_mutation_exclusions(exclusions)
+    raw_mutations = _planned_mutations(source, selected)
+    all_mutations = (
+        raw_mutations
+        if selected == list(MUTATION_OPERATORS)
+        else _planned_mutations(source, MUTATION_OPERATORS)
+    )
+    exclusion_ids = {item["id"] for item in exclusion_records}
+    raw_ids = {item.id for item in raw_mutations}
+    all_ids = {item.id for item in all_mutations}
+    applied_exclusions = [
+        {
+            **item,
+            "status": (
+                "matched"
+                if item["id"] in raw_ids
+                else "out-of-scope"
+                if item["id"] in all_ids
+                else "unmatched"
+            ),
+        }
+        for item in exclusion_records
+    ]
+    effective_mutations = [
+        item for item in raw_mutations
+        if item.id not in exclusion_ids
+    ]
+    mutations = effective_mutations[:max_mutants]
     mutation_records = [item.as_dict() for item in mutations]
     plan_payload = {
         "operator_version": MUTATION_OPERATOR_VERSION,
         "operators": selected,
+        "max_mutants": max_mutants,
         "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        "exclusions": applied_exclusions,
         "mutations": mutation_records,
     }
     plan_hash = hashlib.sha256(
@@ -296,11 +334,16 @@ def plan_mutations(source, *, operators=None, max_mutants=MAX_MUTANTS):
         "schema_version": MUTATION_EVIDENCE_SCHEMA_VERSION,
         "operator_version": MUTATION_OPERATOR_VERSION,
         "operators": selected,
+        "max_mutants": max_mutants,
         "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
         "mutations": mutations,
+        "exclusions": applied_exclusions,
         "plan_hash": plan_hash,
-        "planned": len(candidates),
-        "truncated": len(candidates) > len(mutations),
+        "raw_planned": len(raw_mutations),
+        "excluded": sum(item["status"] == "matched" for item in applied_exclusions),
+        "planned": len(effective_mutations),
+        "selected": len(mutations),
+        "truncated": len(effective_mutations) > len(mutations),
     }
 
 
@@ -330,6 +373,7 @@ def _copy_snapshot(source, target):
             target_file.write_bytes(source_file.read_bytes())
 
 
+@lru_cache(maxsize=1)
 def _compiler_fingerprint():
     with tempfile.TemporaryDirectory(prefix="probhub-mutation-compiler-") as temp:
         stdout = Path(temp) / "stdout"
@@ -460,8 +504,14 @@ def mutation_test_problem(
         raise ProbHubError(f"cannot read accepted source: {source_path}: {exc}", code="mutation_source_invalid") from exc
     source_hash = compute_source_hash(problem_dir, config)
     data_hash = compute_data_hash(problem_dir, config)
-    plan = plan_mutations(source, operators=operators, max_mutants=max_mutants)
-    builder_fingerprint = _compiler_fingerprint()
+    exclusions = load_mutation_exclusions(config)
+    plan = plan_mutations(
+        source,
+        operators=operators,
+        max_mutants=max_mutants,
+        exclusions=exclusions,
+    )
+    builder_fingerprint = copy.deepcopy(_compiler_fingerprint())
     if not builder_fingerprint.get("available"):
         raise ProbHubError(
             "mutation testing requires an available g++ C++17 compiler",
@@ -471,13 +521,13 @@ def mutation_test_problem(
     source_relative = source_path.relative_to(problem_dir)
     mutant_name = source_relative.as_posix()
     evidence_path = mutation_evidence_path(problem_dir)
-    with workspace_build_lock(root), workspace_file_lock(
+    with workspace_file_lock(
         problem_dir,
         MUTATION_LOCK_FILENAME,
         busy_code="mutation_busy",
         busy_message="another mutation testing run is already running",
         no_follow=True,
-    ):
+    ), workspace_build_lock(root):
         for mutation in plan["mutations"]:
             _control_check(cancel_check, deadline)
             current_config = read_yaml(problem_dir / "probhub.yaml")
@@ -578,11 +628,15 @@ def mutation_test_problem(
             "builder_fingerprint": builder_fingerprint,
             "operator_version": MUTATION_OPERATOR_VERSION,
             "operators": plan["operators"],
-            "max_mutants": max_mutants,
+            "max_mutants": plan["max_mutants"],
             "plan_hash": plan["plan_hash"],
+            "raw_planned": plan["raw_planned"],
+            "excluded": plan["excluded"],
             "planned": plan["planned"],
+            "selected": plan["selected"],
             "executed": len(results),
             "truncated": plan["truncated"],
+            "exclusions": plan["exclusions"],
             "summary": counts,
             "mutations": results,
             "measured_at": datetime.now(timezone.utc).isoformat(),
@@ -596,7 +650,13 @@ def mutation_test_problem(
                     f"mutation evidence exceeds {MAX_MUTATION_EVIDENCE_BYTES} bytes",
                     code="mutation_evidence_limit",
                 )
-            atomic_write_json(evidence_path, evidence)
+            try:
+                atomic_write_json(evidence_path, evidence)
+            except OSError as exc:
+                raise ProbHubError(
+                    f"failed to publish mutation evidence: {exc}",
+                    code="mutation_evidence_publish_failed",
+                ) from exc
     return {
         "ok": status == "passed",
         "status": status,
@@ -605,52 +665,118 @@ def mutation_test_problem(
 
 
 def mutation_evidence_profile(problem_dir, config):
+    config_report = inspect_mutation_config(config)
+    configured_exclusions = list(config_report["exclusions"])
+
+    def profile(state, *, summary=None, mutants=0, planning=None, exclusions=None, diagnostics=None, status=None):
+        return {
+            "state": state,
+            "status": status,
+            "summary": dict(summary or {}),
+            "mutants": mutants,
+            "operator_version": MUTATION_OPERATOR_VERSION,
+            "planning": dict(planning or {
+                "raw": 0,
+                "excluded": 0,
+                "effective": 0,
+                "selected": 0,
+                "configured_exclusions": len(configured_exclusions),
+                "out_of_scope_exclusions": 0,
+                "unmatched_exclusions": 0,
+            }),
+            "exclusions": list(exclusions or []),
+            "diagnostics": list(diagnostics or []),
+        }
+
+    if not config_report["valid"]:
+        # lint owns Schema diagnostics; returning them again would duplicate
+        # the same issue in workspace reports.
+        return profile("invalid")
     path = mutation_evidence_path(problem_dir)
     if not path.is_file():
-        return {"state": "missing", "summary": {}, "mutants": 0}
+        return profile("missing")
     try:
         if path.stat().st_size > MAX_MUTATION_EVIDENCE_BYTES:
-            return {"state": "invalid", "summary": {}, "mutants": 0}
+            return profile("invalid")
         evidence = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
-        return {"state": "invalid", "summary": {}, "mutants": 0}
+        return profile("invalid")
     if not isinstance(evidence, dict):
-        return {"state": "invalid", "summary": {}, "mutants": 0}
+        return profile("invalid")
     summary = evidence.get("summary")
     mutations = evidence.get("mutations")
+    exclusion_records = evidence.get("exclusions")
     expected_counts = tuple(sorted(_MUTATION_CLASSIFICATIONS))
     if (
-        evidence.get("schema_version") != MUTATION_EVIDENCE_SCHEMA_VERSION
+        isinstance(evidence.get("schema_version"), bool)
+        or not isinstance(evidence.get("schema_version"), int)
+        or evidence.get("schema_version") != MUTATION_EVIDENCE_SCHEMA_VERSION
         or not isinstance(summary, dict)
         or set(summary) != set(expected_counts)
         or not isinstance(mutations, list)
         or not isinstance(evidence.get("plan_hash"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", evidence["plan_hash"])
         or not isinstance(evidence.get("builder_fingerprint"), dict)
+        or not isinstance(exclusion_records, list)
+        or len(exclusion_records) > MAX_MUTATION_EXCLUSIONS
     ):
-        return {"state": "invalid", "summary": {}, "mutants": 0}
+        return profile("invalid")
     if any(not isinstance(summary.get(key), int) or isinstance(summary.get(key), bool) or summary[key] < 0 for key in expected_counts):
-        return {"state": "invalid", "summary": {}, "mutants": len(mutations)}
+        return profile("invalid", mutants=len(mutations))
+    if any(
+        not isinstance(item, dict)
+        or set(item) != {"id", "reason", "status"}
+        or not isinstance(item.get("id"), str)
+        or len(item["id"].encode("utf-8", errors="replace")) > MAX_MUTATION_EXCLUSION_ID_BYTES
+        or not isinstance(item.get("reason"), str)
+        or len(item["reason"].encode("utf-8", errors="replace")) > MAX_MUTATION_EXCLUSION_REASON_BYTES
+        or item.get("status") not in _MUTATION_EXCLUSION_STATUSES
+        for item in exclusion_records
+    ):
+        return profile("invalid", mutants=len(mutations))
+    try:
+        normalized_evidence_exclusions = normalize_mutation_exclusions([
+            {"id": item["id"], "reason": item["reason"]}
+            for item in exclusion_records
+        ])
+    except ProbHubError:
+        return profile("invalid", mutants=len(mutations))
+    if normalized_evidence_exclusions != [
+        {"id": item["id"], "reason": item["reason"]}
+        for item in exclusion_records
+    ]:
+        return profile("invalid", mutants=len(mutations))
     executed = evidence.get("executed")
+    raw_planned = evidence.get("raw_planned")
+    excluded = evidence.get("excluded")
     planned = evidence.get("planned")
+    selected = evidence.get("selected")
     max_mutants = evidence.get("max_mutants")
     if (
         not isinstance(executed, int) or isinstance(executed, bool) or executed < 0
-        or not isinstance(planned, int) or isinstance(planned, bool) or planned < executed
+        or not isinstance(raw_planned, int) or isinstance(raw_planned, bool) or raw_planned < 0
+        or not isinstance(excluded, int) or isinstance(excluded, bool) or excluded < 0
+        or not isinstance(planned, int) or isinstance(planned, bool) or planned < 0
+        or not isinstance(selected, int) or isinstance(selected, bool) or selected < 0
         or not isinstance(max_mutants, int) or isinstance(max_mutants, bool)
         or not 0 < max_mutants <= MAX_MUTANTS
         or not isinstance(evidence.get("truncated"), bool)
+        or raw_planned != planned + excluded
+        or excluded != sum(item["status"] == "matched" for item in exclusion_records)
+        or selected != min(planned, max_mutants)
+        or executed != selected
+        or evidence["truncated"] != (planned > selected)
         or sum(summary.values()) != executed
         or len(mutations) != executed
     ):
-        return {"state": "invalid", "summary": {}, "mutants": len(mutations)}
+        return profile("invalid", mutants=len(mutations))
     if any(
         not isinstance(item, dict)
         or not isinstance(item.get("id"), str)
         or not isinstance(item.get("operator"), str)
         or item.get("operator") not in MUTATION_OPERATORS
-        or not isinstance(item.get("line"), int) or item["line"] < 1
-        or not isinstance(item.get("column"), int) or item["column"] < 1
+        or not isinstance(item.get("line"), int) or isinstance(item.get("line"), bool) or item["line"] < 1
+        or not isinstance(item.get("column"), int) or isinstance(item.get("column"), bool) or item["column"] < 1
         or not isinstance(item.get("original"), str)
         or len(item["original"].encode("utf-8", errors="replace")) > MAX_MUTATION_TEXT_BYTES
         or not isinstance(item.get("replacement"), str)
@@ -684,10 +810,10 @@ def mutation_evidence_profile(problem_dir, config):
         or len(item["diagnostic"]["code"].encode("utf-8", errors="replace")) > MAX_DIAGNOSTIC_BYTES
         for item in mutations
     ):
-        return {"state": "invalid", "summary": {}, "mutants": len(mutations)}
+        return profile("invalid", mutants=len(mutations))
     actual_counts = {name: sum(item["classification"] == name for item in mutations) for name in expected_counts}
     if actual_counts != summary:
-        return {"state": "invalid", "summary": {}, "mutants": len(mutations)}
+        return profile("invalid", mutants=len(mutations))
     fingerprint = evidence["builder_fingerprint"]
     fingerprint_required = {
         "schema_version", "probhub_version", "compiler", "compiler_identity",
@@ -696,6 +822,8 @@ def mutation_evidence_profile(problem_dir, config):
     if (
         set(fingerprint) != fingerprint_required
         or not isinstance(fingerprint["schema_version"], int)
+        or isinstance(fingerprint["schema_version"], bool)
+        or fingerprint["schema_version"] != 1
         or not isinstance(fingerprint["probhub_version"], str)
         or fingerprint["compiler"] != "g++"
         or not isinstance(fingerprint["compiler_identity"], str)
@@ -703,11 +831,11 @@ def mutation_evidence_profile(problem_dir, config):
         or not all(isinstance(flag, str) for flag in fingerprint["compiler_flags"])
         or not isinstance(fingerprint["parser"], str)
         or fingerprint["operator_version"] != MUTATION_OPERATOR_VERSION
-        or not isinstance(fingerprint["available"], bool)
+        or fingerprint["available"] is not True
         or not isinstance(fingerprint["digest"], str)
         or not re.fullmatch(r"[0-9a-f]{64}", fingerprint["digest"])
     ):
-        return {"state": "invalid", "summary": {}, "mutants": len(mutations)}
+        return profile("invalid", mutants=len(mutations))
     # `_compiler_fingerprint` computes the digest over its descriptive fields
     # before adding the runtime `available` bit.
     fingerprint_payload = {
@@ -719,20 +847,38 @@ def mutation_evidence_profile(problem_dir, config):
         fingerprint_payload, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")).hexdigest()
     if expected_digest != fingerprint["digest"]:
-        return {"state": "invalid", "summary": {}, "mutants": len(mutations)}
+        return profile("invalid", mutants=len(mutations))
+    try:
+        current_fingerprint = _compiler_fingerprint()
+    except (OSError, ProbHubError):
+        current_fingerprint = {}
+    builder_matches = bool(
+        current_fingerprint.get("available") is True
+        and current_fingerprint.get("digest") == fingerprint["digest"]
+    )
     try:
         current_source = compute_source_hash(problem_dir, config)
         current_data = compute_data_hash(problem_dir, config)
         accepted = normalize_solution_entries(config)["std"]
         if not accepted or not accepted[0].get("file"):
-            return {"state": "invalid", "summary": summary, "mutants": len(mutations)}
+            return profile("invalid", summary=summary, mutants=len(mutations))
         source_path, source_error, source_message = resolve_solution_source(problem_dir, accepted[0]["file"])
         if source_path is None:
-            return {"state": "invalid", "summary": summary, "mutants": len(mutations)}
+            return profile("invalid", summary=summary, mutants=len(mutations))
         source = source_path.read_text(encoding="utf-8")
-        plan = plan_mutations(source, operators=evidence.get("operators"), max_mutants=max_mutants)
+        plan = plan_mutations(
+            source,
+            operators=evidence.get("operators"),
+            max_mutants=max_mutants,
+            exclusions=configured_exclusions,
+        )
     except (OSError, ProbHubError, ValueError, TypeError):
-        return {"state": "invalid", "summary": summary, "mutants": len(mutations)}
+        return profile("invalid", summary=summary, mutants=len(mutations))
+    expected_mutations = [item.as_dict() for item in plan["mutations"]]
+    recorded_mutations = [
+        {key: item.get(key) for key in expected}
+        for item, expected in zip(mutations, expected_mutations)
+    ]
     if (
         evidence.get("problem_id") != config.get("id")
         or evidence.get("source_path") != accepted[0]["file"]
@@ -741,17 +887,45 @@ def mutation_evidence_profile(problem_dir, config):
         or evidence.get("operator_version") != MUTATION_OPERATOR_VERSION
         or evidence.get("operators") != plan["operators"]
         or evidence.get("plan_hash") != plan["plan_hash"]
+        or evidence.get("raw_planned") != plan["raw_planned"]
+        or evidence.get("excluded") != plan["excluded"]
         or evidence.get("planned") != plan["planned"]
+        or evidence.get("selected") != plan["selected"]
         or evidence.get("truncated") != plan["truncated"]
+        or exclusion_records != plan["exclusions"]
+        or len(recorded_mutations) != len(expected_mutations)
+        or recorded_mutations != expected_mutations
         or evidence.get("status") != "passed"
     ):
         state = "stale"
     else:
-        state = "current" if fingerprint["available"] else "stale"
-    return {
-        "state": state,
-        "status": evidence.get("status"),
-        "summary": dict(summary),
-        "mutants": len(mutations),
-        "operator_version": evidence.get("operator_version"),
-    }
+        state = "current" if builder_matches else "stale"
+    current_exclusions = plan["exclusions"]
+    out_of_scope = [item for item in current_exclusions if item["status"] == "out-of-scope"]
+    unmatched = [item for item in current_exclusions if item["status"] == "unmatched"]
+    diagnostics = []
+    if unmatched:
+        diagnostics.append({
+            "code": "mutation_exclusion_unmatched",
+            "severity": "warning",
+            "message": f"{len(unmatched)} mutation exclusion(s) do not match the current plan",
+            "ids": [item["id"] for item in unmatched],
+        })
+    current_evidence = state == "current"
+    return profile(
+        state,
+        status=evidence.get("status") if current_evidence else None,
+        summary=summary if current_evidence else {},
+        mutants=len(mutations) if current_evidence else 0,
+        planning={
+            "raw": plan["raw_planned"],
+            "excluded": plan["excluded"],
+            "effective": plan["planned"],
+            "selected": plan["selected"],
+            "configured_exclusions": len(current_exclusions),
+            "out_of_scope_exclusions": len(out_of_scope),
+            "unmatched_exclusions": len(unmatched),
+        },
+        exclusions=current_exclusions,
+        diagnostics=diagnostics,
+    )
