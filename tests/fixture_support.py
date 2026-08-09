@@ -20,6 +20,7 @@ WORKSPACE_FIXTURES = (
     "float",
     "interactive",
     "stress",
+    "mutation",
     *JUDGE_QA_FIXTURES,
 )
 

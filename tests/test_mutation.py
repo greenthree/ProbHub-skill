@@ -1,0 +1,406 @@
+import shutil
+import tempfile
+import time
+import unittest
+import io
+import json
+from pathlib import Path
+from contextlib import redirect_stdout
+from unittest.mock import patch
+
+from probhub.cli import main as cli_main
+from probhub.errors import ProbHubError
+from probhub.mutation import (
+    MAX_HIT_CASES,
+    MUTATION_OPERATOR_VERSION,
+    _classify_judge_result,
+    mutation_evidence_path,
+    mutation_evidence_profile,
+    mutation_test_problem,
+    plan_mutations,
+)
+from probhub.io import read_yaml, write_yaml
+from probhub.judging import judge_problem
+
+
+FIXTURE = Path(__file__).parent / "fixtures/workspaces/mutation/M01"
+
+
+class MutationPlanningTests(unittest.TestCase):
+    def test_masked_literals_and_comments_are_never_mutated(self):
+        source = (
+            '// if (x < 3)\n'
+            'const char* text = "x < 3 && n == 0";\n'
+            'int f(int n) { return n < 3 ? 1 : 0; }\n'
+        )
+        plan = plan_mutations(source)
+        self.assertTrue(plan["mutations"])
+        self.assertTrue(all(item.line == 3 for item in plan["mutations"]), plan)
+        comparisons = [item for item in plan["mutations"] if item.operator == "comparison-boundary"]
+        self.assertEqual(len(comparisons), 1)
+        self.assertEqual(comparisons[0].line, 3)
+        self.assertEqual(comparisons[0].original, "<")
+
+    def test_plan_is_deterministic_and_respects_limit(self):
+        source = "int f(int x) { return x <= 3 ? 1 : 0; }\n"
+        first = plan_mutations(source, max_mutants=2)
+        second = plan_mutations(source, max_mutants=2)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first["mutations"]), 2)
+        self.assertTrue(first["truncated"])
+        self.assertTrue(all(item.id.startswith(MUTATION_OPERATOR_VERSION + ":") for item in first["mutations"]))
+
+    def test_serialized_mutation_text_is_bounded_without_changing_application(self):
+        condition = " || ".join(f"flag_{index}" for index in range(300))
+        source = f"int f() {{ if ({condition}) return 1; return 0; }}\n"
+        plan = plan_mutations(source, operators=["boolean-negation"], max_mutants=1)
+        mutation = plan["mutations"][0]
+        record = mutation.as_dict()
+        self.assertLessEqual(len(record["original"].encode("utf-8")), 512)
+        self.assertLessEqual(len(record["replacement"].encode("utf-8")), 512)
+        self.assertGreater(len(mutation.replacement.encode("utf-8")), 512)
+
+    def test_classification_keeps_compile_and_infrastructure_out_of_kills(self):
+        compile_invalid = _classify_judge_result(
+            {
+                "ok": False,
+                "final": {"code": "accepted_compile_failed"},
+                "events": [{"type": "compile", "kind": "std", "ok": False}],
+            },
+            "code/mutation.cpp",
+        )
+        self.assertEqual(compile_invalid[0], "compile-invalid")
+        infrastructure = _classify_judge_result(
+            {
+                "ok": False,
+                "final": {"code": "judge_failed"},
+                "events": [{"type": "case", "program": "code/mutation.cpp", "status": "FAIL"}],
+            },
+            "code/mutation.cpp",
+        )
+        self.assertEqual(infrastructure[0], "infrastructure-failed")
+
+
+class MutationFixtureTests(unittest.TestCase):
+    def _cleanup_evidence(self, problem):
+        evidence = mutation_evidence_path(problem)
+        evidence.unlink(missing_ok=True)
+        lock = problem / ".probhub" / "mutation.lock"
+        lock.unlink(missing_ok=True)
+        try:
+            (problem / ".probhub").rmdir()
+        except OSError:
+            pass
+
+    def test_weak_data_survivor_is_killed_after_fixture_strengthening(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            problem = root / "M01"
+            shutil.copytree(FIXTURE, problem)
+            before = (problem / "code/std.cpp").read_bytes()
+            baseline = judge_problem(root, problem, use_cache=False)
+            self.assertTrue(baseline["ok"], baseline)
+            weak = mutation_test_problem(
+                root,
+                problem,
+                use_cache=False,
+                operators=["comparison-boundary"],
+                max_mutants=64,
+            )
+            self.assertTrue(weak["ok"], weak)
+            weak_boundary = next(
+                item for item in weak["evidence"]["mutations"]
+                if item["operator"] == "comparison-boundary"
+                and item["original"] == "<"
+                and item["replacement"] == "<="
+            )
+            self.assertEqual(weak_boundary["classification"], "survived")
+            self.assertGreater(weak["evidence"]["summary"]["survived"], 0)
+            self.assertEqual((problem / "code/std.cpp").read_bytes(), before)
+            secret = problem / "data/secret"
+            (secret / "strong.in").write_text("3\n", encoding="utf-8")
+            (secret / "strong.ans").write_text("3\n", encoding="utf-8")
+            strong = mutation_test_problem(
+                root,
+                problem,
+                use_cache=False,
+                operators=["comparison-boundary"],
+                max_mutants=64,
+            )
+            self.assertTrue(strong["ok"], strong)
+            strong_boundary = next(
+                item for item in strong["evidence"]["mutations"]
+                if item["id"] == weak_boundary["id"]
+            )
+            self.assertEqual(strong_boundary["classification"], "killed")
+            config = read_yaml(problem / "probhub.yaml")
+            profile = mutation_evidence_profile(problem, config)
+            self.assertEqual(profile["state"], "current")
+            evidence_path = mutation_evidence_path(problem)
+            evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence_payload["plan_hash"] = "0" * 64
+            evidence_path.write_text(json.dumps(evidence_payload), encoding="utf-8")
+            self.assertEqual(mutation_evidence_profile(problem, config)["state"], "stale")
+
+    def test_nested_accepted_source_keeps_its_relative_include_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            problem = root / "M01"
+            shutil.copytree(FIXTURE, problem)
+            nested = problem / "code/solutions"
+            nested.mkdir()
+            (nested / "helper.h").write_text(
+                "inline long long add_term(long long total, int value) { return total + value; }\n",
+                encoding="utf-8",
+            )
+            (nested / "std.cpp").write_text(
+                '#include <iostream>\n'
+                '#include "helper.h"\n'
+                'int main() {\n'
+                '    int n;\n'
+                '    if (!(std::cin >> n)) return 0;\n'
+                '    long long answer = 0;\n'
+                '    for (int i = 0; i < n; ++i) answer = add_term(answer, i);\n'
+                "    std::cout << answer << '\\n';\n"
+                '}\n',
+                encoding="utf-8",
+            )
+            (problem / "code/std.cpp").unlink()
+            config = read_yaml(problem / "probhub.yaml")
+            config["solutions"]["accepted"] = ["code/solutions/std.cpp"]
+            write_yaml(problem / "probhub.yaml", config)
+
+            result = mutation_test_problem(
+                root,
+                problem,
+                use_cache=False,
+                operators=["comparison-boundary"],
+                max_mutants=1,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["evidence"]["source_path"], "code/solutions/std.cpp")
+            self.assertNotEqual(
+                result["evidence"]["mutations"][0]["classification"],
+                "compile-invalid",
+            )
+
+    def test_remaining_deadline_is_forwarded_to_each_judge(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            problem = root / "M01"
+            shutil.copytree(FIXTURE, problem)
+            passed = {
+                "ok": True,
+                "final": {"code": "all_expectations_met"},
+                "events": [],
+            }
+            with patch(
+                "probhub.mutation._compiler_fingerprint",
+                return_value={"available": True},
+            ), patch("probhub.mutation.judge_problem", return_value=passed) as execute:
+                result = mutation_test_problem(
+                    root,
+                    problem,
+                    operators=["comparison-boundary"],
+                    max_mutants=1,
+                    deadline=time.monotonic() + 5.0,
+                )
+
+            self.assertTrue(result["ok"], result)
+            forwarded = execute.call_args.kwargs["timeout"]
+            self.assertGreater(forwarded, 0)
+            self.assertLessEqual(forwarded, 5.0)
+
+    def test_hit_case_evidence_is_bounded_and_reports_truncation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            problem = root / "M01"
+            shutil.copytree(FIXTURE, problem)
+            hit_count = MAX_HIT_CASES + 5
+            failed = {
+                "ok": False,
+                "final": {"code": "expectation_not_met"},
+                "events": [
+                    {
+                        "type": "case",
+                        "program": "code/std.cpp",
+                        "case": f"secret/case-{index}",
+                        "status": "WA",
+                        "termination_reason": "completed",
+                        "failure_kind": None,
+                    }
+                    for index in range(hit_count)
+                ],
+            }
+            with patch(
+                "probhub.mutation._compiler_fingerprint",
+                return_value={"available": True},
+            ), patch("probhub.mutation.judge_problem", return_value=failed):
+                result = mutation_test_problem(
+                    root,
+                    problem,
+                    operators=["comparison-boundary"],
+                    max_mutants=1,
+                )
+
+            mutation = result["evidence"]["mutations"][0]
+            self.assertEqual(mutation["classification"], "killed")
+            self.assertEqual(len(mutation["hit_cases"]), MAX_HIT_CASES)
+            self.assertEqual(mutation["hit_cases_total"], hit_count)
+            self.assertTrue(mutation["hit_cases_truncated"])
+
+    def test_oversized_evidence_keeps_previous_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            problem = root / "M01"
+            shutil.copytree(FIXTURE, problem)
+            evidence = mutation_evidence_path(problem)
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            previous = b"previous evidence\n"
+            evidence.write_bytes(previous)
+            passed = {
+                "ok": True,
+                "final": {"code": "all_expectations_met"},
+                "events": [],
+            }
+            with patch(
+                "probhub.mutation._compiler_fingerprint",
+                return_value={"available": True},
+            ), patch("probhub.mutation.judge_problem", return_value=passed), patch(
+                "probhub.mutation.MAX_MUTATION_EVIDENCE_BYTES", 1
+            ):
+                with self.assertRaisesRegex(ProbHubError, "evidence exceeds") as raised:
+                    mutation_test_problem(
+                        root,
+                        problem,
+                        operators=["comparison-boundary"],
+                        max_mutants=1,
+                    )
+
+            self.assertEqual(raised.exception.code, "mutation_evidence_limit")
+            self.assertEqual(evidence.read_bytes(), previous)
+
+    def test_single_slow_judge_expires_overall_deadline_and_keeps_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            problem = root / "M01"
+            shutil.copytree(FIXTURE, problem)
+            evidence = mutation_evidence_path(problem)
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            previous = b"previous evidence\n"
+            evidence.write_bytes(previous)
+
+            def slow_judge(*args, **kwargs):
+                time.sleep(0.03)
+                return {
+                    "ok": False,
+                    "final": {"code": "judge_timeout"},
+                    "events": [],
+                }
+
+            with patch(
+                "probhub.mutation._compiler_fingerprint",
+                return_value={"available": True},
+            ), patch("probhub.mutation.judge_problem", side_effect=slow_judge):
+                with self.assertRaisesRegex(ProbHubError, "deadline exceeded") as raised:
+                    mutation_test_problem(
+                        root,
+                        problem,
+                        operators=["comparison-boundary"],
+                        max_mutants=1,
+                        deadline=time.monotonic() + 0.01,
+                    )
+
+            self.assertEqual(raised.exception.code, "mutation_timeout")
+            self.assertEqual(evidence.read_bytes(), previous)
+
+    def test_cli_returns_one_problem_level_without_nested_problems(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            output = io.StringIO()
+            with redirect_stdout(output), patch(
+                "probhub.cli.mutation_test_problem",
+                return_value={"ok": True, "status": "passed", "evidence": {"summary": {}}},
+            ) as execute:
+                code = cli_main([
+                    "--workspace", str(root), "--json", "mutation", "M01",
+                    "--operator", "comparison-boundary",
+                ])
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 0, payload)
+            self.assertEqual(set(payload["problems"]), {"M01"})
+            self.assertNotIn("problems", payload["problems"]["M01"])
+            self.assertEqual(execute.call_args.kwargs["operators"], ["comparison-boundary"])
+
+    def test_cancel_and_infrastructure_failure_keep_previous_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            problem = root / "M01"
+            evidence = mutation_evidence_path(problem)
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            previous = b'{"schema_version": 1, "status": "passed"}\n'
+            evidence.write_bytes(previous)
+            fingerprint = {
+                "schema_version": 1,
+                "probhub_version": "fixture",
+                "compiler": "g++",
+                "compiler_identity": "fixture compiler",
+                "compiler_flags": ["-O2", "-std=c++17"],
+                "parser": "fixture",
+                "operator_version": "fixture",
+                "digest": "fixture",
+                "available": True,
+            }
+            with patch("probhub.mutation._compiler_fingerprint", return_value=fingerprint):
+                with self.assertRaisesRegex(ProbHubError, "cancelled"):
+                    mutation_test_problem(
+                        root,
+                        problem,
+                        operators=["comparison-boundary"],
+                        cancel_check=lambda: True,
+                    )
+            self.assertEqual(evidence.read_bytes(), previous)
+
+            judge_failure = {
+                "ok": False,
+                "final": {"code": "judge_failed"},
+                "events": [{
+                    "type": "case",
+                    "program": "code/mutation.cpp",
+                    "status": "FAIL",
+                }],
+            }
+            with patch("probhub.mutation._compiler_fingerprint", return_value=fingerprint), patch(
+                "probhub.mutation.judge_problem", return_value=judge_failure
+            ):
+                result = mutation_test_problem(
+                    root,
+                    problem,
+                    operators=["comparison-boundary"],
+                )
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["status"], "infrastructure-failed")
+            self.assertEqual(evidence.read_bytes(), previous)
+
+    def test_input_change_aborts_without_replacing_previous_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            problem = root / "M01"
+            evidence = mutation_evidence_path(problem)
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            previous = b"previous evidence\n"
+            evidence.write_bytes(previous)
+            with patch("probhub.mutation._compiler_fingerprint", return_value={"available": True}), patch(
+                "probhub.mutation.compute_data_hash", side_effect=["data-before", "data-after"]
+            ):
+                with self.assertRaisesRegex(ProbHubError, "inputs changed"):
+                    mutation_test_problem(
+                        root,
+                        problem,
+                        operators=["comparison-boundary"],
+                    )
+            self.assertEqual(evidence.read_bytes(), previous)

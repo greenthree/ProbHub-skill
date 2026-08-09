@@ -7,6 +7,7 @@ from pathlib import Path
 from .datagen import recipe_coverage, resolve_data_dir
 from .errors import ProbHubError
 from .linting import lint_workspace
+from .mutation import mutation_evidence_profile
 from .solutions import (
     case_group_names,
     normalize_data_groups,
@@ -518,6 +519,7 @@ def _problem_report(root, workspace, entry, position, lint_result):
         *(lint_result or {}).get("diagnostics", []),
         *diagnostics,
     ]
+    mutation = mutation_evidence_profile(problem_dir, config)
     return {
         "id": entry["id"],
         "number": position,
@@ -555,6 +557,7 @@ def _problem_report(root, workspace, entry, position, lint_result):
         },
         "calibration": _calibration_profile(calibration),
         "judge_qa": _judge_qa_profile(lint_result),
+        "mutation": mutation,
         "solution_verification": (lint_result or {}).get("solution_verification") or {},
         "kill_matrix": _kill_matrix(config, groups, cases, calibration),
         "diagnostics": report_diagnostics,
@@ -609,6 +612,25 @@ def build_workspace_report(root, workspace, selected=None):
         "judge_qa_states": dict(Counter(
             problem["judge_qa"]["state"] for problem in problems
         )),
+        "mutation_states": dict(Counter(
+            problem["mutation"]["state"] for problem in problems
+        )),
+        "mutation_killed": sum(
+            problem["mutation"]["summary"].get("killed", 0)
+            for problem in problems
+        ),
+        "mutation_survived": sum(
+            problem["mutation"]["summary"].get("survived", 0)
+            for problem in problems
+        ),
+        "mutation_compile_invalid": sum(
+            problem["mutation"]["summary"].get("compile-invalid", 0)
+            for problem in problems
+        ),
+        "mutation_infrastructure_failed": sum(
+            problem["mutation"]["summary"].get("infrastructure-failed", 0)
+            for problem in problems
+        ),
         "warnings": sum(item.get("severity") == "warning" for item in diagnostics),
         "errors": sum(item.get("severity") == "error" for item in diagnostics)
         + sum(len(problem["lint"]["errors"]) for problem in problems),
@@ -669,12 +691,12 @@ def render_markdown_report(report):
         "",
         "## 题目概览",
         "",
-        "| 题号 | ID | 题名 | 难度 | 标签 | Sample | Secret | Recipe 覆盖 | TL 余量 | Judge QA |",
-        "|---|---|---|---:|---|---:|---:|---:|---:|---|",
+        "| 题号 | ID | 题名 | 难度 | 标签 | Sample | Secret | Recipe 覆盖 | TL 余量 | Judge QA | Mutation |",
+        "|---|---|---|---:|---|---:|---:|---:|---:|---|---|",
     ]
     for problem in report["problems"]:
         lines.append(
-            "| {label} | {id} | {name} | {difficulty} | {tags} | {sample} | {secret} | {recipes} | {headroom} | {judge_qa} |".format(
+            "| {label} | {id} | {name} | {difficulty} | {tags} | {sample} | {secret} | {recipes} | {headroom} | {judge_qa} | {mutation} |".format(
                 label=_markdown_escape(problem["label"]),
                 id=_markdown_escape(problem["id"]),
                 name=_markdown_escape(problem["name"]),
@@ -685,6 +707,7 @@ def render_markdown_report(report):
                 recipes=_format_ratio(problem["recipes"]["coverage_ratio"]),
                 headroom=_format_headroom(problem["calibration"]["primary_headroom"]),
                 judge_qa=_markdown_escape(problem["judge_qa"]["state"]),
+                mutation=_markdown_escape(problem["mutation"]["state"]),
             )
         )
 
@@ -703,6 +726,11 @@ def render_markdown_report(report):
             f"{problem['judge_qa']['matched_cases']}/{problem['judge_qa']['declared_cases']}；"
             f"probe {problem['judge_qa']['evidence_probes']}/{problem['judge_qa']['declared_probes']}；"
             f"人工复核 {problem['judge_qa']['manual_review_probes']}",
+            f"- Mutation：{problem['mutation']['state']}；"
+            f"killed {problem['mutation']['summary'].get('killed', 0)}；"
+            f"survived {problem['mutation']['summary'].get('survived', 0)}；"
+            f"compile-invalid {problem['mutation']['summary'].get('compile-invalid', 0)}；"
+            f"infrastructure-failed {problem['mutation']['summary'].get('infrastructure-failed', 0)}",
             f"- 累计约束：{problem['aggregate_constraints']['state']}；"
             f"matched {problem['aggregate_constraints']['summary']['matched']}；"
             f"statement-only {problem['aggregate_constraints']['summary']['statement_only']}；"
@@ -786,6 +814,9 @@ def render_text_report(report):
         f"ProbHub 工作区报告: {workspace['title']}",
         f"题目 {summary['problems']} | sample {summary['sample_cases']} | secret {summary['secret_cases']} | "
         f"warning {summary['warnings']} | error {summary['errors']}",
+        f"Mutation: killed {summary['mutation_killed']} | survived {summary['mutation_survived']} | "
+        f"compile-invalid {summary['mutation_compile_invalid']} | "
+        f"infrastructure-failed {summary['mutation_infrastructure_failed']}",
         "",
     ]
     for problem in report["problems"]:
@@ -794,7 +825,7 @@ def render_text_report(report):
             f"[{problem['label']}] {problem['id']} {problem['name']} | 难度 {problem['difficulty'] if problem['difficulty'] is not None else '—'} "
             f"| 标签 {tags} | sample {problem['tests']['sample']['cases']} / secret {problem['tests']['secret']['cases']} "
             f"| recipe {_format_ratio(problem['recipes']['coverage_ratio'])} | TL {_format_headroom(problem['calibration']['primary_headroom'])} "
-            f"| QA {problem['judge_qa']['state']}"
+            f"| QA {problem['judge_qa']['state']} | mutation {problem['mutation']['state']}"
         )
         recipes = problem["recipes"]
         lines.append(

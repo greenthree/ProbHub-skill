@@ -1,0 +1,24 @@
+schema_version: 1
+id: M01
+name: Mutation Fixture
+limits:
+  time: 2
+  memory: 256
+  output: 64
+  processes: 32
+statement:
+  source: problem.md
+judge:
+  type: standard
+  validator: code/validator.cpp
+solutions:
+  accepted:
+    - code/std.cpp
+  wrong:
+    - file: code/wrong.cpp
+      expected:
+        status: WA
+        all: true
+data:
+  sample_dir: data/sample
+  secret_dir: data/secret

@@ -1,6 +1,6 @@
 ---
 name: probhub
-description: 当用户需要创作或维护算法竞赛题目、选择快速/普通/完整 Agent 验证模式、生成测试数据、运行 ProbHub CLI 受控沙箱或 stress 差分测试、配置进程与输出限制、使用 Workspace Schema v1、配置 DOMjudge 题目包或使用 Typst 组卷时调用。覆盖从题面和代码矩阵到独立审查、PDF、ZIP、Manifest 与状态验证的完整流程。
+description: 当用户需要创作或维护算法竞赛题目、选择快速/普通/完整 Agent 验证模式、生成测试数据、运行 ProbHub CLI 受控沙箱、stress 差分测试或 std 变异测试、配置进程与输出限制、使用 Workspace Schema v1、配置 DOMjudge 题目包或使用 Typst 组卷时调用。覆盖从题面和代码矩阵到独立审查、PDF、ZIP、Manifest 与状态验证的完整流程。
 ---
 
 # 角色
@@ -97,6 +97,7 @@ probhub build
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
 | `judge-qa [ID...]` | 对已配置的 Checker/Interactor fixture 和鲁棒性探针做主动 Judge QA；只缓存编译结果 |
 | `stress ID...` | 反复生成小数据，对拍 accepted 与 brute，保存首个可重放反例；`--against <解法>` 反向找刀，`--fixate <case>` 把命中一步固化为 secret 数据 + 配方 + 定向数据组 |
+| `mutation ID...` | 在临时快照中对标准题 C++ accepted 做保守语法变异，报告 `killed`/`survived`/编译或基础设施状态；不写正式产物 |
 | `checkpoint ID` | 发布当前题目的不可变 draft checkpoint，供并行组卷使用 |
 | `seal ID` | lint、judge、stress 后冻结 revision，并自动生成一版完整试卷 |
 | `assemble` | 使用各题最新 checkpoint 生成隔离的完整试卷 generation |
@@ -147,6 +148,14 @@ probhub judge-qa L01 --no-cache
 ```
 
 Judge QA 每次都会重新执行 fixture 和内建探针；`--no-cache` 只额外强制重编官方 Judge 与模拟选手。成功会原子发布题目本地的 `judge-qa-evidence-v1.json`，该文件不进入 ZIP、PDF、Manifest 或正式数据。没有配置 QA 的旧题仍保持 Core 兼容，但 Agent 不得把 `not-configured` 当作新 custom/interactive 题的交付完成。
+
+对标准题或需要补充检查已知错解覆盖的题目，读取 `references/mutation-testing.md` 后可运行：
+
+```powershell
+probhub mutation L01 --operator comparison-boundary --no-cache
+```
+
+变异测试是开放世界探测的补充证据，不替代算法证明、独立标程、期望矩阵或 stress。`survived` 只说明当前测试数据没有区分该变异；编译失败和 Judge/Validator/资源故障不得计为击杀。成功 evidence 原子写入题目 `.probhub`，失败或输入变化不覆盖上一份成功 evidence；首版不作为 build 硬门禁，也不接入 Legacy、WebUI 或 Checker/Interactor 执行。
 
 完整语法、产物、退出码和故障处理见 `references/cli.md`。配置或执行差分测试前读取 `references/stress.md`；修改资源限制、解释 OLE 或排查残留进程时读取 `references/process-control.md`。
 
