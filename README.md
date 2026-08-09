@@ -25,6 +25,7 @@ ProbHub 会在这条流程中提供：
 - standard、custom checker、浮点比较和 interactive 四类常见评测场景；
 - AC、WA、TLE、MLE、OLE、RE、FAIL 等结果和完整进程树清理；
 - Checker/Interactor 的题目级主动 Judge QA：fixture、鲁棒性探针、隔离执行和有界 evidence；
+- 标准题 C++ 标程的保守 std 变异测试：在临时快照中找出当前数据没有击杀的边界变异；
 - 可复现的数据生成、差分测试、反例重放和错解击杀矩阵；
 - 题面与 Validator 的范围对账、多组数据累计总量的静态复核提示，以及按复杂度、测试需求和资源余量推导 `T` 与累计上限的 Agent 指引；
 - Typst 全卷排版、单题 PDF、DOMjudge ZIP 和交付前验包；
@@ -174,6 +175,7 @@ Agent 和 WebUI 都会调用同一套 Core。只有需要手动排查或编排�
 | `probhub report L01` | 查看数据画像、错解击杀和累计约束状态 |
 | `probhub judge L01` | 编译并运行 Validator、标程、暴力和错解 |
 | `probhub judge-qa L01 --no-cache` | 主动测试 Checker/Interactor 的 fixture 和鲁棒性 |
+| `probhub mutation L01 --no-cache` | 对标准题 C++ 标程做保守变异，补充发现数据薄弱点 |
 | `probhub stress L01 --rounds 1000 --seed 12345` | 用随机小数据对拍 |
 | `probhub seal L01 --no-cache` | 验证并冻结当前题目版本 |
 | `probhub build L01 --no-cache` | 正式生成 PDF、ZIP 和 Manifest |
@@ -235,6 +237,8 @@ Agent 完成题目后，应明确报告下列结果：
 本机通过不等于目标 DOMjudge 机器一定具有相同速度。时间限制和内存限制仍应在目标 Linux/DOMjudge 环境校准。
 
 对 `judge.type: custom` 或 `judge.type: interactive` 的新题，或修改 Checker/Interactor 后，先在 `judge.qa` 中登记题目级 fixture，再运行 `probhub judge-qa <ID> --no-cache`。fixture 每次都会执行，只有编译结果可以缓存；`judge-qa-evidence-v1.json` 是本地有界证据，不会进入 ZIP、PDF 或 Manifest。lint/status 中的 evidence 缺失或过期是体检 warning，但 `seal` 和正式 `build` 不允许已配置题目绕过通过的 Judge QA。
+
+标准题需要补充检查数据是否能区分常见边界错误时，可以运行 `probhub mutation <ID> --no-cache`。它只对首个 C++ accepted 生成少量稳定变异，成功后写入本地有界 evidence；变异体不会进入题目源码、PDF、ZIP 或 Manifest。`survived` 不是“错解通过”的证明，也不会替代证明、独立标程、期望矩阵和 stress。完整限制见 [std 变异测试](references/mutation-testing.md)。
 
 ## 并行出题时怎么做
 
@@ -348,6 +352,7 @@ ProbHub 面向本地、单用户、可信的出题环境。它会限制时间、
 - [数据组与解法期望](references/data-groups-expectations.md)
 - [错解分类与数据强度](references/mistake-taxonomy.md)
 - [Stress 差分测试](references/stress.md)
+- [std 变异测试](references/mutation-testing.md)
 - [Agent 快速、普通与完整验证模式](references/verification-modes.md)
 - [Checker 与交互题](references/checker-interactor.md)
 - [进程和资源控制](references/process-control.md)

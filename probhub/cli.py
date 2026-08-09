@@ -3,6 +3,7 @@ import json
 import re
 import stat
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -19,6 +20,7 @@ from .generations import (
 from .io import atomic_write_bytes, atomic_write_text, write_yaml
 from .judge_qa import judge_qa_problem
 from .judging import check_sample_answers, judge_problem
+from .mutation import MUTATION_OPERATORS, mutation_test_problem
 from .linting import (
     compute_collection_hash,
     compute_data_hash,
@@ -99,6 +101,9 @@ def _ensure_local_gitignore(root):
         "**/.probhub/judge-qa-evidence-v1.json",
         "**/.probhub/judge-qa-evidence-v1.json.*.tmp",
         "**/.probhub/judge-qa-tmp/",
+        "**/.probhub/mutation.lock",
+        "**/.probhub/mutation-evidence-v1.json",
+        "**/.probhub/mutation-evidence-v1.json.*.tmp",
         "**/.probhub/sandbox-cache-v1.json",
         "**/.probhub/sandbox-cache-v1.json.tmp",
         "**/.probhub/stress/",
@@ -562,6 +567,27 @@ def command_stress(args):
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
 
 
+def command_mutate(args):
+    root, workspace = workspace_context(args)
+    ensure_no_pending_transactions(root, workspace)
+    _ensure_local_gitignore(root)
+    if args.timeout is not None and args.timeout <= 0:
+        raise ProbHubError("mutation --timeout must be positive", code="mutation_timeout_invalid")
+    entries = select_entries(workspace, args.problem)
+    results = {}
+    for entry in entries:
+        problem_dir, _ = load_problem(root, entry)
+        results[entry["id"]] = mutation_test_problem(
+            root,
+            problem_dir,
+            use_cache=not args.no_cache,
+            operators=args.operator,
+            max_mutants=args.max_mutants,
+            deadline=(time.monotonic() + args.timeout) if args.timeout else None,
+        )
+    return {"ok": all(item["ok"] for item in results.values()), "problems": results}
+
+
 def _single_problem_context(args):
     root, workspace = workspace_context(args)
     entries = select_entries(workspace, [args.problem_id])
@@ -843,6 +869,19 @@ def build_parser():
     stress.add_argument("--fixate", help="on a killer hit, persist it as this secret case with recipe and data group")
     stress.add_argument("--group", help="data group name for --fixate (defaults to the case name)")
     stress.set_defaults(handler=command_stress)
+
+    mutate = sub.add_parser("mutation", aliases=["mutate"])
+    mutate.add_argument("problem", nargs="+")
+    mutate.add_argument(
+        "--operator",
+        action="append",
+        choices=list(MUTATION_OPERATORS),
+        help="restrict mutation operators; repeat for more than one",
+    )
+    mutate.add_argument("--max-mutants", type=int, default=256)
+    mutate.add_argument("--timeout", type=float, help="overall seconds per problem")
+    mutate.add_argument("--no-cache", action="store_true", help="ignore temporary Judge caches")
+    mutate.set_defaults(handler=command_mutate)
 
     checkpoint = sub.add_parser("checkpoint")
     checkpoint.add_argument("problem_id")

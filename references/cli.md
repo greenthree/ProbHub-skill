@@ -397,6 +397,34 @@ probhub judge-qa [ID...] [--no-cache]
 
 命令结果状态为 `not-configured`、`passed`、`expectation-failed`、`infrastructure-failed` 或 `cancelled`。lint/status 会把 evidence 映射为 `not-configured`、`missing`、`current`、`stale` 或 `invalid`；missing/stale/invalid 是 warning，不改变正式产物 `current/stale` 或 lint 退出码。`seal` 对已配置 QA 要求命令状态 `passed` 且 evidence `current`，否则返回 `seal_judge_qa_failed`，不创建新的 sealed checkpoint。正式 build 还会拒绝没有当前 QA evidence 的旧 sealed checkpoint。
 
+## 9.2 `mutation`
+
+```powershell
+probhub mutation ID [--operator OPERATOR] [--max-mutants N] [--timeout SECONDS] [--no-cache]
+probhub mutate ID [--operator OPERATOR] [--max-mutants N] [--timeout SECONDS] [--no-cache]
+```
+
+`mutation` 只对 `judge.type: standard` 且首个 accepted 为 C++ 源码的题目执行。它在临时快照中生成比较边界、布尔条件和十进制整数边界变异，复用正式 Validator/Judge 逐点运行；不会把变异体登记为 accepted/wrong，也不会改写题目源文件或正式产物。`--operator` 可重复指定，`--max-mutants` 范围为 1..256，`--timeout` 是每题总秒数。
+
+JSON 结果保持与其他多题命令相同的外层结构：
+
+```json
+{
+  "ok": true,
+  "problems": {
+    "L01": {
+      "ok": true,
+      "status": "passed",
+      "evidence": {"summary": {"killed": 4, "survived": 1}}
+    }
+  }
+}
+```
+
+`status: passed` 只表示所有计划中的变异都完成执行；summary 中的 `survived` 必须人工分析。`compile-invalid` 不计入可执行变异分母，`infrastructure-failed` 表示题目基础设施或沙箱失败，不能当成击杀。每个变异最多保留 16 个命中详情，完整数量由 `hit_cases_total` 和 `hit_cases_truncated` 表示；单份 evidence 上限为 4 MiB。成功才原子发布 `<ID>/.probhub/mutation-evidence-v1.json`；失败、取消、超时、证据超限、输入变化、锁竞争或发布故障保留旧 evidence。状态检查会验证 source/data hash、算子计划 hash、计数和有界记录结构；变化后显示 `stale` 或 `invalid`。
+
+完整限制、算子语义和解释边界见 [std 变异测试](mutation-testing.md)。
+
 ## 10. `stress`
 
 ```powershell
