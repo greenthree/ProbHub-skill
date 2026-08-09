@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- 安全升级 `pypdf` 至 `6.15.0`，修复审计发现的 `CVE-2026-71852` 与 `CVE-2026-71870`。
 - 新增首版 `mutation`/`mutate` CLI：对标准题首个 C++ accepted 进行比较边界、布尔条件和十进制整数边界的保守语法变异，在临时快照中复用正式 Validator/Judge，输出 `killed`、`survived`、`compile-invalid` 和 `infrastructure-failed` 分类。
 - 新增 mutation evidence v1 的 source/data/计划哈希、编译器指纹、稳定 mutation ID、计数与有界文本/命中/诊断校验；成功才原子发布，失败、取消、超时、证据超限和输入变化保留上一份成功证据。该能力不作为 build 硬门禁，不接入 WebUI/Legacy。
 
