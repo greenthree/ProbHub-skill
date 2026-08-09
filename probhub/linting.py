@@ -21,6 +21,7 @@ from .judge_qa import (
     judge_fixture_tree_paths,
 )
 from .metadata import build_meta, normalize_display_name
+from .mutation_config import inspect_mutation_config
 from .problem_paths import ProblemPathError, resolve_problem_regular_file
 from .solutions import analyze_solution_verification
 from .statement import parse_statement
@@ -323,6 +324,12 @@ def lint_problem(root, workspace, entry):
         judge_type = "custom"
     if judge_type not in {"standard", "custom", "interactive"}:
         errors.append(f"unsupported judge.type: {judge_type}")
+    mutation_config = inspect_mutation_config(config)
+    errors.extend(
+        f"[{diagnostic['code']}] {diagnostic['message']}"
+        for diagnostic in mutation_config["diagnostics"]
+        if diagnostic.get("severity") == "error"
+    )
 
     validator = judge.get("validator")
     validator_path = None
@@ -637,6 +644,7 @@ def lint_problem(root, workspace, entry):
         *(solution_verification.get("diagnostics") or []),
         *judge_qa["diagnostics"],
         *judge_qa_evidence["diagnostics"],
+        *mutation_config["diagnostics"],
     ]
     return {
         "id": entry["id"],
@@ -649,6 +657,7 @@ def lint_problem(root, workspace, entry):
         "solution_verification": solution_verification,
         "calibration": calibration,
         "judge_qa": judge_qa,
+        "mutation_config": mutation_config,
         "source_hash": source_hash,
         "data_hash": data_hash,
     }

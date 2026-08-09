@@ -515,11 +515,12 @@ def _problem_report(root, workspace, entry, position, lint_result):
     )
     diagnostics.extend(recipes.pop("diagnostics"))
     calibration = (lint_result or {}).get("calibration") or {"state": "missing"}
+    mutation = mutation_evidence_profile(problem_dir, config)
     report_diagnostics = [
         *(lint_result or {}).get("diagnostics", []),
         *diagnostics,
+        *mutation.get("diagnostics", []),
     ]
-    mutation = mutation_evidence_profile(problem_dir, config)
     return {
         "id": entry["id"],
         "number": position,
@@ -631,9 +632,33 @@ def build_workspace_report(root, workspace, selected=None):
             problem["mutation"]["summary"].get("infrastructure-failed", 0)
             for problem in problems
         ),
+        "mutation_raw": sum(
+            problem["mutation"]["planning"].get("raw", 0)
+            for problem in problems
+        ),
+        "mutation_excluded": sum(
+            problem["mutation"]["planning"].get("excluded", 0)
+            for problem in problems
+        ),
+        "mutation_effective": sum(
+            problem["mutation"]["planning"].get("effective", 0)
+            for problem in problems
+        ),
+        "mutation_selected": sum(
+            problem["mutation"]["planning"].get("selected", 0)
+            for problem in problems
+        ),
+        "mutation_out_of_scope_exclusions": sum(
+            problem["mutation"]["planning"].get("out_of_scope_exclusions", 0)
+            for problem in problems
+        ),
+        "mutation_unmatched_exclusions": sum(
+            problem["mutation"]["planning"].get("unmatched_exclusions", 0)
+            for problem in problems
+        ),
         "warnings": sum(item.get("severity") == "warning" for item in diagnostics),
         "errors": sum(item.get("severity") == "error" for item in diagnostics)
-        + sum(len(problem["lint"]["errors"]) for problem in problems),
+        + sum(len(_unstructured_lint_errors(problem)) for problem in problems),
     }
     return {
         "ok": bool(lint.get("ok")),
@@ -658,6 +683,19 @@ def _markdown_escape(value):
 
 def _format_ratio(value):
     return "—" if value is None else f"{float(value):.0%}"
+
+
+def _unstructured_lint_errors(problem):
+    structured = {
+        f"[{item.get('code')}] {item.get('message')}"
+        for item in problem.get("diagnostics", [])
+        if isinstance(item, dict) and item.get("severity") == "error"
+    }
+    return [
+        message
+        for message in problem.get("lint", {}).get("errors", [])
+        if message not in structured
+    ]
 
 
 def _format_headroom(value):
@@ -727,6 +765,12 @@ def render_markdown_report(report):
             f"probe {problem['judge_qa']['evidence_probes']}/{problem['judge_qa']['declared_probes']}；"
             f"人工复核 {problem['judge_qa']['manual_review_probes']}",
             f"- Mutation：{problem['mutation']['state']}；"
+            f"raw {problem['mutation']['planning'].get('raw', 0)}；"
+            f"excluded {problem['mutation']['planning'].get('excluded', 0)}；"
+            f"effective {problem['mutation']['planning'].get('effective', 0)}；"
+            f"selected {problem['mutation']['planning'].get('selected', 0)}；"
+            f"out-of-scope exclusions {problem['mutation']['planning'].get('out_of_scope_exclusions', 0)}；"
+            f"unmatched exclusions {problem['mutation']['planning'].get('unmatched_exclusions', 0)}；"
             f"killed {problem['mutation']['summary'].get('killed', 0)}；"
             f"survived {problem['mutation']['summary'].get('survived', 0)}；"
             f"compile-invalid {problem['mutation']['summary'].get('compile-invalid', 0)}；"
@@ -777,6 +821,21 @@ def render_markdown_report(report):
                     f"{_markdown_escape(item.get('purpose'))} | probe | "
                     f"{_markdown_escape(_format_qa_actual(item.get('actual')))} | {result} |"
                 )
+        mutation = problem["mutation"]
+        if mutation["exclusions"]:
+            lines.extend([
+                "",
+                "### Mutation 人工排除",
+                "",
+                "| Mutation ID | 匹配状态 | 理由 |",
+                "|---|---|---|",
+            ])
+            for item in mutation["exclusions"]:
+                lines.append(
+                    f"| `{_markdown_escape(item['id'])}` | "
+                    f"{_markdown_escape(item['status'])} | "
+                    f"{_markdown_escape(item['reason'])} |"
+                )
         matrix = problem["kill_matrix"]
         if matrix["rows"]:
             columns = matrix["columns"]
@@ -794,9 +853,10 @@ def render_markdown_report(report):
             item for item in problem["diagnostics"]
             if item.get("severity") in {"warning", "error"}
         ]
-        if warning_items or problem["lint"]["errors"]:
+        lint_errors = _unstructured_lint_errors(problem)
+        if warning_items or lint_errors:
             lines.extend(["", "### 诊断", ""])
-            for message in problem["lint"]["errors"]:
+            for message in lint_errors:
                 lines.append(f"- **error** `{problem['id']}`: {_markdown_escape(message)}")
             for item in warning_items:
                 lines.append(
@@ -817,6 +877,10 @@ def render_text_report(report):
         f"Mutation: killed {summary['mutation_killed']} | survived {summary['mutation_survived']} | "
         f"compile-invalid {summary['mutation_compile_invalid']} | "
         f"infrastructure-failed {summary['mutation_infrastructure_failed']}",
+        f"Mutation plan: raw {summary['mutation_raw']} | excluded {summary['mutation_excluded']} | "
+        f"effective {summary['mutation_effective']} | selected {summary['mutation_selected']} | "
+        f"out-of-scope exclusions {summary['mutation_out_of_scope_exclusions']} | "
+        f"unmatched exclusions {summary['mutation_unmatched_exclusions']}",
         "",
     ]
     for problem in report["problems"]:
@@ -852,6 +916,20 @@ def render_text_report(report):
             f"probes={judge_qa['evidence_probes']}/{judge_qa['declared_probes']} "
             f"manual-review={judge_qa['manual_review_probes']}"
         )
+        mutation = problem["mutation"]
+        lines.append(
+            f"  Mutation plan: raw={mutation['planning'].get('raw', 0)} "
+            f"excluded={mutation['planning'].get('excluded', 0)} "
+            f"effective={mutation['planning'].get('effective', 0)} "
+            f"selected={mutation['planning'].get('selected', 0)} "
+            f"out-of-scope-exclusions={mutation['planning'].get('out_of_scope_exclusions', 0)} "
+            f"unmatched-exclusions={mutation['planning'].get('unmatched_exclusions', 0)}"
+        )
+        for item in mutation["exclusions"]:
+            lines.append(
+                f"    exclude {item['id']}: "
+                f"{item['status']}; {item['reason']}"
+            )
         if judge_qa["state"] == "current":
             for item in judge_qa["cases"]:
                 lines.append(
@@ -886,7 +964,7 @@ def render_text_report(report):
                 lines.append(
                     f"    {row['program']} | " + " | ".join(cells) + f" | {row['overall']}"
                 )
-        for message in problem["lint"]["errors"]:
+        for message in _unstructured_lint_errors(problem):
             lines.append(f"  ERROR lint: {message}")
         for item in problem["diagnostics"]:
             if item.get("severity") in {"warning", "error"}:

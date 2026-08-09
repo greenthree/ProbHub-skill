@@ -51,7 +51,10 @@ class NpmPackageMetadataTests(unittest.TestCase):
         }
         self.assertIn("probhub/judge_qa_evidence.py", main_files)
         self.assertIn("probhub/judge_qa_runtime.py", main_files)
+        self.assertIn("probhub/mutation.py", main_files)
+        self.assertIn("probhub/mutation_config.py", main_files)
         self.assertIn("references/checker-interactor.md", main_files)
+        self.assertIn("references/mutation-testing.md", main_files)
 
     def test_both_packages_expose_cli_and_skill_installer(self):
         expected_bins = {

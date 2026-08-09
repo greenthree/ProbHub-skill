@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+- 新增 `mutation.schema_version: 1` 题目级人工排除：按稳定 mutation ID 记录有界非空理由，lint 拒绝未知字段、错误版本、无效/重复 ID、超量记录和非 standard Judge 配置；排除在 `--max-mutants` 前应用，失效旧 ID 保留并报告 warning。
+- mutation evidence 升至 v2，并在 JSON、终端和 Markdown report 中并列 raw、excluded、effective、selected、out-of-scope 与 unmatched exclusion 计数；部分算子运行不会把其他算子的有效排除误报为失效。排除理由进入 source/计划哈希并逐项展示，Schema 类型、当前 Core/编译器身份、配置变化和输入变化均参与 current 判定；发布故障保留旧 evidence。人工排除仍不构成正确性证明或 build 硬门禁。
+
 ## [0.6.6] - 2026-08-09
 
 - 统一 Schema v1 特殊 Judge 路径栅栏：lint、正式打包和 local Judge 共同拒绝绝对路径、`..`、符号链接、junction/reparse point、非普通文件和题目目录外目标，并保留 `judge.type: checker` 兼容别名。
