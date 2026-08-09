@@ -4,13 +4,16 @@
 
 ## [Unreleased]
 
-- 安全升级 `pypdf` 至 `6.15.0`，修复审计发现的 `CVE-2026-71852` 与 `CVE-2026-71870`。
-- 新增首版 `mutation`/`mutate` CLI：对标准题首个 C++ accepted 进行比较边界、布尔条件和十进制整数边界的保守语法变异，在临时快照中复用正式 Validator/Judge，输出 `killed`、`survived`、`compile-invalid` 和 `infrastructure-failed` 分类。
-- 新增 mutation evidence v1 的 source/data/计划哈希、编译器指纹、稳定 mutation ID、计数与有界文本/命中/诊断校验；成功才原子发布，失败、取消、超时、证据超限和输入变化保留上一份成功证据。该能力不作为 build 硬门禁，不接入 WebUI/Legacy。
+## [0.6.6] - 2026-08-09
 
 - 统一 Schema v1 特殊 Judge 路径栅栏：lint、正式打包和 local Judge 共同拒绝绝对路径、`..`、符号链接、junction/reparse point、非普通文件和题目目录外目标，并保留 `judge.type: checker` 兼容别名。
-- 新增共享 Checker/Interactor Core 运行层，供 local Judge、stress 与数据生成复用；结果分离 verdict、execution status、failure kind、责任方、终止原因、双方资源/流量证据与清理结果，沙箱缓存 Schema 升至 7。
-- Checker feedback 同时保留有界诊断与简短正式失败原因；Interactor 非普通 feedback、资源异常、启动失败、取消和清理失败均返回一致的结构化语义，清理失败不会再被成功 verdict 或取消状态掩盖。
+- 新增共享 Checker/Interactor Core 运行层，供 local Judge、stress 与数据生成复用；结构化结果分离 verdict、execution status、failure kind、责任方、终止原因、双方资源/流量证据与清理结果，沙箱缓存 Schema 升至 7。Checker feedback 保留有界诊断与正式失败原因，Interactor 的资源、启动、取消和清理异常使用一致的 fail-closed 语义。
+- 新增 `judge.qa.schema_version: 1`：Checker/Interactor fixture 使用题目内路径栅栏、Windows 大小写不敏感 ID 去重、数量与字节上限，以及原始字节 `fixture_hash`；`judge-fixtures/` 和 `code/judge-qa/` 纳入 source/checkpoint 跟踪，并提供独立 Checker/Interactor Fixture 工作区。
+- 新增隔离 `judge-qa` 执行与 CLI：在一致快照中复用正式 Validator、Checker/Interactor 和资源控制，运行声明 fixture、模拟选手及内建鲁棒性探针；支持 OS 锁、总 deadline、取消、编译复用、最终输入哈希围栏和清理失败优先级。
+- Judge QA evidence v1 只在完整成功后原子发布；失败、取消、超时、锁竞争、输入变化与发布故障保留上一份成功证据。lint/status/report 会报告 `current`、`missing`、`stale`、`invalid`，配置 QA 的特殊 Judge 必须在 `seal` 前取得 current passed evidence；WebUI 与 Legacy 不接入该能力。
+- 新增首版 `mutation`/`mutate` CLI：对标准题首个 C++ accepted 进行比较边界、布尔条件和十进制整数边界的保守 Token 变异，在临时快照中复用正式 Validator/Judge，输出 `killed`、`survived`、`compile-invalid` 和 `infrastructure-failed` 分类。
+- 新增 mutation evidence v1 的 source/data/计划哈希、编译器指纹、稳定 mutation ID、计数与有界文本/命中/诊断校验；成功才原子发布，失败、取消、超时、证据超限和输入变化保留上一份成功证据。变异测试作为数据覆盖补充证据，不替代证明、独立 std、期望矩阵或 stress，也不作为 build 硬门禁。
+- 安全升级 `pypdf` 至 `6.15.0`，修复审计发现的 `CVE-2026-71852` 与 `CVE-2026-71870`。
 
 ## [0.6.5] - 2026-08-04
 
