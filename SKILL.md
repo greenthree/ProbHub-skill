@@ -155,7 +155,7 @@ Judge QA 每次都会重新执行 fixture 和内建探针；`--no-cache` 只额�
 probhub mutation L01 --operator comparison-boundary --no-cache
 ```
 
-变异测试是开放世界探测的补充证据，不替代算法证明、独立标程、期望矩阵或 stress。`survived` 只说明当前测试数据没有区分该变异；编译失败和 Judge/Validator/资源故障不得计为击杀。只有主 Agent 审查源码并确认变异等价、不适用或无法表达真实错误后，才可在 `probhub.yaml` 的 `mutation.exclusions` 中按稳定 ID 写入非空理由；不得为了提高分数批量排除幸存变异。排除后必须重跑 mutation，并检查 `report` 的 raw/excluded/effective/selected、out-of-scope、unmatched exclusion 与理由。成功 evidence 原子写入题目 `.probhub`，失败或输入变化不覆盖上一份成功 evidence；该能力不作为 build 硬门禁，也不接入 Legacy、WebUI 或 Checker/Interactor 执行。
+变异测试是开放世界探测的补充证据，不替代算法证明、独立标程、期望矩阵或 stress。`survived` 只说明当前测试数据没有区分该变异；编译失败和 Judge/Validator/资源故障不得计为击杀。Core 使用固定 Tree-sitter C++ 语法树，只定位函数/lambda 复合语句体；解析失败时不得绕过错误或退回正则替换。只有主 Agent 审查源码并确认变异等价、不适用或无法表达真实错误后，才可在 `probhub.yaml` 的 `mutation.exclusions` 中按稳定 ID 写入非空理由；不得为了提高分数批量排除幸存变异。排除后必须重跑 mutation，并检查 `report` 的 raw/excluded/effective/selected、out-of-scope、unmatched exclusion 与理由。成功 evidence 原子写入题目 `.probhub`，失败或输入变化不覆盖上一份成功 evidence；该能力不作为 build 硬门禁，也不接入 Legacy、WebUI 或 Checker/Interactor 执行。
 
 完整语法、产物、退出码和故障处理见 `references/cli.md`。配置或执行差分测试前读取 `references/stress.md`；修改资源限制、解释 OLE 或排查残留进程时读取 `references/process-control.md`。
 

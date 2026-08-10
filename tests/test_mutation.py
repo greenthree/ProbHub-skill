@@ -614,6 +614,71 @@ class MutationFixtureTests(unittest.TestCase):
             profile = mutation_evidence_profile(problem, read_yaml(problem / "probhub.yaml"))
             self.assertEqual(profile["state"], "current", profile)
 
+    def test_legacy_token_fingerprint_is_stale_instead_of_invalid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            problem = root / "M01"
+            passed = {
+                "ok": True,
+                "final": {"code": "all_expectations_met"},
+                "events": [],
+            }
+            with patch("probhub.mutation.judge_problem", return_value=passed):
+                result = mutation_test_problem(
+                    root,
+                    problem,
+                    operators=["comparison-boundary"],
+                    max_mutants=1,
+                )
+            self.assertTrue(result["ok"], result)
+
+            evidence_path = mutation_evidence_path(problem)
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence.pop("locator_version")
+            fingerprint = evidence["builder_fingerprint"]
+            fingerprint.pop("locator_version")
+            fingerprint.pop("parser_versions")
+            fingerprint["parser"] = "mask-cpp-non-code+token-regex"
+            fingerprint_payload = {
+                key: value
+                for key, value in fingerprint.items()
+                if key not in {"available", "digest"}
+            }
+            fingerprint["digest"] = hashlib.sha256(json.dumps(
+                fingerprint_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            profile = mutation_evidence_profile(problem, read_yaml(problem / "probhub.yaml"))
+            self.assertEqual(profile["state"], "stale", profile)
+            self.assertEqual(profile["summary"], {})
+
+    def test_syntax_failure_keeps_previous_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            problem = root / "M01"
+            evidence = mutation_evidence_path(problem)
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            previous = b"previous evidence\n"
+            evidence.write_bytes(previous)
+            (problem / "code/std.cpp").write_text(
+                "int main( { return value < 3; }\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ProbHubError) as raised:
+                mutation_test_problem(root, problem)
+
+            self.assertEqual(raised.exception.code, "mutation_syntax_invalid")
+            self.assertEqual(evidence.read_bytes(), previous)
+
     def test_evidence_publish_failure_keeps_previous_bytes_and_cleans_temporary(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "workspace"

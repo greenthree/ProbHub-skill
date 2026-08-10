@@ -275,7 +275,7 @@ def run_clean_install():
                 "-c",
                 "import importlib.util, json; "
                 "print(json.dumps({name: importlib.util.find_spec(name) is None "
-                "for name in ('flask', 'yaml', 'pypdf')}))",
+                "for name in ('flask', 'yaml', 'pypdf', 'tree_sitter', 'tree_sitter_cpp')}))",
             ],
             cwd=root,
         )
@@ -337,8 +337,13 @@ def run_clean_install():
         required_tools = {"python", "g++", "typst", "node", "npm"}
         if required_tools - set(doctor.get("tools", {})):
             raise CleanInstallError(f"doctor omitted required tools: {doctor!r}")
-        if not all(doctor.get("python_modules", {}).get(name) for name in ("flask", "yaml", "pypdf")):
+        if not all(
+            doctor.get("python_modules", {}).get(name)
+            for name in ("flask", "yaml", "pypdf", "tree_sitter", "tree_sitter_cpp")
+        ):
             raise CleanInstallError(f"doctor omitted required Python modules: {doctor!r}")
+        if not doctor.get("mutation_parser", {}).get("ok"):
+            raise CleanInstallError(f"doctor mutation parser smoke failed: {doctor!r}")
 
         initialized = _run_json(
             [probhub, "--json", "init", workspace, "--title", "Clean Install", "--subtitle", "正式赛", "--author", "ProbHub CI"],
