@@ -12,7 +12,7 @@
 | `boolean-negation` | 删除 `!` 或取反 `if`/`while` 条件 | 检查布尔分支覆盖 |
 | `integer-boundary` | 只对十进制比较边界的常量尝试 `+1`/`-1` | 检查常量边界附近数据 |
 
-源码使用固定的 `tree-sitter==0.26.0` 与 `tree-sitter-cpp==0.23.4` 构造 C++ 语法树，只定位函数或 lambda 复合语句体内的真实表达式。模板尖括号、运算符声明、`<=>`、预处理宏、concept/requires、`case` 标签、`static_assert`、`sizeof` / `decltype` / `noexcept` 等非执行或未求值上下文不会生成候选；注释、字符串和字符字面量也不进入语法候选。解析器能报告的失败会以结构化错误终止，不回退到 Token 猜测；当前 `tree-sitter-cpp` 对 `typeid(type)` 等少数合法语法的支持不完整，此时命令保守失败而不猜测位置。
+源码使用固定的 `tree-sitter==0.26.0` 与 `tree-sitter-cpp==0.23.4` 构造 C++ 语法树，只定位函数或 lambda 复合语句体内的真实表达式。模板尖括号、运算符声明、`<=>`、预处理宏、concept/requires、`case` 标签、`static_assert`、`sizeof` / `decltype` / `noexcept` 等非执行或未求值上下文不会生成候选；注释、字符串和字符字面量也不进入语法候选。native binding 只在独立 worker 中加载；父进程通过版本化 JSON 协议核对解析器版本、源码哈希、位置与数量。worker 默认受 30 秒、512 MiB、4 MiB stdout/stderr 共享预算和 8 个进程限制，并响应 mutation 总 deadline 与取消请求。解析超时、资源超限、native 崩溃、畸形响应或可报告的语法失败都会结构化终止、清理完整进程树，不回退到 Token 猜测，也不覆盖上一份成功 evidence。当前 `tree-sitter-cpp` 对 `typeid(type)` 等少数合法语法的支持不完整，此时命令保守失败而不猜测位置。
 
 每个变异继续使用稳定的 `cpp-token-v1` ID，计划由源码、`tree-sitter-cpp-v1` locator、算子列表、人工排除记录和上限共同决定。仍然有效的旧 ID 保持不变；旧 Token 扫描器产生但语法树不再接受的误报 ID 会成为 `unmatched`，需要作者复核后移除。解析器切换会使旧 evidence 显示 `stale`，不会把旧执行分类与新候选计划混用。
 

@@ -32,6 +32,7 @@ limits:
 - C++ 编译器及其后代；
 - stress 的 Generator、Validator、accepted、brute、Checker 和编译器。
 - Core 与 WebUI 的 pypdf 页数读取、边界扫描和切页 worker。
+- mutation 的 Tree-sitter C++ native parser worker。
 
 所有超时、超限、异常和正常退出路径都会回收直接进程并清理后代。若父进程创建后台子进程后先正常退出，ProbHub 仍会终止遗留后代，避免污染下一测试点、占用文件或持续消耗 CPU。
 
@@ -107,6 +108,8 @@ Flask 多线程请求和 CLI 都不会在父进程中使用 Python `preexec_fn`�
 这一区分对出题自检很重要：官方工具失败必须修复题目基础设施，不能作为错解“被击杀”的证据。
 
 PDF 解析不会在 CLI 主构建进程或 Flask 请求线程内直接运行。Core 通过独立 Python worker 调用固定版本 pypdf，默认限制为 30 秒、512 MiB、1 MiB stdout/stderr 共享预算和 4 个进程；WebUI 页数检查使用 10 秒 deadline，页面渲染继续由受控 Poppler 进程完成。worker 超时、内存/输出/进程超限、损坏 JSON、链接输入、畸形 PDF 或缺失切页输出统一返回 `pdf_processing_failed`；正式 build/typeset 仍在 staging 中处理，失败不会覆盖最后正确产物。
+
+mutation 的 Tree-sitter native binding 同样不进入 CLI 主进程。Core 把 accepted 源码复制到临时请求目录，通过独立 Python worker 返回版本化位置 JSON，默认限制为 30 秒、512 MiB、4 MiB stdout/stderr 共享预算和 8 个进程。父进程严格校验协议版本、解析器版本、源码哈希、位置和数量；超时、取消、native 崩溃、资源超限和畸形响应均清理完整进程树并结构化失败，不覆盖最后成功的 mutation evidence。
 
 这层隔离用于避免损坏 PDF 无界占用本地出题流程，不是面向任意敌意文件的强安全容器。正式运行时依赖闭包由 `requirements.txt` 逐项锁定，仓库 CI 在 Windows 与 Ubuntu 上按精确版本审计，并每周自动复查一次。
 

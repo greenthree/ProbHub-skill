@@ -192,7 +192,7 @@ def validate_pack_inventories(*, dry_run=True, destination=None):
         "probhub/judge_qa.py", "probhub/judge_qa_evidence.py",
         "probhub/judge_qa_runtime.py",
         "probhub/mutation.py", "probhub/mutation_config.py",
-        "probhub/mutation_syntax.py",
+        "probhub/mutation_syntax.py", "probhub/mutation_parser_worker.py",
         "probhub/webui_runtime.py",
         "probhub/assets/fonts/NotoSansCJKsc-Regular.otf",
         "probhub/assets/fonts/OFL.txt",

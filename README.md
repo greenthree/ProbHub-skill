@@ -238,7 +238,7 @@ Agent 完成题目后，应明确报告下列结果：
 
 对 `judge.type: custom` 或 `judge.type: interactive` 的新题，或修改 Checker/Interactor 后，先在 `judge.qa` 中登记题目级 fixture，再运行 `probhub judge-qa <ID> --no-cache`。fixture 每次都会执行，只有编译结果可以缓存；`judge-qa-evidence-v1.json` 是本地有界证据，不会进入 ZIP、PDF 或 Manifest。lint/status 中的 evidence 缺失或过期是体检 warning，但 `seal` 和正式 `build` 不允许已配置题目绕过通过的 Judge QA。
 
-标准题需要补充检查数据是否能区分常见边界错误时，可以运行 `probhub mutation <ID> --no-cache`。它使用固定 C++ 语法树，只在首个 accepted 的函数/lambda 复合语句体中生成少量稳定变异，跳过模板、宏、`case` 标签和未求值语法；成功后写入本地有界 evidence，变异体不会进入题目源码、PDF、ZIP 或 Manifest。确认某个变异等价或不适用后，可在 `probhub.yaml` 的 `mutation.exclusions` 中按稳定 ID 记录理由；`report` 会并列显示原始、排除、有效和实际选择数量，并区分本轮未选择对应算子的记录与已经失效的旧 ID。人工排除和 `survived` 都不是正确性证明，也不会替代证明、独立标程、期望矩阵和 stress。完整限制见 [std 变异测试](references/mutation-testing.md)。
+标准题需要补充检查数据是否能区分常见边界错误时，可以运行 `probhub mutation <ID> --no-cache`。它使用固定 C++ 语法树，只在首个 accepted 的函数/lambda 复合语句体中生成少量稳定变异，跳过模板、宏、`case` 标签和未求值语法；native 解析器在受资源限制的独立进程中运行，解析故障不会覆盖上一份成功 evidence。成功后写入本地有界 evidence，变异体不会进入题目源码、PDF、ZIP 或 Manifest。确认某个变异等价或不适用后，可在 `probhub.yaml` 的 `mutation.exclusions` 中按稳定 ID 记录理由；`report` 会并列显示原始、排除、有效和实际选择数量，并区分本轮未选择对应算子的记录与已经失效的旧 ID。人工排除和 `survived` 都不是正确性证明，也不会替代证明、独立标程、期望矩阵和 stress。完整限制见 [std 变异测试](references/mutation-testing.md)。
 
 ## 并行出题时怎么做
 

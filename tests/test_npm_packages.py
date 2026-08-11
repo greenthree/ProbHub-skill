@@ -54,6 +54,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertIn("probhub/mutation.py", main_files)
         self.assertIn("probhub/mutation_config.py", main_files)
         self.assertIn("probhub/mutation_syntax.py", main_files)
+        self.assertIn("probhub/mutation_parser_worker.py", main_files)
         self.assertIn("references/checker-interactor.md", main_files)
         self.assertIn("references/mutation-testing.md", main_files)
 

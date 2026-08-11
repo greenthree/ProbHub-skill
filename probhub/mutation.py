@@ -9,6 +9,7 @@ local evidence file after a complete successful run.
 from __future__ import annotations
 
 import copy
+import bisect
 import hashlib
 import json
 import os
@@ -38,6 +39,7 @@ from .mutation_config import (
 )
 from .mutation_syntax import (
     MUTATION_LOCATOR_VERSION,
+    MUTATION_PARSER_TIMEOUT_SECONDS,
     locate_cpp_mutation_syntax,
     mutation_parser_identity,
 )
@@ -108,10 +110,15 @@ def mutation_evidence_path(problem_dir):
     return Path(problem_dir) / ".probhub" / MUTATION_EVIDENCE_FILENAME
 
 
-def _line_column(source, offset):
-    line = source.count("\n", 0, offset) + 1
-    previous = source.rfind("\n", 0, offset)
-    return line, offset - previous
+def _line_starts(source):
+    starts = [0]
+    starts.extend(index + 1 for index, character in enumerate(source) if character == "\n")
+    return starts
+
+
+def _line_column(line_starts, offset):
+    line_index = bisect.bisect_right(line_starts, offset) - 1
+    return line_index + 1, offset - line_starts[line_index] + 1
 
 
 def _normalized_mutation_text(value):
@@ -174,12 +181,15 @@ def _mutation_candidates(source, operators, *, locations=None):
     return candidates
 
 
-def _planned_mutations(source, operators, *, locations=None):
+def _planned_mutations(source, operators, *, locations=None, control_check=None):
     candidates = _mutation_candidates(source, operators, locations=locations)
     candidates.sort(key=lambda item: (item[0].start, item[0].end, item[1], item[2]))
+    line_starts = _line_starts(source)
     mutations = []
-    for token, operator, replacement, description in candidates:
-        line, column = _line_column(source, token.start)
+    for index, (token, operator, replacement, description) in enumerate(candidates):
+        if control_check is not None and index % 128 == 0:
+            control_check()
+        line, column = _line_column(line_starts, token.start)
         identity_original = _normalized_mutation_text(token.text)
         identity_replacement = _normalized_mutation_text(replacement)
         identity = hashlib.sha256(
@@ -200,7 +210,23 @@ def _planned_mutations(source, operators, *, locations=None):
     return mutations
 
 
-def plan_mutations(source, *, operators=None, max_mutants=MAX_MUTANTS, exclusions=None):
+def _planning_control_check(cancel_check, deadline):
+    if cancel_check is not None and cancel_check():
+        raise ProbHubError("mutation parser was cancelled", code="mutation_parser_cancelled")
+    if deadline is not None and time.monotonic() >= float(deadline):
+        raise ProbHubError("mutation parser deadline exceeded", code="mutation_parser_timeout")
+
+
+def plan_mutations(
+    source,
+    *,
+    operators=None,
+    max_mutants=MAX_MUTANTS,
+    exclusions=None,
+    parser_timeout=None,
+    parser_cancel_check=None,
+    parser_deadline=None,
+):
     if not isinstance(source, str):
         raise ProbHubError("C++ source must be text", code="mutation_source_invalid")
     selected = list(MUTATION_OPERATORS if operators is None else operators)
@@ -219,12 +245,23 @@ def plan_mutations(source, *, operators=None, max_mutants=MAX_MUTANTS, exclusion
             code="mutation_limit_invalid",
         )
     exclusion_records = normalize_mutation_exclusions(exclusions)
-    locations = locate_cpp_mutation_syntax(source)
-    raw_mutations = _planned_mutations(source, selected, locations=locations)
+    control_check = lambda: _planning_control_check(parser_cancel_check, parser_deadline)
+    locations = locate_cpp_mutation_syntax(
+        source,
+        timeout=parser_timeout,
+        cancel_check=parser_cancel_check,
+        deadline=parser_deadline,
+    )
+    control_check()
+    raw_mutations = _planned_mutations(
+        source, selected, locations=locations, control_check=control_check
+    )
     all_mutations = (
         raw_mutations
         if selected == list(MUTATION_OPERATORS)
-        else _planned_mutations(source, MUTATION_OPERATORS, locations=locations)
+        else _planned_mutations(
+            source, MUTATION_OPERATORS, locations=locations, control_check=control_check
+        )
     )
     exclusion_ids = {item["id"] for item in exclusion_records}
     raw_ids = {item.id for item in raw_mutations}
@@ -442,12 +479,31 @@ def mutation_test_problem(
     source_hash = compute_source_hash(problem_dir, config)
     data_hash = compute_data_hash(problem_dir, config)
     exclusions = load_mutation_exclusions(config)
-    plan = plan_mutations(
-        source,
-        operators=operators,
-        max_mutants=max_mutants,
-        exclusions=exclusions,
-    )
+    _control_check(cancel_check, deadline)
+    parser_remaining = None if deadline is None else float(deadline) - time.monotonic()
+    parser_timeout = MUTATION_PARSER_TIMEOUT_SECONDS
+    parser_uses_deadline = False
+    if parser_remaining is not None:
+        if parser_remaining <= 0:
+            raise ProbHubError("mutation testing deadline exceeded", code="mutation_timeout")
+        parser_uses_deadline = parser_remaining < MUTATION_PARSER_TIMEOUT_SECONDS
+        parser_timeout = max(0.001, min(MUTATION_PARSER_TIMEOUT_SECONDS, parser_remaining))
+    try:
+        plan = plan_mutations(
+            source,
+            operators=operators,
+            max_mutants=max_mutants,
+            exclusions=exclusions,
+            parser_timeout=parser_timeout,
+            parser_cancel_check=cancel_check,
+            parser_deadline=deadline,
+        )
+    except ProbHubError as exc:
+        if exc.code == "mutation_parser_cancelled":
+            raise ProbHubError("mutation testing was cancelled", code="mutation_cancelled") from exc
+        if exc.code == "mutation_parser_timeout" and parser_uses_deadline:
+            raise ProbHubError("mutation testing deadline exceeded", code="mutation_timeout") from exc
+        raise
     builder_fingerprint = copy.deepcopy(_compiler_fingerprint())
     if not builder_fingerprint.get("available"):
         raise ProbHubError(
