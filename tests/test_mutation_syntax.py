@@ -354,13 +354,72 @@ class MutationSyntaxTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "mutation_syntax_invalid")
         self.assertIn("line", str(raised.exception))
 
-    def test_unsupported_typeid_type_form_fails_closed(self):
-        with self.assertRaises(ProbHubError) as raised:
-            plan_mutations(
-                "#include <typeinfo>\n"
-                "int f(int x) { return typeid(x < 3) == typeid(bool); }\n"
-            )
-        self.assertEqual(raised.exception.code, "mutation_syntax_invalid")
+    def test_typeid_type_forms_are_recovered_without_mutating_unevaluated_content(self):
+        type_ids = (
+            "bool",
+            "const bool",
+            "bool*",
+            "bool[3]",
+            "unsigned long long",
+            "struct S",
+            "struct 类型",
+            "decltype(x < 3)",
+            "void(*)(int)",
+        )
+        for type_id in type_ids:
+            with self.subTest(type_id=type_id):
+                source = (
+                    "#include <typeinfo>\n"
+                    "struct S {};\n"
+                    "int f(int x) {\n"
+                    f"  (void)typeid({type_id});\n"
+                    "  return x < 4;\n"
+                    "}\n"
+                )
+                records = mutation_records(plan_mutations(source))
+                self.assertEqual(
+                    [(item["line"], item["column"], item["operator"], item["original"]) for item in records],
+                    [
+                        (5, 12, "comparison-boundary", "<"),
+                        (5, 14, "integer-boundary", "4"),
+                        (5, 14, "integer-boundary", "4"),
+                    ],
+                )
+
+    def test_typeid_type_recovery_preserves_existing_runtime_mutation_ids(self):
+        expression_source = (
+            "#include <typeinfo>\n"
+            "int f(int x) {\n"
+            "  (void)typeid(x);\n"
+            "  return x <= 3;\n"
+            "}\n"
+        )
+        type_source = expression_source.replace("typeid(x)", "typeid(int)")
+        expression_ids = [item.id for item in plan_mutations(expression_source)["mutations"]]
+        type_ids = [item.id for item in plan_mutations(type_source)["mutations"]]
+        self.assertEqual(type_ids, expression_ids)
+
+    def test_typeid_type_recovery_keeps_only_the_outer_runtime_comparison(self):
+        records = mutation_records(plan_mutations(
+            "#include <typeinfo>\n"
+            "int f(int x) { return typeid(x < 3) == typeid(bool); }\n"
+        ))
+        self.assertEqual(
+            [(item["line"], item["column"], item["operator"], item["original"]) for item in records],
+            [(2, 37, "comparison-boundary", "==")],
+        )
+
+    def test_typeid_type_recovery_rejects_malformed_or_unrelated_errors(self):
+        sources = (
+            "int f(int x) { (void)typeid(bool +); return x < 4; }\n",
+            "int f(int x) { (void)typeid(bool; int y); return x < 4; }\n",
+            "int f(int x) { (void)typeid(bool); return x < ; }\n",
+            "int f(int x) { (void)typeid(bool; return x < 4; }\n",
+        )
+        for source in sources:
+            with self.subTest(source=source), self.assertRaises(ProbHubError) as raised:
+                plan_mutations(source)
+            self.assertEqual(raised.exception.code, "mutation_syntax_invalid")
 
     def test_missing_or_mismatched_parser_is_structured(self):
         with patch(
