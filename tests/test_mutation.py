@@ -679,6 +679,39 @@ class MutationFixtureTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "mutation_syntax_invalid")
             self.assertEqual(evidence.read_bytes(), previous)
 
+    def test_parser_cancel_and_deadline_keep_previous_evidence(self):
+        for parser_code, expected_code in (
+            ("mutation_parser_cancelled", "mutation_cancelled"),
+            ("mutation_parser_timeout", "mutation_timeout"),
+        ):
+            with self.subTest(parser_code=parser_code), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp) / "workspace"
+                shutil.copytree(FIXTURE.parent, root)
+                problem = root / "M01"
+                evidence = mutation_evidence_path(problem)
+                evidence.parent.mkdir(parents=True, exist_ok=True)
+                previous = b"previous evidence\n"
+                evidence.write_bytes(previous)
+                cancel_check = lambda: False
+                deadline = time.monotonic() + 0.5
+                with patch(
+                    "probhub.mutation.locate_cpp_mutation_syntax",
+                    side_effect=ProbHubError("parser stopped", code=parser_code),
+                ) as locate:
+                    with self.assertRaises(ProbHubError) as raised:
+                        mutation_test_problem(
+                            root,
+                            problem,
+                            cancel_check=cancel_check,
+                            deadline=deadline,
+                        )
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertEqual(evidence.read_bytes(), previous)
+                self.assertIs(locate.call_args.kwargs["cancel_check"], cancel_check)
+                self.assertEqual(locate.call_args.kwargs["deadline"], deadline)
+                self.assertGreater(locate.call_args.kwargs["timeout"], 0)
+                self.assertLessEqual(locate.call_args.kwargs["timeout"], 0.5)
+
     def test_evidence_publish_failure_keeps_previous_bytes_and_cleans_temporary(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "workspace"

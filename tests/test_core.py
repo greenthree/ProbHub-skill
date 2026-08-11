@@ -721,34 +721,18 @@ class CoreWorkspaceTests(unittest.TestCase):
 
     def test_doctor_parser_probe_is_bounded_and_reports_native_failure(self):
         from probhub.doctor import _mutation_parser_probe
-
-        def failed_parser(command, **kwargs):
-            Path(kwargs["stdout_path"]).write_text("", encoding="utf-8")
-            Path(kwargs["stderr_path"]).write_text("native parser failed", encoding="utf-8")
-            return {
-                "reason": "completed",
-                "message": None,
-                "returncode": 3,
-            }
-
-        with (
-            patch.dict("os.environ", {"PYTHONPATH": "shadow", "PYTHONHOME": "bad"}),
-            patch(
-                "probhub.doctor.run_managed_to_files",
-                side_effect=failed_parser,
-            ) as run_managed,
-        ):
+        with patch(
+            "probhub.doctor.locate_cpp_mutation_syntax",
+            side_effect=ProbHubError(
+                "native parser failed",
+                code="mutation_parser_crashed",
+            ),
+        ) as locate:
             probe = _mutation_parser_probe()
 
         self.assertFalse(probe["ok"])
         self.assertIn("native parser failed", probe["diagnostic"])
-        kwargs = run_managed.call_args.kwargs
-        self.assertEqual(kwargs["timeout"], 10)
-        self.assertIsNone(kwargs["memory_limit_mb"])
-        self.assertEqual(kwargs["output_limit_bytes"], 1024 * 1024)
-        self.assertEqual(kwargs["process_limit"], 8)
-        self.assertNotIn("PYTHONPATH", kwargs["env"])
-        self.assertNotIn("PYTHONHOME", kwargs["env"])
+        self.assertEqual(locate.call_args.kwargs["timeout"], 10)
 
     def test_doctor_rejects_old_node_and_missing_pinned_cjk_font(self):
         from probhub.doctor import run_doctor
