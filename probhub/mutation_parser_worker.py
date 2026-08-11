@@ -163,38 +163,153 @@ class _SourceOffsets:
         }
 
 
-def _parse_cpp(source_bytes):
+def _new_cpp_parser():
     try:
         from tree_sitter import Parser
         from tree_sitter import Language
         import tree_sitter_cpp
 
         language = Language(tree_sitter_cpp.language())
-        tree = Parser(language).parse(source_bytes)
+        return Parser(language)
     except ImportError as exc:
         raise RuntimeError(f"mutation parser dependencies are unavailable: {exc}") from exc
     except (TypeError, ValueError, RuntimeError) as exc:
         raise RuntimeError(f"C++ mutation parser failed: {exc}") from exc
+
+
+def _parse_tree(parser, source_bytes):
+    try:
+        tree = parser.parse(source_bytes)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise RuntimeError(f"C++ mutation parser failed: {exc}") from exc
     if tree is None or tree.root_node is None:
         raise RuntimeError("C++ mutation parser returned no syntax tree")
-    if tree.root_node.has_error:
-        error = _first_syntax_error(tree.root_node)
-        point = error.start_point if error is not None else tree.root_node.start_point
-        raise SyntaxError(
-            "accepted C++ source contains syntax the mutation parser cannot locate safely "
-            f"at line {point.row + 1}, byte column {point.column + 1}"
-        )
     return tree
 
 
-def _first_syntax_error(node):
+def _syntax_issues(node):
+    issues = []
     stack = [node]
     while stack:
         current = stack.pop()
         if current.type == "ERROR" or current.is_missing:
-            return current
+            issues.append(current)
         stack.extend(reversed(current.children))
-    return None
+    return issues
+
+
+def _raise_syntax_error(root):
+    issues = _syntax_issues(root)
+    error = issues[0] if issues else root
+    point = error.start_point
+    raise SyntaxError(
+        "accepted C++ source contains syntax the mutation parser cannot locate safely "
+        f"at line {point.row + 1}, byte column {point.column + 1}"
+    )
+
+
+def _enclosing_typeid_argument(issue, source_bytes):
+    argument = issue
+    while argument is not None:
+        if argument.type == "argument_list" and argument.parent is not None:
+            call = argument.parent
+            if call.type == "call_expression":
+                function = call.child_by_field_name("function")
+                arguments = call.child_by_field_name("arguments")
+                if (
+                    function is not None
+                    and function.type == "identifier"
+                    and arguments is not None
+                    and arguments.id == argument.id
+                    and source_bytes[function.start_byte:function.end_byte] == b"typeid"
+                ):
+                    break
+        argument = argument.parent
+    if argument is None:
+        return None
+    children = argument.children
+    if len(children) < 2:
+        return None
+    opening = children[0]
+    closing = children[-1]
+    if (
+        opening.type != "("
+        or closing.type != ")"
+        or opening.is_missing
+        or closing.is_missing
+        or opening.start_byte != argument.start_byte
+        or closing.end_byte != argument.end_byte
+        or source_bytes[opening.start_byte:opening.end_byte] != b"("
+        or source_bytes[closing.start_byte:closing.end_byte] != b")"
+    ):
+        return None
+    return opening.end_byte, closing.start_byte
+
+
+def _valid_type_id(parser, type_id):
+    # The pinned grammar parses aliases correctly even when it rejects the
+    # same type-id inside typeid(...), so use a single-declaration probe.
+    prefix = b"using __probhub_type = "
+    probe = prefix + type_id + b";"
+    tree = _parse_tree(parser, probe)
+    if tree.root_node.has_error:
+        return False
+    meaningful = [
+        child for child in tree.root_node.named_children
+        if child.type != "comment"
+    ]
+    if len(meaningful) != 1 or meaningful[0].type != "alias_declaration":
+        return False
+    declaration = meaningful[0]
+    name = declaration.child_by_field_name("name")
+    descriptor = declaration.child_by_field_name("type")
+    return (
+        declaration.start_byte == 0
+        and declaration.end_byte == len(probe)
+        and name is not None
+        and probe[name.start_byte:name.end_byte] == b"__probhub_type"
+        and descriptor is not None
+        and len(prefix) <= descriptor.start_byte
+        and descriptor.start_byte < descriptor.end_byte
+        and descriptor.end_byte <= len(prefix) + len(type_id)
+    )
+
+
+def _recover_typeid_type_errors(parser, tree, source_bytes):
+    spans = set()
+    for issue in _syntax_issues(tree.root_node):
+        span = _enclosing_typeid_argument(issue, source_bytes)
+        if span is None or not _valid_type_id(parser, source_bytes[span[0]:span[1]]):
+            return None
+        spans.add(span)
+    if not spans:
+        return None
+
+    # Preserve every byte offset and line break while replacing only the
+    # verified type-id with an expression the grammar accepts.
+    repaired = bytearray(source_bytes)
+    for start, end in sorted(spans):
+        marker_written = False
+        for index in range(start, end):
+            if repaired[index] in {10, 13}:
+                continue
+            repaired[index] = ord("0") if not marker_written else ord(" ")
+            marker_written = True
+        if not marker_written:
+            return None
+    recovered = _parse_tree(parser, bytes(repaired))
+    return recovered if not recovered.root_node.has_error else None
+
+
+def _parse_cpp(source_bytes):
+    parser = _new_cpp_parser()
+    tree = _parse_tree(parser, source_bytes)
+    if not tree.root_node.has_error:
+        return tree
+    recovered = _recover_typeid_type_errors(parser, tree, source_bytes)
+    if recovered is None:
+        _raise_syntax_error(tree.root_node)
+    return recovered
 
 
 def _iter_nodes(root):
