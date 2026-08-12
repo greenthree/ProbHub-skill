@@ -165,6 +165,22 @@ class MutationPlanningTests(unittest.TestCase):
             "code/mutation.cpp",
         )
         self.assertEqual(infrastructure[0], "infrastructure-failed")
+        for code in ("judge_memory_limit", "judge_process_limit"):
+            resource_failure = _classify_judge_result(
+                {
+                    "ok": False,
+                    "final": {"code": code},
+                    "events": [{
+                        "type": "case",
+                        "program": "code/mutation.cpp",
+                        "case": "secret/boundary",
+                        "status": "WA",
+                    }],
+                },
+                "code/mutation.cpp",
+            )
+            self.assertEqual(resource_failure[0], "infrastructure-failed")
+            self.assertEqual(resource_failure[2], code)
 
 
 class MutationFixtureTests(unittest.TestCase):
@@ -519,6 +535,48 @@ class MutationFixtureTests(unittest.TestCase):
                 "compile-invalid",
             )
 
+    def test_configured_source_path_survives_resolved_path_alias(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            problem = root / "M01"
+            alias_source = root.parent / "resolved-alias.cpp"
+            alias_source.write_bytes((problem / "code/std.cpp").read_bytes())
+            workers = []
+
+            def inspect_worker(_execution_root, worker, **_kwargs):
+                worker = Path(worker)
+                workers.append(worker)
+                config = read_yaml(worker / "probhub.yaml")
+                self.assertEqual(
+                    config["solutions"]["accepted"][0]["file"],
+                    "code/std.cpp",
+                )
+                self.assertTrue((worker / "code/std.cpp").is_file())
+                return {
+                    "ok": True,
+                    "final": {"code": "all_expectations_met"},
+                    "events": [],
+                }
+
+            with patch(
+                "probhub.mutation.resolve_solution_source",
+                return_value=(alias_source, None, None),
+            ), patch(
+                "probhub.mutation.judge_problem",
+                side_effect=inspect_worker,
+            ):
+                result = mutation_test_problem(
+                    root,
+                    problem,
+                    operators=["comparison-boundary"],
+                    max_mutants=1,
+                )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(len(workers), 1)
+            self.assertEqual(result["evidence"]["source_path"], "code/std.cpp")
+
     def test_single_snapshot_releases_build_lock_and_isolates_mutant_workers(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "workspace"
@@ -761,6 +819,45 @@ class MutationFixtureTests(unittest.TestCase):
                 result["evidence"]["mutations"][0]["classification"],
                 "infrastructure-failed",
             )
+
+    def test_worker_preparation_failure_is_structured_and_keeps_previous_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            problem = root / "M01"
+            evidence = mutation_evidence_path(problem)
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            previous = b"previous evidence\n"
+            evidence.write_bytes(previous)
+            original_copytree = shutil.copytree
+
+            def fail_worker_copy(*args, **kwargs):
+                target = Path(args[1])
+                if target.name == "problem" and target.parent.name == "execution":
+                    raise OSError("worker copy failed")
+                return original_copytree(*args, **kwargs)
+
+            with patch(
+                "probhub.mutation.shutil.copytree",
+                side_effect=fail_worker_copy,
+            ), patch("probhub.mutation.judge_problem") as execute:
+                result = mutation_test_problem(
+                    root,
+                    problem,
+                    operators=["comparison-boundary"],
+                    max_mutants=1,
+                )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["status"], "infrastructure-failed")
+            mutation = result["evidence"]["mutations"][0]
+            self.assertEqual(mutation["classification"], "infrastructure-failed")
+            self.assertEqual(
+                mutation["diagnostic"]["code"],
+                "mutation_worker_prepare_failed",
+            )
+            execute.assert_not_called()
+            self.assertEqual(evidence.read_bytes(), previous)
 
     def test_remaining_deadline_is_forwarded_to_each_judge(self):
         with tempfile.TemporaryDirectory() as temp:

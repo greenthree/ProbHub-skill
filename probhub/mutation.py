@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import __version__
 from .build_lock import workspace_build_lock, workspace_file_lock
@@ -504,7 +504,8 @@ def _classify_judge_result(result, mutant_name):
             })
     code = final.get("code")
     if infrastructure or code in {
-        "judge_timeout", "judge_output_limit", "judge_failed", "validator_failed",
+        "judge_timeout", "judge_output_limit", "judge_memory_limit",
+        "judge_process_limit", "judge_failed", "validator_failed",
         "checker_compile_failed", "interactor_compile_failed", "checker_missing",
         "interactor_missing",
     }:
@@ -643,52 +644,65 @@ def mutation_test_problem(
                 code="mutation_compiler_unavailable",
             )
         execution_profile = _mutation_execution_profile(config)
-        source_relative = source_path.relative_to(baseline)
+        # The strict source fence above already validated the configured path.
+        # Reuse that logical path instead of deriving it from resolved physical
+        # paths, which may mix Windows long and 8.3 aliases for the same tree.
+        source_relative = Path(*PurePosixPath(
+            str(accepted[0]["file"]).replace("\\", "/")
+        ).parts)
         mutant_name = source_relative.as_posix()
         execution_root.mkdir()
 
         for mutation in plan["mutations"]:
             _control_check(cancel_check, deadline)
-            if worker.exists():
-                shutil.rmtree(worker)
-            shutil.copytree(baseline, worker)
-            source_in_worker = worker / source_relative
-            source_in_worker.write_text(
-                apply_mutation(source, mutation),
-                encoding="utf-8",
-                newline="",
-            )
-            config_copy = copy.deepcopy(config)
-            config_copy["solutions"] = {
-                "accepted": [{
-                    "file": mutant_name,
-                    "expected": {"status": "AC", "all": True},
-                }],
-                "brute": [],
-                "wrong": [],
-            }
-            write_yaml(worker / "probhub.yaml", config_copy)
-            remaining = None if deadline is None else float(deadline) - time.monotonic()
-            judge_timeout = execution_profile["mutant_timeout_seconds"]
-            if remaining is not None:
-                if remaining <= 0:
-                    raise ProbHubError(
-                        "mutation testing deadline exceeded",
-                        code="mutation_timeout",
-                    )
-                judge_timeout = max(0.001, min(judge_timeout, remaining))
-
-            def judge_cancel_check():
-                return bool(
-                    (
-                        cancellation_requested()
-                        if cancel_check is None
-                        else cancel_check()
-                    )
-                    or (deadline is not None and time.monotonic() >= float(deadline))
-                )
-
+            phase = "prepare"
             try:
+                if worker.exists():
+                    shutil.rmtree(worker)
+                shutil.copytree(baseline, worker)
+                source_in_worker = worker / source_relative
+                source_in_worker.write_text(
+                    apply_mutation(source, mutation),
+                    encoding="utf-8",
+                    newline="",
+                )
+                config_copy = copy.deepcopy(config)
+                config_copy["solutions"] = {
+                    "accepted": [{
+                        "file": mutant_name,
+                        "expected": {"status": "AC", "all": True},
+                    }],
+                    "brute": [],
+                    "wrong": [],
+                }
+                write_yaml(worker / "probhub.yaml", config_copy)
+                remaining = (
+                    None if deadline is None
+                    else float(deadline) - time.monotonic()
+                )
+                judge_timeout = execution_profile["mutant_timeout_seconds"]
+                if remaining is not None:
+                    if remaining <= 0:
+                        raise ProbHubError(
+                            "mutation testing deadline exceeded",
+                            code="mutation_timeout",
+                        )
+                    judge_timeout = max(0.001, min(judge_timeout, remaining))
+
+                def judge_cancel_check():
+                    return bool(
+                        (
+                            cancellation_requested()
+                            if cancel_check is None
+                            else cancel_check()
+                        )
+                        or (
+                            deadline is not None
+                            and time.monotonic() >= float(deadline)
+                        )
+                    )
+
+                phase = "judge"
                 judged = judge_problem(
                     execution_root,
                     worker,
@@ -722,11 +736,23 @@ def mutation_test_problem(
                 if exc.code in {"mutation_cancelled", "mutation_timeout"}:
                     raise
                 classification, hits, diagnostic = (
-                    "infrastructure-failed", [], str(exc)
+                    "infrastructure-failed",
+                    [],
+                    exc.code or (
+                        "mutation_worker_prepare_failed"
+                        if phase == "prepare"
+                        else "mutation_judge_failed"
+                    ),
                 )
-            except (OSError, ValueError, TypeError) as exc:
+            except (OSError, UnicodeError, ValueError, TypeError):
                 classification, hits, diagnostic = (
-                    "infrastructure-failed", [], str(exc)
+                    "infrastructure-failed",
+                    [],
+                    (
+                        "mutation_worker_prepare_failed"
+                        if phase == "prepare"
+                        else "mutation_judge_failed"
+                    ),
                 )
 
             bounded_hits = [{
