@@ -34,6 +34,9 @@ def _invoke_local_judge(
     use_cache,
     timeout,
     output_limit_bytes,
+    memory_limit_mb=None,
+    process_limit=None,
+    cancel_check=None,
     extra_args=(),
 ):
     root = Path(root)
@@ -58,11 +61,12 @@ def _invoke_local_judge(
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 timeout=timeout,
-                memory_limit_mb=None,
+                memory_limit_mb=memory_limit_mb,
                 output_limit_bytes=output_limit_bytes,
-                process_limit=None,
+                process_limit=process_limit,
                 cwd=root,
                 env=env,
+                cancel_check=cancel_check,
             )
         except OSError as error:
             raise ProbHubError(
@@ -101,7 +105,16 @@ def _supervisor_failure(run, stderr_text):
     }
 
 
-def judge_problem(root, problem_dir, use_cache=True, timeout=JUDGE_TIMEOUT_SECONDS, output_limit_bytes=JUDGE_OUTPUT_LIMIT_BYTES):
+def judge_problem(
+    root,
+    problem_dir,
+    use_cache=True,
+    timeout=JUDGE_TIMEOUT_SECONDS,
+    output_limit_bytes=JUDGE_OUTPUT_LIMIT_BYTES,
+    memory_limit_mb=None,
+    process_limit=None,
+    cancel_check=None,
+):
     root = Path(root)
     problem_dir = Path(problem_dir)
     initial_identity = None
@@ -119,6 +132,9 @@ def judge_problem(root, problem_dir, use_cache=True, timeout=JUDGE_TIMEOUT_SECON
         use_cache=use_cache,
         timeout=timeout,
         output_limit_bytes=output_limit_bytes,
+        memory_limit_mb=memory_limit_mb,
+        process_limit=process_limit,
+        cancel_check=cancel_check,
     )
     cache = next((event for event in reversed(events) if event.get("type") == "cache"), {})
     summaries = [event for event in events if event.get("type") == "summary"]
