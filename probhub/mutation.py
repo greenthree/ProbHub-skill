@@ -12,20 +12,21 @@ import copy
 import bisect
 import hashlib
 import json
-import os
+import math
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import __version__
 from .build_lock import workspace_build_lock, workspace_file_lock
 from .errors import ProbHubError
 from .io import atomic_write_json, read_yaml, write_yaml
-from .judging import JUDGE_TIMEOUT_SECONDS, judge_problem
+from .judging import JUDGE_OUTPUT_LIMIT_BYTES, JUDGE_TIMEOUT_SECONDS, judge_problem
 from .linting import compute_data_hash, compute_source_hash
 from .mutation_config import (
     MAX_MUTATION_EXCLUSION_ID_BYTES,
@@ -43,11 +44,18 @@ from .mutation_syntax import (
     locate_cpp_mutation_syntax,
     mutation_parser_identity,
 )
-from .process_control import run_managed_to_files
+from .problem_snapshot import copy_problem_consistently
+from .process_control import (
+    ProcessCancelled,
+    cancellation_requested,
+    run_managed_to_files,
+)
 from .solutions import (
     normalize_solution_entries,
     resolve_solution_source,
 )
+from .transactions import recover_workspace_transactions
+from .workspace import load_workspace, problem_entries, resolve_problem_dir
 
 
 MUTATION_EVIDENCE_SCHEMA_VERSION = 2
@@ -59,12 +67,29 @@ MAX_MUTATION_TEXT_BYTES = 512
 MAX_HIT_CASES = 16
 MAX_HIT_FIELD_BYTES = 256
 MAX_MUTATION_EVIDENCE_BYTES = 4 * 1024 * 1024
-_MUTATION_CLASSIFICATIONS = frozenset({
+MUTATION_EXECUTION_PROFILE_SCHEMA_VERSION = 1
+MUTATION_SCHEDULER = "serial-v1"
+MUTATION_SNAPSHOT_MODEL = "immutable-problem-v1"
+MUTATION_JUDGE_MEMORY_BASE_MB = 4096
+MUTATION_JUDGE_MEMORY_HEADROOM_MB = 2048
+MUTATION_JUDGE_PROCESS_BASE = 64
+MUTATION_JUDGE_PROCESS_HEADROOM = 16
+_MUTATION_EXECUTION_PROFILE_KEYS = frozenset({
+    "schema_version",
+    "scheduler",
+    "snapshot",
+    "mutant_timeout_seconds",
+    "judge_output_limit_bytes",
+    "judge_memory_limit_mb",
+    "judge_process_limit",
+})
+_MUTATION_CLASSIFICATION_ORDER = (
     "killed",
     "survived",
     "compile-invalid",
     "infrastructure-failed",
-})
+)
+_MUTATION_CLASSIFICATIONS = frozenset(_MUTATION_CLASSIFICATION_ORDER)
 _MUTATION_EXCLUSION_STATUSES = frozenset({"matched", "out-of-scope", "unmatched"})
 
 
@@ -319,26 +344,82 @@ def apply_mutation(source, mutation):
     return source[:mutation.start] + mutation.replacement + source[mutation.end:]
 
 
-def _copy_snapshot(source, target):
-    source = Path(source).resolve()
-    target = Path(target).resolve()
-    target.mkdir(parents=True, exist_ok=True)
-    for current, directories, files in os.walk(source, topdown=True, followlinks=False):
-        current_path = Path(current)
-        directories[:] = [
-            name for name in directories
-            if name not in {".probhub", "__pycache__", "output_validators"}
-            and not (current_path / name).is_symlink()
-        ]
-        relative = current_path.relative_to(source)
-        destination = target / relative
-        destination.mkdir(parents=True, exist_ok=True)
-        for name in files:
-            source_file = current_path / name
-            if source_file.is_symlink():
-                continue
-            target_file = destination / name
-            target_file.write_bytes(source_file.read_bytes())
+def _mutation_execution_profile(config):
+    limits = config.get("limits") if isinstance(config.get("limits"), dict) else {}
+    problem_memory = limits.get("memory", 256)
+    if not isinstance(problem_memory, int) or isinstance(problem_memory, bool) or problem_memory <= 0:
+        problem_memory = 256
+    problem_processes = limits.get("processes", 32)
+    if not isinstance(problem_processes, int) or isinstance(problem_processes, bool) or problem_processes <= 0:
+        problem_processes = 32
+    return {
+        "schema_version": MUTATION_EXECUTION_PROFILE_SCHEMA_VERSION,
+        "scheduler": MUTATION_SCHEDULER,
+        "snapshot": MUTATION_SNAPSHOT_MODEL,
+        "mutant_timeout_seconds": JUDGE_TIMEOUT_SECONDS,
+        "judge_output_limit_bytes": JUDGE_OUTPUT_LIMIT_BYTES,
+        "judge_memory_limit_mb": max(
+            MUTATION_JUDGE_MEMORY_BASE_MB,
+            2 * problem_memory + MUTATION_JUDGE_MEMORY_HEADROOM_MB,
+        ),
+        "judge_process_limit": max(
+            MUTATION_JUDGE_PROCESS_BASE,
+            2 * problem_processes + MUTATION_JUDGE_PROCESS_HEADROOM,
+        ),
+    }
+
+
+def _valid_mutation_execution_profile(value):
+    if not isinstance(value, dict) or set(value) != _MUTATION_EXECUTION_PROFILE_KEYS:
+        return False
+    if (
+        not isinstance(value["schema_version"], int)
+        or isinstance(value["schema_version"], bool)
+        or value["schema_version"] != MUTATION_EXECUTION_PROFILE_SCHEMA_VERSION
+        or value["scheduler"] != MUTATION_SCHEDULER
+        or value["snapshot"] != MUTATION_SNAPSHOT_MODEL
+    ):
+        return False
+    timeout = value["mutant_timeout_seconds"]
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        return False
+    return all(
+        isinstance(value[key], int)
+        and not isinstance(value[key], bool)
+        and value[key] > 0
+        for key in (
+            "judge_output_limit_bytes",
+            "judge_memory_limit_mb",
+            "judge_process_limit",
+        )
+    )
+
+
+def _workspace_entry_for_problem(root, workspace, problem_dir):
+    matches = [
+        entry for entry in problem_entries(workspace)
+        if resolve_problem_dir(root, entry) == problem_dir
+    ]
+    if len(matches) != 1:
+        raise ProbHubError(
+            f"mutation problem is not a unique workspace entry: {problem_dir}",
+            code="mutation_problem_invalid",
+        )
+    return matches[0]
+
+
+def _live_identity(problem_dir):
+    config = read_yaml(Path(problem_dir) / "probhub.yaml")
+    return (
+        config,
+        compute_source_hash(problem_dir, config),
+        compute_data_hash(problem_dir, config),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -423,7 +504,8 @@ def _classify_judge_result(result, mutant_name):
             })
     code = final.get("code")
     if infrastructure or code in {
-        "judge_timeout", "judge_output_limit", "judge_failed", "validator_failed",
+        "judge_timeout", "judge_output_limit", "judge_memory_limit",
+        "judge_process_limit", "judge_failed", "validator_failed",
         "checker_compile_failed", "interactor_compile_failed", "checker_missing",
         "interactor_missing",
     }:
@@ -434,7 +516,8 @@ def _classify_judge_result(result, mutant_name):
 
 
 def _control_check(cancel_check, deadline):
-    if cancel_check is not None and cancel_check():
+    check = cancellation_requested if cancel_check is None else cancel_check
+    if check():
         raise ProbHubError("mutation testing was cancelled", code="mutation_cancelled")
     if deadline is not None and time.monotonic() >= float(deadline):
         raise ProbHubError("mutation testing deadline exceeded", code="mutation_timeout")
@@ -452,164 +535,251 @@ def mutation_test_problem(
 ):
     root = Path(root).resolve()
     problem_dir = Path(problem_dir).resolve()
-    config = read_yaml(problem_dir / "probhub.yaml")
-    judge_type = str((config.get("judge") or {}).get("type", "standard")).strip().lower()
-    if judge_type not in {"standard", ""}:
-        raise ProbHubError(
-            "mutation testing currently supports judge.type standard only",
-            code="mutation_standard_required",
-        )
-    accepted = normalize_solution_entries(config)["std"]
-    if not accepted or not accepted[0].get("file"):
-        raise ProbHubError("mutation testing requires a configured accepted solution", code="mutation_source_missing")
-    source_path, source_error, source_message = resolve_solution_source(
-        problem_dir, accepted[0]["file"]
-    )
-    if source_path is None:
-        raise ProbHubError(
-            f"accepted source is invalid: {source_message or source_error}",
-            code="mutation_source_invalid",
-        )
-    if source_path.suffix.lower() != ".cpp":
-        raise ProbHubError("mutation testing currently supports C++ accepted solutions only", code="mutation_cpp_required")
-    try:
-        source = source_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise ProbHubError(f"cannot read accepted source: {source_path}: {exc}", code="mutation_source_invalid") from exc
-    source_hash = compute_source_hash(problem_dir, config)
-    data_hash = compute_data_hash(problem_dir, config)
-    exclusions = load_mutation_exclusions(config)
-    _control_check(cancel_check, deadline)
-    parser_remaining = None if deadline is None else float(deadline) - time.monotonic()
-    parser_timeout = MUTATION_PARSER_TIMEOUT_SECONDS
-    parser_uses_deadline = False
-    if parser_remaining is not None:
-        if parser_remaining <= 0:
-            raise ProbHubError("mutation testing deadline exceeded", code="mutation_timeout")
-        parser_uses_deadline = parser_remaining < MUTATION_PARSER_TIMEOUT_SECONDS
-        parser_timeout = max(0.001, min(MUTATION_PARSER_TIMEOUT_SECONDS, parser_remaining))
-    try:
-        plan = plan_mutations(
-            source,
-            operators=operators,
-            max_mutants=max_mutants,
-            exclusions=exclusions,
-            parser_timeout=parser_timeout,
-            parser_cancel_check=cancel_check,
-            parser_deadline=deadline,
-        )
-    except ProbHubError as exc:
-        if exc.code == "mutation_parser_cancelled":
-            raise ProbHubError("mutation testing was cancelled", code="mutation_cancelled") from exc
-        if exc.code == "mutation_parser_timeout" and parser_uses_deadline:
-            raise ProbHubError("mutation testing deadline exceeded", code="mutation_timeout") from exc
-        raise
-    builder_fingerprint = copy.deepcopy(_compiler_fingerprint())
-    if not builder_fingerprint.get("available"):
-        raise ProbHubError(
-            "mutation testing requires an available g++ C++17 compiler",
-            code="mutation_compiler_unavailable",
-        )
-    results = []
-    source_relative = source_path.relative_to(problem_dir)
-    mutant_name = source_relative.as_posix()
     evidence_path = mutation_evidence_path(problem_dir)
+    results = []
+    status = "infrastructure-failed"
+    evidence = None
+
     with workspace_file_lock(
         problem_dir,
         MUTATION_LOCK_FILENAME,
         busy_code="mutation_busy",
         busy_message="another mutation testing run is already running",
         no_follow=True,
-    ), workspace_build_lock(root):
+    ), tempfile.TemporaryDirectory(prefix="probhub-mutation-") as temp:
+        _control_check(cancel_check, deadline)
+        temporary_root = Path(temp)
+        baseline = temporary_root / "baseline"
+        execution_root = temporary_root / "execution"
+        worker = execution_root / "problem"
+
+        with workspace_build_lock(root):
+            _, workspace = load_workspace(root)
+            recover_workspace_transactions(root, workspace)
+            _, workspace = load_workspace(root)
+            entry = _workspace_entry_for_problem(root, workspace, problem_dir)
+            config, source_hash, data_hash = copy_problem_consistently(
+                root,
+                entry,
+                baseline,
+                operation="mutation snapshot",
+            )
+
+        judge_type = str((config.get("judge") or {}).get("type", "standard")).strip().lower()
+        if judge_type not in {"standard", ""}:
+            raise ProbHubError(
+                "mutation testing currently supports judge.type standard only",
+                code="mutation_standard_required",
+            )
+        accepted = normalize_solution_entries(config)["std"]
+        if not accepted or not accepted[0].get("file"):
+            raise ProbHubError(
+                "mutation testing requires a configured accepted solution",
+                code="mutation_source_missing",
+            )
+        source_path, source_error, source_message = resolve_solution_source(
+            baseline, accepted[0]["file"]
+        )
+        if source_path is None:
+            raise ProbHubError(
+                f"accepted source is invalid: {source_message or source_error}",
+                code="mutation_source_invalid",
+            )
+        if source_path.suffix.lower() != ".cpp":
+            raise ProbHubError(
+                "mutation testing currently supports C++ accepted solutions only",
+                code="mutation_cpp_required",
+            )
+        try:
+            source = source_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ProbHubError(
+                f"cannot read accepted source: {source_path}: {exc}",
+                code="mutation_source_invalid",
+            ) from exc
+
+        exclusions = load_mutation_exclusions(config)
+        _control_check(cancel_check, deadline)
+        parser_remaining = None if deadline is None else float(deadline) - time.monotonic()
+        parser_timeout = MUTATION_PARSER_TIMEOUT_SECONDS
+        parser_uses_deadline = False
+        if parser_remaining is not None:
+            if parser_remaining <= 0:
+                raise ProbHubError(
+                    "mutation testing deadline exceeded",
+                    code="mutation_timeout",
+                )
+            parser_uses_deadline = parser_remaining < MUTATION_PARSER_TIMEOUT_SECONDS
+            parser_timeout = max(
+                0.001,
+                min(MUTATION_PARSER_TIMEOUT_SECONDS, parser_remaining),
+            )
+        try:
+            plan = plan_mutations(
+                source,
+                operators=operators,
+                max_mutants=max_mutants,
+                exclusions=exclusions,
+                parser_timeout=parser_timeout,
+                parser_cancel_check=cancel_check,
+                parser_deadline=deadline,
+            )
+        except ProbHubError as exc:
+            if exc.code == "mutation_parser_cancelled":
+                raise ProbHubError(
+                    "mutation testing was cancelled",
+                    code="mutation_cancelled",
+                ) from exc
+            if exc.code == "mutation_parser_timeout" and parser_uses_deadline:
+                raise ProbHubError(
+                    "mutation testing deadline exceeded",
+                    code="mutation_timeout",
+                ) from exc
+            raise
+
+        builder_fingerprint = copy.deepcopy(_compiler_fingerprint())
+        if not builder_fingerprint.get("available"):
+            raise ProbHubError(
+                "mutation testing requires an available g++ C++17 compiler",
+                code="mutation_compiler_unavailable",
+            )
+        execution_profile = _mutation_execution_profile(config)
+        # The strict source fence above already validated the configured path.
+        # Reuse that logical path instead of deriving it from resolved physical
+        # paths, which may mix Windows long and 8.3 aliases for the same tree.
+        source_relative = Path(*PurePosixPath(
+            str(accepted[0]["file"]).replace("\\", "/")
+        ).parts)
+        mutant_name = source_relative.as_posix()
+        execution_root.mkdir()
+
         for mutation in plan["mutations"]:
             _control_check(cancel_check, deadline)
-            current_config = read_yaml(problem_dir / "probhub.yaml")
-            if (
-                compute_source_hash(problem_dir, current_config) != source_hash
-                or compute_data_hash(problem_dir, current_config) != data_hash
-            ):
-                raise ProbHubError("mutation inputs changed during execution", code="inputs_changed")
-            with tempfile.TemporaryDirectory(prefix="probhub-mutation-") as temp:
-                snapshot = Path(temp) / problem_dir.name
-                _copy_snapshot(problem_dir, snapshot)
-                source_in_snapshot = snapshot / source_relative
-                source_in_snapshot.write_text(
-                    apply_mutation(source, mutation), encoding="utf-8", newline=""
+            phase = "prepare"
+            try:
+                if worker.exists():
+                    shutil.rmtree(worker)
+                shutil.copytree(baseline, worker)
+                source_in_worker = worker / source_relative
+                source_in_worker.write_text(
+                    apply_mutation(source, mutation),
+                    encoding="utf-8",
+                    newline="",
                 )
                 config_copy = copy.deepcopy(config)
                 config_copy["solutions"] = {
-                    "accepted": [{"file": mutant_name, "expected": {"status": "AC", "all": True}}],
+                    "accepted": [{
+                        "file": mutant_name,
+                        "expected": {"status": "AC", "all": True},
+                    }],
                     "brute": [],
                     "wrong": [],
                 }
-                write_yaml(snapshot / "probhub.yaml", config_copy)
-                _control_check(cancel_check, deadline)
-                remaining = None if deadline is None else float(deadline) - time.monotonic()
-                judge_timeout = JUDGE_TIMEOUT_SECONDS
+                write_yaml(worker / "probhub.yaml", config_copy)
+                remaining = (
+                    None if deadline is None
+                    else float(deadline) - time.monotonic()
+                )
+                judge_timeout = execution_profile["mutant_timeout_seconds"]
                 if remaining is not None:
                     if remaining <= 0:
                         raise ProbHubError(
                             "mutation testing deadline exceeded",
                             code="mutation_timeout",
                         )
-                    judge_timeout = max(0.001, min(JUDGE_TIMEOUT_SECONDS, remaining))
-                try:
-                    judged = judge_problem(
-                        root,
-                        snapshot,
-                        use_cache=use_cache,
-                        timeout=judge_timeout,
-                    )
-                    _control_check(cancel_check, deadline)
-                    if (
-                        remaining is not None
-                        and remaining < JUDGE_TIMEOUT_SECONDS
-                        and (judged.get("final") or {}).get("code") == "judge_timeout"
-                    ):
-                        raise ProbHubError(
-                            "mutation testing deadline exceeded",
-                            code="mutation_timeout",
+                    judge_timeout = max(0.001, min(judge_timeout, remaining))
+
+                def judge_cancel_check():
+                    return bool(
+                        (
+                            cancellation_requested()
+                            if cancel_check is None
+                            else cancel_check()
                         )
-                    classification, hits, diagnostic = _classify_judge_result(judged, mutant_name)
-                except ProbHubError as exc:
-                    if exc.code in {"mutation_cancelled", "mutation_timeout"}:
-                        raise
-                    classification, hits, diagnostic = "infrastructure-failed", [], str(exc)
-                except (OSError, ValueError, TypeError) as exc:
-                    classification, hits, diagnostic = "infrastructure-failed", [], str(exc)
-                bounded_hits = [
-                    {
-                        "case": _bounded_optional(item.get("case"), MAX_HIT_FIELD_BYTES),
-                        "status": _bounded(item.get("status"), MAX_HIT_FIELD_BYTES),
-                        "termination_reason": _bounded_optional(
-                            item.get("termination_reason"), MAX_HIT_FIELD_BYTES
-                        ),
-                        "failure_kind": _bounded_optional(
-                            item.get("failure_kind"), MAX_HIT_FIELD_BYTES
-                        ),
-                    }
-                    for item in hits[:MAX_HIT_CASES]
-                ]
-                results.append({
-                    **mutation.as_dict(),
-                    "classification": classification,
-                    "hit_cases": bounded_hits,
-                    "hit_cases_total": len(hits),
-                    "hit_cases_truncated": len(hits) > len(bounded_hits),
-                    "diagnostic": {"code": _bounded(diagnostic or "unknown")},
-                })
-                if classification == "infrastructure-failed":
-                    break
+                        or (
+                            deadline is not None
+                            and time.monotonic() >= float(deadline)
+                        )
+                    )
+
+                phase = "judge"
+                judged = judge_problem(
+                    execution_root,
+                    worker,
+                    use_cache=use_cache,
+                    timeout=judge_timeout,
+                    output_limit_bytes=execution_profile["judge_output_limit_bytes"],
+                    memory_limit_mb=execution_profile["judge_memory_limit_mb"],
+                    process_limit=execution_profile["judge_process_limit"],
+                    cancel_check=judge_cancel_check,
+                )
+                _control_check(cancel_check, deadline)
+                if (
+                    remaining is not None
+                    and remaining < execution_profile["mutant_timeout_seconds"]
+                    and (judged.get("final") or {}).get("code") == "judge_timeout"
+                ):
+                    raise ProbHubError(
+                        "mutation testing deadline exceeded",
+                        code="mutation_timeout",
+                    )
+                classification, hits, diagnostic = _classify_judge_result(
+                    judged, mutant_name
+                )
+            except ProcessCancelled as exc:
+                _control_check(cancel_check, deadline)
+                raise ProbHubError(
+                    "mutation testing was cancelled",
+                    code="mutation_cancelled",
+                ) from exc
+            except ProbHubError as exc:
+                if exc.code in {"mutation_cancelled", "mutation_timeout"}:
+                    raise
+                classification, hits, diagnostic = (
+                    "infrastructure-failed",
+                    [],
+                    exc.code or (
+                        "mutation_worker_prepare_failed"
+                        if phase == "prepare"
+                        else "mutation_judge_failed"
+                    ),
+                )
+            except (OSError, UnicodeError, ValueError, TypeError):
+                classification, hits, diagnostic = (
+                    "infrastructure-failed",
+                    [],
+                    (
+                        "mutation_worker_prepare_failed"
+                        if phase == "prepare"
+                        else "mutation_judge_failed"
+                    ),
+                )
+
+            bounded_hits = [{
+                "case": _bounded_optional(item.get("case"), MAX_HIT_FIELD_BYTES),
+                "status": _bounded(item.get("status"), MAX_HIT_FIELD_BYTES),
+                "termination_reason": _bounded_optional(
+                    item.get("termination_reason"), MAX_HIT_FIELD_BYTES
+                ),
+                "failure_kind": _bounded_optional(
+                    item.get("failure_kind"), MAX_HIT_FIELD_BYTES
+                ),
+            } for item in hits[:MAX_HIT_CASES]]
+            results.append({
+                **mutation.as_dict(),
+                "classification": classification,
+                "hit_cases": bounded_hits,
+                "hit_cases_total": len(hits),
+                "hit_cases_truncated": len(hits) > len(bounded_hits),
+                "diagnostic": {"code": _bounded(diagnostic or "unknown")},
+            })
+            if classification == "infrastructure-failed":
+                break
+
         _control_check(cancel_check, deadline)
-        current_config = read_yaml(problem_dir / "probhub.yaml")
-        if (
-            compute_source_hash(problem_dir, current_config) != source_hash
-            or compute_data_hash(problem_dir, current_config) != data_hash
-        ):
-            raise ProbHubError("mutation inputs changed during execution", code="inputs_changed")
-        counts = {name: sum(item["classification"] == name for item in results) for name in (
-            "killed", "survived", "compile-invalid", "infrastructure-failed"
-        )}
+        counts = {name: sum(
+            item["classification"] == name for item in results
+        ) for name in _MUTATION_CLASSIFICATION_ORDER}
         status = "infrastructure-failed" if counts["infrastructure-failed"] else "passed"
         evidence = {
             "schema_version": MUTATION_EVIDENCE_SCHEMA_VERSION,
@@ -619,6 +789,7 @@ def mutation_test_problem(
             "source_hash": source_hash,
             "data_hash": data_hash,
             "builder_fingerprint": builder_fingerprint,
+            "execution_profile": execution_profile,
             "operator_version": MUTATION_OPERATOR_VERSION,
             "locator_version": MUTATION_LOCATOR_VERSION,
             "operators": plan["operators"],
@@ -644,13 +815,29 @@ def mutation_test_problem(
                     f"mutation evidence exceeds {MAX_MUTATION_EVIDENCE_BYTES} bytes",
                     code="mutation_evidence_limit",
                 )
-            try:
-                atomic_write_json(evidence_path, evidence)
-            except OSError as exc:
-                raise ProbHubError(
-                    f"failed to publish mutation evidence: {exc}",
-                    code="mutation_evidence_publish_failed",
-                ) from exc
+            with workspace_build_lock(root):
+                try:
+                    _, live_workspace = load_workspace(root)
+                    recover_workspace_transactions(root, live_workspace)
+                    _, current_source_hash, current_data_hash = _live_identity(problem_dir)
+                except Exception as exc:
+                    raise ProbHubError(
+                        "mutation inputs changed during execution",
+                        code="inputs_changed",
+                    ) from exc
+                if current_source_hash != source_hash or current_data_hash != data_hash:
+                    raise ProbHubError(
+                        "mutation inputs changed during execution",
+                        code="inputs_changed",
+                    )
+                try:
+                    atomic_write_json(evidence_path, evidence)
+                except OSError as exc:
+                    raise ProbHubError(
+                        f"failed to publish mutation evidence: {exc}",
+                        code="mutation_evidence_publish_failed",
+                    ) from exc
+
     return {
         "ok": status == "passed",
         "status": status,
@@ -701,6 +888,7 @@ def mutation_evidence_profile(problem_dir, config):
     summary = evidence.get("summary")
     mutations = evidence.get("mutations")
     exclusion_records = evidence.get("exclusions")
+    execution_profile = evidence.get("execution_profile")
     expected_counts = tuple(sorted(_MUTATION_CLASSIFICATIONS))
     if (
         isinstance(evidence.get("schema_version"), bool)
@@ -712,6 +900,10 @@ def mutation_evidence_profile(problem_dir, config):
         or not isinstance(evidence.get("plan_hash"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", evidence["plan_hash"])
         or not isinstance(evidence.get("builder_fingerprint"), dict)
+        or (
+            "execution_profile" in evidence
+            and not _valid_mutation_execution_profile(execution_profile)
+        )
         or (
             "locator_version" in evidence
             and (

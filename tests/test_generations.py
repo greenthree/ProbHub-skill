@@ -240,7 +240,7 @@ class GenerationTests(unittest.TestCase):
 
             with (
                 patch(
-                    "probhub.generations.shutil.copytree",
+                    "probhub.problem_snapshot.shutil.copytree",
                     side_effect=delayed_copytree,
                 ),
                 ThreadPoolExecutor(max_workers=1) as executor,

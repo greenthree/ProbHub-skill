@@ -85,6 +85,34 @@ class JudgingTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["env"]["PYTHONIOENCODING"], "utf-8")
             self.assertEqual(run.call_args.kwargs["timeout"], JUDGE_TIMEOUT_SECONDS)
             self.assertEqual(run.call_args.kwargs["output_limit_bytes"], JUDGE_OUTPUT_LIMIT_BYTES)
+            self.assertIsNone(run.call_args.kwargs["memory_limit_mb"])
+            self.assertIsNone(run.call_args.kwargs["process_limit"])
+
+    def test_supervisor_limits_and_cancel_check_are_forwarded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.make_root(temp)
+            event = {
+                "type": "final",
+                "status": "passed",
+                "code": "all_expectations_met",
+            }
+            cancel_check = lambda: False
+            with patch(
+                "probhub.judging.run_managed_to_files",
+                side_effect=_fake_run(json.dumps(event) + "\n"),
+            ) as run:
+                result = judge_problem(
+                    root,
+                    root / "A",
+                    memory_limit_mb=4096,
+                    process_limit=64,
+                    cancel_check=cancel_check,
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(run.call_args.kwargs["memory_limit_mb"], 4096)
+            self.assertEqual(run.call_args.kwargs["process_limit"], 64)
+            self.assertIs(run.call_args.kwargs["cancel_check"], cancel_check)
 
     def test_time_limit_produces_structured_failure(self):
         with tempfile.TemporaryDirectory() as temp:
