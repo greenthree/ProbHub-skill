@@ -376,14 +376,13 @@ class StressTests(unittest.TestCase):
             root = Path(temp)
             problem, config = self.create_workspace(root, judge_type="custom")
             pid_file = problem / "checker-child.pid"
-            child = (
-                "import os,time,pathlib;"
-                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
-                "time.sleep(30)"
-            )
+            pending_pid_file = problem / "checker-child.pid.tmp"
             (problem / "code/checker.py").write_text(
-                "import subprocess,sys,time\n"
-                f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+                "import os,pathlib,subprocess,sys,time\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                f"pending = pathlib.Path({str(pending_pid_file)!r})\n"
+                "pending.write_text(str(child.pid), encoding='utf-8')\n"
+                f"os.replace(pending, pathlib.Path({str(pid_file)!r}))\n"
                 "time.sleep(30)\n",
                 encoding="utf-8",
             )
