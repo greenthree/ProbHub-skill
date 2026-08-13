@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a test-only, spawn-based mutation scheduling benchmark on fixture M01.
+"""Run a test-only, spawn-based mutation scheduling benchmark on mutation fixtures.
 
 The production mutation CLI and evidence writer are intentionally not used.
 The parent captures one immutable baseline and mutation plan, while spawned
@@ -47,6 +47,7 @@ from probhub.mutation import (
 from probhub.problem_snapshot import copy_problem_consistently
 from probhub.process_control import (
     ProcessCancelled,
+    process_tree_metrics,
     process_alive,
     run_managed_to_files,
     snapshot_process_tree,
@@ -59,8 +60,33 @@ from probhub.workspace import load_workspace, problem_entries, resolve_problem_d
 SCHEMA_VERSION = 1
 BENCHMARK = "mutation-shadow-spawn-v1"
 CANCEL_GRACE_SECONDS = 2.0
-FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "workspaces" / "mutation"
+FIXTURE_WORKSPACES_ROOT = ROOT / "tests" / "fixtures" / "workspaces"
+# Kept as the balanced fixture alias for focused worker tests.
+FIXTURE_ROOT = FIXTURE_WORKSPACES_ROOT / "mutation"
 PROBLEM_ID = "M01"
+FIXTURE_PROFILES = {
+    "balanced": {
+        "workspace": "mutation",
+        "problem_id": "M01",
+        "workload": "balanced",
+        "description": "small standard Judge with a balanced candidate set",
+        "candidate_target": {"raw": 5, "ci_selected": 4},
+    },
+    "many-light": {
+        "workspace": "mutation-many-light",
+        "problem_id": "M02",
+        "workload": "many-light",
+        "description": "many cheap mutation candidates over tiny inputs",
+        "candidate_target": {"raw": 30, "ci_selected": 8},
+    },
+    "few-heavy": {
+        "workspace": "mutation-few-heavy",
+        "problem_id": "M03",
+        "workload": "few-heavy",
+        "description": "few candidates with comparatively heavy accepted cases",
+        "candidate_target": {"raw": 3, "ci_selected": 3},
+    },
+}
 CLASSIFICATIONS = (
     "killed",
     "survived",
@@ -100,6 +126,9 @@ class WorkerTask:
 
 @dataclass(frozen=True)
 class BenchmarkPlan:
+    profile_name: str
+    profile: dict
+    problem_id: str
     live_root: Path
     live_problem: Path
     baseline: Path
@@ -113,6 +142,7 @@ class BenchmarkPlan:
     baseline_hash: str
     snapshot_seconds: float
     planning_seconds: float
+    candidate_counts: dict
     execution_profile: dict
     tasks: tuple[WorkerTask, ...]
 
@@ -214,7 +244,8 @@ def _formal_artifact_hashes(root, problem):
     root = Path(root)
     problem = Path(problem)
     candidates = [problem / relative for relative in _FORMAL_RELATIVE_PATHS]
-    candidates.extend((root / f"{PROBLEM_ID}.zip",))
+    problem_id = Path(problem).name
+    candidates.extend((root / f"{problem_id}.zip",))
     try:
         _, workspace = load_workspace(root)
         typst = workspace.get("typst") if isinstance(workspace, dict) else None
@@ -438,6 +469,8 @@ def _run_judge_task(task, cancel_event):
 
 def _worker_entry(task, cancel_event, connection):
     started = time.perf_counter()
+    cpu_started = time.process_time()
+    child_times_started = os.times()
     result = None
     try:
         if cancel_event.is_set():
@@ -472,6 +505,25 @@ def _worker_entry(task, cancel_event, connection):
         if delay:
             time.sleep(max(float(delay), 0.0))
     result["elapsed_seconds"] = round(time.perf_counter() - started, 6)
+    child_times_finished = os.times()
+    result["worker_cpu_seconds"] = round(
+        max(0.0, time.process_time() - cpu_started), 6
+    )
+    result["worker_children_cpu_seconds"] = (
+        round(
+            max(
+                0.0,
+                (
+                    child_times_finished.children_user
+                    + child_times_finished.children_system
+                    - child_times_started.children_user
+                    - child_times_started.children_system
+                ),
+            ),
+            6,
+        )
+        if os.name != "nt" else None
+    )
     result["worker_cleaned"] = cleanup_error is None and not Path(task.worker_root).exists()
     try:
         connection.send(result)
@@ -586,11 +638,23 @@ def run_spawn_scheduler(
     results = {}
     next_task = 0
     max_active = 0
+    resource_peak = {
+        "process_count": None,
+        "process_count_observed": False,
+        "procfs_samples": 0,
+        "fallback_samples": 0,
+        "rss_mb": None,
+        "rss_observed": False,
+        "samples": 0,
+    }
     stop_code = None
     started = time.perf_counter()
     deadline = started + float(timeout)
     cancellation_started = None
     processes = []
+    parent_cpu_started = time.process_time()
+    child_times_started = os.times()
+    last_resource_sample = 0.0
 
     def launch(task):
         parent, child = context.Pipe(duplex=False)
@@ -604,9 +668,50 @@ def run_spawn_scheduler(
         processes.append(process)
         active[task.index] = (process, parent, task, {process.pid})
 
+    def sample_resources():
+        nonlocal last_resource_sample
+        if not active:
+            return
+        now = time.monotonic()
+        if now - last_resource_sample < 0.05:
+            return
+        last_resource_sample = now
+        process_count = 0
+        aggregate_rss_mb = 0.0
+        observed_process = False
+        rss_complete = True
+        for process, _connection, _task, known_pids in active.values():
+            if process.pid and process.is_alive():
+                observed_process = True
+                known_pids.update(snapshot_process_tree(process.pid))
+                count, current_rss_mb = process_tree_metrics(process.pid)
+                if count is None:
+                    count = len(known_pids)
+                    resource_peak["fallback_samples"] += 1
+                else:
+                    resource_peak["procfs_samples"] += 1
+                process_count += int(count or 0)
+                if current_rss_mb is None:
+                    rss_complete = False
+                else:
+                    aggregate_rss_mb += float(current_rss_mb)
+        if not observed_process:
+            return
+        resource_peak["process_count_observed"] = True
+        resource_peak["process_count"] = max(
+            int(resource_peak["process_count"] or 0), process_count
+        )
+        if rss_complete:
+            resource_peak["rss_observed"] = True
+            resource_peak["rss_mb"] = max(
+                float(resource_peak["rss_mb"] or 0.0), aggregate_rss_mb
+            )
+        resource_peak["samples"] += 1
+
     try:
         while active or (next_task < len(tasks) and stop_code is None):
             made_progress = False
+            sample_resources()
             for index in sorted(tuple(active)):
                 process, connection, task, known_pids = active[index]
                 if process.is_alive():
@@ -730,6 +835,34 @@ def run_spawn_scheduler(
         )
     ordered = [results[task.index] for task in sorted(tasks, key=lambda item: item.index)]
     elapsed = time.perf_counter() - started
+    child_times_finished = os.times()
+    child_cpu_seconds = max(
+        0.0,
+        (
+            child_times_finished.children_user
+            + child_times_finished.children_system
+            - child_times_started.children_user
+            - child_times_started.children_system
+        ),
+    )
+    parent_cpu_seconds = max(0.0, time.process_time() - parent_cpu_started)
+    direct_worker_cpu_observed = os.name != "nt"
+    if not resource_peak["process_count_observed"]:
+        process_provider = None
+        process_scope = None
+        process_exact = False
+    elif resource_peak["fallback_samples"]:
+        process_provider = (
+            "pid-snapshot-fallback"
+            if not resource_peak["procfs_samples"]
+            else "mixed-procfs-and-pid-snapshot"
+        )
+        process_scope = "cumulative-worker-pids-seen-upper-bound"
+        process_exact = False
+    else:
+        process_provider = "linux-procfs"
+        process_scope = "active-worker-process-trees"
+        process_exact = True
     classifications = {
         name: sum(result["classification"] == name for result in ordered)
         for name in CLASSIFICATIONS
@@ -751,6 +884,27 @@ def run_spawn_scheduler(
             round(completed / elapsed, 6) if elapsed > 0 else None
         ),
         "max_active": max_active,
+        "resource_peak": {
+            "process_count": resource_peak["process_count"],
+            "process_count_observed": resource_peak["process_count_observed"],
+            "process_count_exact": process_exact,
+            "process_count_scope": process_scope,
+            "resource_provider": process_provider,
+            "rss_mb": (
+                round(resource_peak["rss_mb"], 6)
+                if resource_peak["rss_mb"] is not None else None
+            ),
+            "rss_observed": resource_peak["rss_observed"],
+            "samples": resource_peak["samples"],
+            "parent_cpu_seconds": round(parent_cpu_seconds, 6),
+            "parent_cpu_observed": True,
+            "direct_children_cpu_seconds": (
+                round(child_cpu_seconds, 6)
+                if direct_worker_cpu_observed else None
+            ),
+            "direct_children_cpu_observed": direct_worker_cpu_observed,
+            "cpu_scope": "scheduler-and-direct-workers-only",
+        },
         "stop_code": stop_code,
         "workers_cleaned": (
             all(not Path(task.worker_root).exists() for task in tasks)
@@ -769,11 +923,19 @@ def prepare_plan(
     operators,
     mutant_timeout,
     use_cache=False,
+    profile_name="balanced",
 ):
-    live_root, workspace = load_workspace(FIXTURE_ROOT)
-    matches = [entry for entry in problem_entries(workspace) if entry["id"] == PROBLEM_ID]
+    try:
+        profile = FIXTURE_PROFILES[profile_name]
+    except KeyError as exc:
+        raise ValueError(f"unknown mutation fixture profile: {profile_name}") from exc
+    problem_id = profile["problem_id"]
+    live_root, workspace = load_workspace(
+        FIXTURE_WORKSPACES_ROOT / profile["workspace"]
+    )
+    matches = [entry for entry in problem_entries(workspace) if entry["id"] == problem_id]
     if len(matches) != 1:
-        raise ProbHubError("fixed mutation fixture M01 is unavailable")
+        raise ProbHubError(f"mutation fixture {problem_id} is unavailable")
     entry = matches[0]
     live_problem = resolve_problem_dir(live_root, entry)
     baseline = Path(temporary_root) / "baseline"
@@ -789,13 +951,13 @@ def prepare_plan(
     snapshot_seconds = time.perf_counter() - snapshot_started
     accepted = normalize_solution_entries(config)["std"]
     if not accepted or not accepted[0].get("file"):
-        raise ProbHubError("M01 requires an accepted C++ source")
+        raise ProbHubError(f"{problem_id} requires an accepted C++ source")
     source_path, source_error, source_message = resolve_solution_source(
         baseline, accepted[0]["file"]
     )
     if source_path is None or source_path.suffix.lower() != ".cpp":
         raise ProbHubError(
-            f"M01 accepted source is invalid: {source_message or source_error}"
+            f"{problem_id} accepted source is invalid: {source_message or source_error}"
         )
     source = source_path.read_text(encoding="utf-8")
     selected_operators = list(MUTATION_OPERATORS if operators is None else operators)
@@ -827,6 +989,9 @@ def prepare_plan(
         for index, mutation in enumerate(mutation_plan["mutations"])
     )
     return BenchmarkPlan(
+        profile_name=profile_name,
+        profile=dict(profile),
+        problem_id=problem_id,
         live_root=Path(live_root),
         live_problem=Path(live_problem),
         baseline=baseline,
@@ -840,6 +1005,13 @@ def prepare_plan(
         baseline_hash=_hash_tree(baseline),
         snapshot_seconds=round(snapshot_seconds, 6),
         planning_seconds=round(planning_seconds, 6),
+        candidate_counts={
+            "raw": mutation_plan["raw_planned"],
+            "excluded": mutation_plan["excluded"],
+            "effective": mutation_plan["planned"],
+            "selected": mutation_plan["selected"],
+            "truncated": mutation_plan["truncated"],
+        },
         execution_profile=execution_profile,
         tasks=tasks,
     )
@@ -853,10 +1025,18 @@ def run_benchmark(
     operators,
     mutant_timeout,
     use_cache=False,
+    profile_name="balanced",
 ):
     total_started = time.perf_counter()
-    live_root, workspace = load_workspace(FIXTURE_ROOT)
-    entry = next(item for item in problem_entries(workspace) if item["id"] == PROBLEM_ID)
+    try:
+        profile = FIXTURE_PROFILES[profile_name]
+    except KeyError as exc:
+        raise ValueError(f"unknown mutation fixture profile: {profile_name}") from exc
+    live_root, workspace = load_workspace(
+        FIXTURE_WORKSPACES_ROOT / profile["workspace"]
+    )
+    problem_id = profile["problem_id"]
+    entry = next(item for item in problem_entries(workspace) if item["id"] == problem_id)
     live_problem = resolve_problem_dir(live_root, entry)
     live_before = _live_input_hashes(live_problem)
     formal_before = _formal_artifact_hashes(live_root, live_problem)
@@ -870,9 +1050,10 @@ def run_benchmark(
             operators=operators,
             mutant_timeout=mutant_timeout,
             use_cache=use_cache,
+            profile_name=profile_name,
         )
         if not plan.tasks:
-            raise ProbHubError("M01 mutation plan is empty")
+            raise ProbHubError(f"{problem_id} mutation plan is empty")
         scheduled = run_spawn_scheduler(
             plan.tasks,
             jobs,
@@ -891,6 +1072,16 @@ def run_benchmark(
     report = {
         "schema_version": SCHEMA_VERSION,
         "benchmark": BENCHMARK,
+        "fixture": {
+            "profile": profile_name,
+            "problem_id": problem_id,
+            "workload": profile["workload"],
+            "description": profile["description"],
+            "candidate_target": profile["candidate_target"],
+            "resource_interpretation": (
+                "workload labels are descriptive; compare observed case time and memory"
+            ),
+        },
         "jobs": jobs,
         "use_cache": bool(use_cache),
         "environment": _environment_identity(),
@@ -898,6 +1089,7 @@ def run_benchmark(
         "started": scheduled["started"],
         "completed": scheduled["completed"],
         "executed": scheduled["executed"],
+        "candidate_plan": plan.candidate_counts,
         "classifications": scheduled["classifications"],
         "mutations": scheduled["mutations"],
         "wall_seconds": round(wall_seconds, 6),
@@ -907,6 +1099,10 @@ def run_benchmark(
         "scheduler_wall_seconds": scheduled["scheduler_wall_seconds"],
         "scheduler_mutants_per_second": scheduled["scheduler_mutants_per_second"],
         "max_active": scheduled["max_active"],
+        "resource_summary": _resource_summary(
+            scheduled.get("mutations", []), scheduled.get("resource_peak")
+        ),
+        "failure_summary": _failure_summary(scheduled),
         "phase_seconds": {
             "snapshot": plan.snapshot_seconds,
             "planning": plan.planning_seconds,
@@ -975,6 +1171,82 @@ def _comparison_signature(report):
     ]
 
 
+def _resource_summary(mutations, resource_peak=None):
+    case_times = []
+    case_memories = []
+    worker_times = []
+    worker_cpu_times = []
+    worker_child_cpu_times = []
+    for item in mutations or ():
+        if isinstance(item.get("elapsed_seconds"), (int, float)):
+            worker_times.append(float(item["elapsed_seconds"]))
+        if isinstance(item.get("worker_cpu_seconds"), (int, float)):
+            worker_cpu_times.append(float(item["worker_cpu_seconds"]))
+        if isinstance(item.get("worker_children_cpu_seconds"), (int, float)):
+            worker_child_cpu_times.append(
+                float(item["worker_children_cpu_seconds"])
+            )
+        for key, destination in (("max_case_seconds", case_times), ("max_case_memory_mb", case_memories)):
+            value = item.get(key)
+            if isinstance(value, (int, float)):
+                destination.append(float(value))
+    peak = resource_peak or {}
+    return {
+        "observed": bool(case_times or case_memories or peak.get("samples")),
+        "case_time_seconds_max": round(max(case_times), 6) if case_times else None,
+        "case_time_seconds_sum": round(sum(case_times), 6) if case_times else 0.0,
+        "case_memory_mb_max": round(max(case_memories), 6) if case_memories else None,
+        "worker_elapsed_seconds_max": round(max(worker_times), 6) if worker_times else None,
+        "worker_elapsed_seconds_sum": round(sum(worker_times), 6) if worker_times else 0.0,
+        "worker_cpu_seconds_sum": (
+            round(sum(worker_cpu_times), 6) if worker_cpu_times else None
+        ),
+        "worker_cpu_observed": bool(worker_cpu_times),
+        "worker_cpu_samples": len(worker_cpu_times),
+        "worker_children_cpu_seconds_sum": (
+            round(sum(worker_child_cpu_times), 6)
+            if worker_child_cpu_times else None
+        ),
+        "worker_children_cpu_observed": bool(worker_child_cpu_times),
+        "worker_children_cpu_samples": len(worker_child_cpu_times),
+        "process_count_peak": peak.get("process_count"),
+        "process_count_observed": bool(
+            peak.get("process_count_observed", False)
+        ),
+        "process_count_exact": bool(peak.get("process_count_exact", False)),
+        "process_count_scope": peak.get("process_count_scope"),
+        "resource_provider": peak.get("resource_provider"),
+        "active_rss_mb_peak": peak.get("rss_mb"),
+        "active_rss_observed": bool(peak.get("rss_observed", False)),
+        "sample_count": int(peak.get("samples", 0) or 0),
+        "scheduler_parent_cpu_seconds": peak.get("parent_cpu_seconds"),
+        "scheduler_parent_cpu_observed": bool(
+            peak.get("parent_cpu_observed", False)
+        ),
+        "direct_worker_cpu_seconds": peak.get("direct_children_cpu_seconds"),
+        "direct_worker_cpu_observed": bool(
+            peak.get("direct_children_cpu_observed", False)
+        ),
+        "cpu_scope": (
+            "scheduler-and-direct-worker-processes; descendant CPU may be unavailable"
+        ),
+    }
+
+
+def _failure_summary(scheduled):
+    diagnostics = {}
+    for item in scheduled.get("mutations", []):
+        if item.get("classification") in {"infrastructure-failed", "cancelled"}:
+            code = str((item.get("diagnostic") or {}).get("code") or "unknown")
+            diagnostics[code] = diagnostics.get(code, 0) + 1
+    return {
+        "infrastructure_failed": scheduled["classifications"].get("infrastructure-failed", 0),
+        "cancelled": scheduled["classifications"].get("cancelled", 0),
+        "diagnostic_codes": dict(sorted(diagnostics.items())),
+        "stop_code": scheduled.get("stop_code"),
+    }
+
+
 def _comparison_identity(report):
     hashes = report.get("hashes") or {}
     return {
@@ -992,6 +1264,7 @@ def run_matrix(
     operators,
     mutant_timeout,
     use_cache=False,
+    profile_name="balanced",
 ):
     if repetitions <= 0:
         raise ValueError("repetitions must be positive")
@@ -1016,6 +1289,7 @@ def run_matrix(
                 operators=operators,
                 mutant_timeout=mutant_timeout,
                 use_cache=use_cache,
+                profile_name=profile_name,
             )
             signature = _comparison_signature(report)
             identity = _comparison_identity(report)
@@ -1068,6 +1342,7 @@ def run_matrix(
     return {
         "schema_version": SCHEMA_VERSION,
         "benchmark": BENCHMARK + "-matrix",
+        "fixture_profile": profile_name,
         "jobs": list(jobs_values),
         "repetitions": repetitions,
         "use_cache": bool(use_cache),
@@ -1101,6 +1376,10 @@ def _write_stdout(payload):
 def build_parser():
     parser = _StructuredArgumentParser(description=__doc__)
     parser.add_argument("--jobs", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument(
+        "--profile", choices=tuple(FIXTURE_PROFILES), default="balanced",
+        help="mutation fixture workload profile",
+    )
     parser.add_argument(
         "--matrix",
         action="store_true",
@@ -1147,6 +1426,7 @@ def main(argv=None):
                 operators=args.operator,
                 mutant_timeout=args.mutant_timeout,
                 use_cache=args.use_cache,
+                profile_name=args.profile,
             )
             if args.matrix
             else run_benchmark(
@@ -1156,6 +1436,7 @@ def main(argv=None):
                 operators=args.operator,
                 mutant_timeout=args.mutant_timeout,
                 use_cache=args.use_cache,
+                profile_name=args.profile,
             )
         )
     except (
