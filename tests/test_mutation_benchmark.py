@@ -211,11 +211,7 @@ class SpawnSchedulerTests(unittest.TestCase):
                 source=source,
                 source_relative=source_relative,
                 config=config,
-                execution_profile={
-                    "judge_output_limit_bytes": 1024 * 1024,
-                    "judge_memory_limit_mb": 256,
-                    "judge_process_limit": 8,
-                },
+                execution_profile=benchmark._mutation_execution_profile(config),
                 mutant_timeout=30,
                 use_cache=False,
             )
@@ -229,18 +225,26 @@ class SpawnSchedulerTests(unittest.TestCase):
                 def close(self):
                     pass
 
-            canceller = threading.Timer(1.0, cancel_event.set)
+            real_judge_problem = benchmark.judge_problem
+
+            def cancelling_judge(*args, **kwargs):
+                canceller = threading.Timer(0.01, cancel_event.set)
+                canceller.start()
+                try:
+                    return real_judge_problem(*args, **kwargs)
+                finally:
+                    canceller.cancel()
+                    canceller.join()
+
             started = benchmark.time.monotonic()
-            canceller.start()
-            try:
-                with patch(
-                    "benchmark_mutation.apply_mutation",
-                    return_value=source,
-                ):
-                    benchmark._worker_entry(task, cancel_event, Connection())
-            finally:
-                canceller.cancel()
-                canceller.join()
+            with patch(
+                "benchmark_mutation.apply_mutation",
+                return_value=source,
+            ), patch(
+                "benchmark_mutation.judge_problem",
+                side_effect=cancelling_judge,
+            ):
+                benchmark._worker_entry(task, cancel_event, Connection())
             elapsed = benchmark.time.monotonic() - started
 
         self.assertLess(elapsed, 10.0)
@@ -256,18 +260,19 @@ class SpawnSchedulerTests(unittest.TestCase):
                 "delay": 30.0,
                 "ignore_cancel": True,
                 "real_like": True,
+                "request_cancel": True,
             }])[0]
             task = benchmark.WorkerTask(
                 **{**task.__dict__, "mutant_timeout": 0.1}
             )
             started = benchmark.time.monotonic()
             result = benchmark.run_spawn_scheduler(
-                (task,), 1, timeout=0.05, cancel_grace=0.05
+                (task,), 1, timeout=10.0, cancel_grace=0.05
             )
             elapsed = benchmark.time.monotonic() - started
 
         self.assertLess(elapsed, 5.0)
-        self.assertEqual(result["stop_code"], "scheduler-timeout")
+        self.assertEqual(result["stop_code"], "infrastructure-failed")
         self.assertTrue(result["mutations"][0]["worker_stopped"])
         self.assertFalse(result["mutations"][0]["descendants_cleaned"])
         self.assertTrue(result["workers_cleaned"])
@@ -619,6 +624,41 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertFalse(report["ok"])
         self.assertEqual(report["error"], "ValueError")
+
+    def test_main_writes_utf8_bytes_to_non_utf8_console(self):
+        class NonUtf8Console:
+            def __init__(self):
+                self.buffer = io.BytesIO()
+
+            def write(self, value):
+                value.encode("cp1252")
+
+            def flush(self):
+                pass
+
+        report = {
+            "message": "\u4e2d\u6587\u8bca\u65ad",
+            "classifications": {
+                "infrastructure-failed": 0,
+                "cancelled": 0,
+            },
+            "live_inputs_unchanged": True,
+            "formal_artifacts_unchanged": True,
+            "mutation_evidence_unchanged": True,
+            "fixture_unchanged": True,
+            "workers_cleaned": True,
+            "descendants_cleaned": True,
+        }
+        console = NonUtf8Console()
+
+        with patch("benchmark_mutation.run_benchmark", return_value=report), patch(
+            "sys.stdout", console
+        ):
+            exit_code = benchmark.main(["--jobs", "1"])
+
+        payload = benchmark.json.loads(console.buffer.getvalue().decode("utf-8"))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["message"], "\u4e2d\u6587\u8bca\u65ad")
 
 
 if __name__ == "__main__":

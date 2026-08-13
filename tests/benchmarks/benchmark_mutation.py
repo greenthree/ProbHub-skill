@@ -316,11 +316,13 @@ def _run_synthetic(task, cancel_event):
                 process_limit=8,
                 cancel_check=cancel_event.is_set,
             )
-        child_pid = (
-            int(child_pid_path.read_text(encoding="utf-8"))
-            if child_pid_path.is_file()
-            else None
-        )
+        child_pid = None
+        ready_deadline = time.monotonic() + 10.0
+        while child_pid is None and time.monotonic() < ready_deadline:
+            try:
+                child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, UnicodeError, ValueError):
+                time.sleep(0.01)
         if result.get("reason") not in {"time_limit", "cancelled"}:
             raise RuntimeError(f"synthetic managed tree ended as {result.get('reason')}")
         if child_pid is not None:
@@ -340,6 +342,8 @@ def _run_synthetic(task, cancel_event):
             "descendant_pid": child_pid,
             "descendants_cleaned": True,
         }
+    if spec.get("request_cancel"):
+        cancel_event.set()
     deadline = time.monotonic() + max(float(spec.get("delay", 0)), 0.0)
     while time.monotonic() < deadline:
         if cancel_event.is_set() and not spec.get("ignore_cancel"):
@@ -1083,6 +1087,17 @@ class _StructuredArgumentParser(argparse.ArgumentParser):
         raise ValueError(message)
 
 
+def _write_stdout(payload):
+    stream = sys.stdout
+    binary = getattr(stream, "buffer", None)
+    if binary is not None:
+        binary.write(payload.encode("utf-8", errors="backslashreplace"))
+        binary.flush()
+        return
+    stream.write(payload)
+    stream.flush()
+
+
 def build_parser():
     parser = _StructuredArgumentParser(description=__doc__)
     parser.add_argument("--jobs", type=int, choices=(1, 2, 4), default=1)
@@ -1161,13 +1176,13 @@ def main(argv=None):
         if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(failure, encoding="utf-8", newline="")
-        print(failure, end="")
+        _write_stdout(failure)
         return 1
     payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(payload, encoding="utf-8", newline="")
-    print(payload, end="")
+    _write_stdout(payload)
     if args.matrix:
         return 0 if (
             report["results_equivalent"]
