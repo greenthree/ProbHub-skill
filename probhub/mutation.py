@@ -478,14 +478,6 @@ def _bounded_optional(value, limit):
 def _classify_judge_result(result, mutant_name):
     final = result.get("final") or {}
     events = result.get("events") or []
-    compile_events = [
-        item for item in events
-        if item.get("type") == "compile" and item.get("kind") == "std"
-    ]
-    if any(item.get("ok") is False for item in compile_events):
-        return "compile-invalid", [], final.get("message") or final.get("code")
-    if result.get("ok") and final.get("code") == "all_expectations_met":
-        return "survived", [], final.get("message")
     hits = []
     infrastructure = False
     for item in events:
@@ -510,6 +502,14 @@ def _classify_judge_result(result, mutant_name):
         "interactor_missing",
     }:
         return "infrastructure-failed", hits, code
+    compile_events = [
+        item for item in events
+        if item.get("type") == "compile" and item.get("kind") == "std"
+    ]
+    if any(item.get("ok") is False for item in compile_events):
+        return "compile-invalid", [], final.get("message") or code
+    if result.get("ok") and code == "all_expectations_met":
+        return "survived", [], final.get("message")
     if hits or code == "expectation_not_met":
         return "killed", hits, code
     return "infrastructure-failed", hits, code or "unknown mutation result"

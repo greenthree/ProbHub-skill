@@ -165,17 +165,25 @@ class MutationPlanningTests(unittest.TestCase):
             "code/mutation.cpp",
         )
         self.assertEqual(infrastructure[0], "infrastructure-failed")
-        for code in ("judge_memory_limit", "judge_process_limit"):
+        for code in (
+            "judge_timeout",
+            "judge_output_limit",
+            "judge_memory_limit",
+            "judge_process_limit",
+        ):
             resource_failure = _classify_judge_result(
                 {
                     "ok": False,
                     "final": {"code": code},
-                    "events": [{
-                        "type": "case",
-                        "program": "code/mutation.cpp",
-                        "case": "secret/boundary",
-                        "status": "WA",
-                    }],
+                    "events": [
+                        {"type": "compile", "kind": "std", "ok": False},
+                        {
+                            "type": "case",
+                            "program": "code/mutation.cpp",
+                            "case": "secret/boundary",
+                            "status": "WA",
+                        },
+                    ],
                 },
                 "code/mutation.cpp",
             )
@@ -586,7 +594,7 @@ class MutationFixtureTests(unittest.TestCase):
             (problem / "meta.json").write_text("{}", encoding="utf-8")
             (problem / "problem.yaml").write_text("name: generated\n", encoding="utf-8")
             (problem / "code/stale.exe").write_bytes(b"generated executable")
-            (problem / ".probhub").mkdir()
+            (problem / ".probhub").mkdir(exist_ok=True)
             (problem / ".probhub/stale-cache.json").write_text("{}", encoding="utf-8")
             live_before = {
                 path.relative_to(problem).as_posix(): path.read_bytes()
