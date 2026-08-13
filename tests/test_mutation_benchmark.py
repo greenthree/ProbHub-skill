@@ -32,7 +32,7 @@ def synthetic_tasks(root, specs):
             config={},
             execution_profile={},
             mutant_timeout=1.0,
-            use_cache=False,
+            cache_profile="cold",
             synthetic=spec,
         )
         for index, spec in enumerate(specs)
@@ -218,7 +218,7 @@ class SpawnSchedulerTests(unittest.TestCase):
                 config=config,
                 execution_profile=benchmark._mutation_execution_profile(config),
                 mutant_timeout=30,
-                use_cache=False,
+                cache_profile="cold",
             )
             cancel_event = threading.Event()
             sent = []
@@ -322,7 +322,7 @@ class SpawnSchedulerTests(unittest.TestCase):
                 max_mutants=4,
                 operators=None,
                 mutant_timeout=60,
-                use_cache=True,
+                cache_profile="cold",
             )
             live = benchmark._live_input_hashes(plan.live_problem)
 
@@ -334,7 +334,8 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertEqual(len(plan.baseline_hash), 64)
         self.assertGreaterEqual(plan.snapshot_seconds, 0)
         self.assertGreaterEqual(plan.planning_seconds, 0)
-        self.assertTrue(all(task.use_cache for task in plan.tasks))
+        self.assertTrue(all(task.cache_profile == "cold" for task in plan.tasks))
+        self.assertTrue(all(task.primer_root is None for task in plan.tasks))
 
     def test_fixture_profiles_have_distinct_candidate_scales(self):
         expected = {
@@ -395,6 +396,61 @@ class SpawnSchedulerTests(unittest.TestCase):
             benchmark.FIXTURE_PROFILES["many-light"]["candidate_target"],
             {"raw": 30, "ci_selected": 8},
         )
+
+    def test_real_warm_primer_reuses_cache_and_preserves_signature(self):
+        cold = benchmark.run_benchmark(
+            jobs=1,
+            timeout=120,
+            max_mutants=1,
+            operators=["comparison-boundary"],
+            mutant_timeout=60,
+            cache_profile="cold",
+        )
+        warm = benchmark.run_benchmark(
+            jobs=1,
+            timeout=120,
+            max_mutants=1,
+            operators=["comparison-boundary"],
+            mutant_timeout=60,
+            cache_profile="warm",
+        )
+
+        self.assertEqual(
+            benchmark._comparison_signature(cold),
+            benchmark._comparison_signature(warm),
+        )
+        self.assertEqual(
+            benchmark._comparison_identity(cold),
+            benchmark._comparison_identity(warm),
+        )
+        self.assertTrue(warm["cache_observation"]["primers_unchanged"])
+        self.assertTrue(warm["cache_observation"]["primer_results_equivalent"])
+        self.assertTrue(warm["judge_artifacts_unchanged"])
+        self.assertIn(
+            warm["mutations"][0]["case_measurement_origin"],
+            {"cached-primer", "mixed-fresh-and-cached-primer"},
+        )
+        if warm["mutations"][0]["case_measurement_origin"] == "cached-primer":
+            self.assertIsNone(warm["mutations"][0]["max_case_seconds"])
+        self.assertIsNotNone(warm["mutations"][0]["max_cached_case_seconds"])
+        sections = warm["cache_summary"]["sections"]
+        self.assertGreater(sections["compile"]["hits"], 0)
+        self.assertGreater(sections["validator"]["hits"], 0)
+        self.assertGreater(sections["case"]["hits"], 0)
+        self.assertEqual(
+            warm["cache_observation"]["warm_cache_complete"], False
+        )
+
+    def test_warm_cache_requires_every_section_to_be_observed(self):
+        sections = {
+            section: {"hits": 1, "misses": 0, "observed": True}
+            for section in benchmark.CACHE_SECTIONS
+        }
+        summary = {"workers_observed": 1, "sections": sections}
+
+        self.assertTrue(benchmark._warm_cache_is_complete("warm", summary, 1))
+        sections["probe"] = {"hits": 0, "misses": 0, "observed": False}
+        self.assertFalse(benchmark._warm_cache_is_complete("warm", summary, 1))
 
     def test_formal_artifact_snapshot_detects_changes(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -488,7 +544,7 @@ class SpawnSchedulerTests(unittest.TestCase):
             "workers_cleaned", "descendants_cleaned",
         }
         self.assertTrue(required.issubset(report))
-        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["schema_version"], 2)
         self.assertEqual(
             report["execution_profile"]["scheduler"],
             "spawn-bounded-shadow-v1",
@@ -716,6 +772,268 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertFalse(report["identities_equivalent"])
         self.assertFalse(report["results_equivalent"])
 
+    def test_contention_runs_two_profiles_independently(self):
+        calls = []
+
+        def fake_run(**kwargs):
+            profile = kwargs["profile_name"]
+            calls.append(profile)
+            return {
+                "wall_seconds": 1.0 if profile == "many-light" else 2.0,
+                "resource_summary": {
+                    "scheduler_parent_cpu_seconds": 1.0,
+                    "scheduler_parent_cpu_observed": True,
+                    "direct_worker_cpu_seconds": 2.0,
+                    "direct_worker_cpu_observed": True,
+                },
+                "planned": 1,
+                "completed": 1,
+                "classifications": {
+                    "infrastructure-failed": 0,
+                    "cancelled": 0,
+                },
+                "stop_code": None,
+                "mutations": [{
+                    "id": profile,
+                    "classification": "survived",
+                    "final_code": "all_expectations_met",
+                    "hit_cases": [],
+                    "hit_cases_total": 0,
+                }],
+                "hashes": {
+                    "source": profile + "-source",
+                    "data": profile + "-data",
+                    "plan": profile + "-plan",
+                    "baseline": profile + "-baseline",
+                },
+                "live_inputs_unchanged": True,
+                "formal_artifacts_unchanged": True,
+                "mutation_evidence_unchanged": True,
+                "judge_artifacts_unchanged": True,
+                "fixture_unchanged": True,
+                "workers_cleaned": True,
+                "descendants_cleaned": True,
+            }
+
+        with patch("benchmark_mutation.run_benchmark", side_effect=fake_run):
+            report = benchmark.run_contention(
+                profiles=("many-light", "few-heavy"),
+                jobs_per_profile=2,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertEqual(calls.count("many-light"), 2)
+        self.assertEqual(calls.count("few-heavy"), 2)
+        self.assertEqual(report["failure_scope"], "per-problem-independent")
+        self.assertTrue(report["results_equivalent"])
+        self.assertTrue(report["all_safe"])
+        self.assertIsNone(
+            report["reports"]["many-light"]["resource_summary"][
+                "scheduler_parent_cpu_seconds"
+            ]
+        )
+
+    def test_contention_keeps_peer_result_when_one_profile_fails(self):
+        counts = {"many-light": 0, "few-heavy": 0}
+
+        def fake_run(**kwargs):
+            profile = kwargs["profile_name"]
+            counts[profile] += 1
+            if profile == "many-light" and counts[profile] == 2:
+                raise benchmark.ProbHubError("fixture failed", code="fixture_failed")
+            return {
+                "wall_seconds": 1.0,
+                "planned": 0,
+                "completed": 0,
+                "classifications": {
+                    "infrastructure-failed": 0,
+                    "cancelled": 0,
+                },
+                "stop_code": None,
+                "mutations": [],
+                "hashes": {
+                    "source": profile,
+                    "data": profile,
+                    "plan": profile,
+                    "baseline": profile,
+                },
+                "live_inputs_unchanged": True,
+                "formal_artifacts_unchanged": True,
+                "mutation_evidence_unchanged": True,
+                "judge_artifacts_unchanged": True,
+                "fixture_unchanged": True,
+                "workers_cleaned": True,
+                "descendants_cleaned": True,
+            }
+
+        with patch("benchmark_mutation.run_benchmark", side_effect=fake_run):
+            report = benchmark.run_contention(
+                profiles=("many-light", "few-heavy"),
+                jobs_per_profile=1,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertEqual(report["reports"]["many-light"]["error"], "fixture_failed")
+        self.assertIn("mutations", report["reports"]["few-heavy"])
+        self.assertFalse(report["results_equivalent"])
+        self.assertFalse(report["all_safe"])
+
+    def test_contention_rejects_host_oversubscription(self):
+        with self.assertRaises(ValueError):
+            benchmark.run_contention(
+                profiles=("many-light", "few-heavy"),
+                jobs_per_profile=4,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+    def test_aggregate_modes_reject_stable_infrastructure_failure(self):
+        failed = {
+            "wall_seconds": 1.0,
+            "resource_summary": {"judge_wall_seconds_sum": 1.0},
+            "planned": 1,
+            "completed": 0,
+            "classifications": {
+                "infrastructure-failed": 1,
+                "cancelled": 0,
+            },
+            "stop_code": "infrastructure-failed",
+            "mutations": [{
+                "id": "m1",
+                "classification": "infrastructure-failed",
+                "final_code": "judge_timeout",
+                "hit_cases": [],
+                "hit_cases_total": 0,
+            }],
+            "hashes": {
+                "source": "source",
+                "data": "data",
+                "plan": "plan",
+                "baseline": "baseline",
+            },
+            "cache_observation": {
+                "primer_results_equivalent": True,
+                "warm_cache_complete": False,
+                "warm_cache_partial": True,
+            },
+            "live_inputs_unchanged": True,
+            "formal_artifacts_unchanged": True,
+            "mutation_evidence_unchanged": True,
+            "judge_artifacts_unchanged": True,
+            "fixture_unchanged": True,
+            "workers_cleaned": True,
+            "descendants_cleaned": True,
+        }
+        with patch("benchmark_mutation.run_benchmark", return_value=failed):
+            pair = benchmark.run_cache_pair(
+                jobs=1,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+            contention = benchmark.run_contention(
+                profiles=("many-light", "few-heavy"),
+                jobs_per_profile=1,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertTrue(pair["results_equivalent"])
+        self.assertFalse(pair["all_safe"])
+        self.assertTrue(contention["results_equivalent"])
+        self.assertFalse(contention["all_safe"])
+
+    def test_output_path_rejects_committed_fixture(self):
+        output = benchmark.FIXTURE_ROOT / "report.json"
+        with self.assertRaises(ValueError):
+            benchmark._validate_output_path(output)
+
+    def test_main_does_not_write_failure_inside_committed_fixture(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture_root = Path(temp) / "fixtures"
+            output = fixture_root / "mutation" / "report.json"
+            stdout = io.StringIO()
+            with patch(
+                "benchmark_mutation.FIXTURE_WORKSPACES_ROOT", fixture_root
+            ), patch("sys.stdout", stdout):
+                exit_code = benchmark.main([
+                    "--output", str(output),
+                    "--max-mutants", "1",
+                ])
+
+            report = benchmark.json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["error"], "ValueError")
+        self.assertFalse(output.exists())
+
+    def test_cache_pair_compares_measured_judge_phases(self):
+        def fake_run(**kwargs):
+            warm = kwargs["cache_profile"] == "warm"
+            return {
+                "resource_summary": {
+                    "judge_wall_seconds_sum": 1.0 if warm else 2.0,
+                },
+                "planned": 1,
+                "completed": 1,
+                "classifications": {
+                    "infrastructure-failed": 0,
+                    "cancelled": 0,
+                },
+                "stop_code": None,
+                "mutations": [{
+                    "id": "m1",
+                    "classification": "survived",
+                    "final_code": "all_expectations_met",
+                    "hit_cases": [],
+                    "hit_cases_total": 0,
+                }],
+                "hashes": {
+                    "source": "source",
+                    "data": "data",
+                    "plan": "plan",
+                    "baseline": "baseline",
+                },
+                "cache_observation": {
+                    "primer_results_equivalent": True,
+                    "warm_cache_complete": warm,
+                    "warm_cache_partial": False,
+                },
+                "live_inputs_unchanged": True,
+                "formal_artifacts_unchanged": True,
+                "mutation_evidence_unchanged": True,
+                "judge_artifacts_unchanged": True,
+                "fixture_unchanged": True,
+                "workers_cleaned": True,
+                "descendants_cleaned": True,
+            }
+
+        with patch("benchmark_mutation.run_benchmark", side_effect=fake_run):
+            report = benchmark.run_cache_pair(
+                jobs=1,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertTrue(report["results_equivalent"])
+        self.assertTrue(report["all_safe"])
+        self.assertEqual(report["warm_speedup_vs_cold"], 2.0)
+        self.assertFalse(report["host_cache_controlled"])
+
     def test_judge_cancellation_is_classified_as_cancelled(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -743,7 +1061,7 @@ class SpawnSchedulerTests(unittest.TestCase):
                     "judge_process_limit": 8,
                 },
                 mutant_timeout=10,
-                use_cache=False,
+                cache_profile="cold",
             )
             cancel_event = type("Cancel", (), {"is_set": lambda self: True})()
             with patch(
@@ -813,6 +1131,7 @@ class SpawnSchedulerTests(unittest.TestCase):
             "live_inputs_unchanged": True,
             "formal_artifacts_unchanged": True,
             "mutation_evidence_unchanged": True,
+            "judge_artifacts_unchanged": True,
             "fixture_unchanged": True,
             "workers_cleaned": True,
             "descendants_cleaned": True,

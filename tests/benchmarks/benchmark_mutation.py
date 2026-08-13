@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -22,8 +23,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from statistics import median
 
@@ -35,6 +37,7 @@ if str(ROOT) not in sys.path:
 from probhub.errors import ProbHubError
 from probhub.io import read_yaml, write_yaml
 from probhub.judging import judge_problem
+from probhub.calibration import SANDBOX_CACHE_SCHEMA_VERSION
 from probhub.linting import compute_data_hash, compute_source_hash
 from probhub.mutation import (
     MAX_MUTANTS,
@@ -57,9 +60,12 @@ from probhub.solutions import normalize_solution_entries, resolve_solution_sourc
 from probhub.workspace import load_workspace, problem_entries, resolve_problem_dir
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BENCHMARK = "mutation-shadow-spawn-v1"
 CANCEL_GRACE_SECONDS = 2.0
+CACHE_PROFILES = ("cold", "warm")
+CACHE_SECTIONS = ("compile", "validator", "case", "probe")
+MAX_HOST_JOBS = 4
 FIXTURE_WORKSPACES_ROOT = ROOT / "tests" / "fixtures" / "workspaces"
 # Kept as the balanced fixture alias for focused worker tests.
 FIXTURE_ROOT = FIXTURE_WORKSPACES_ROOT / "mutation"
@@ -106,6 +112,12 @@ _LOCAL_MUTATION_ARTIFACTS = (
     ".probhub/mutation-evidence-v2.json",
     ".probhub/mutation.lock",
 )
+_LOCAL_JUDGE_ARTIFACTS = (
+    ".probhub/judge-evidence-v2.json",
+    ".probhub/judge-evidence.lock",
+    ".probhub/sandbox-cache-v1.json",
+    ".probhub/sandbox-cache-v1.json.tmp",
+)
 
 
 @dataclass(frozen=True)
@@ -120,7 +132,9 @@ class WorkerTask:
     config: dict
     execution_profile: dict
     mutant_timeout: float
-    use_cache: bool
+    cache_profile: str = "cold"
+    primer_root: str | None = None
+    primer_signature: dict | None = None
     synthetic: dict | None = None
 
 
@@ -142,6 +156,8 @@ class BenchmarkPlan:
     baseline_hash: str
     snapshot_seconds: float
     planning_seconds: float
+    primer_seconds: float
+    primer_observations: tuple[dict, ...]
     candidate_counts: dict
     execution_profile: dict
     tasks: tuple[WorkerTask, ...]
@@ -269,16 +285,24 @@ def _formal_artifact_hashes(root, problem):
     return snapshot
 
 
-def _local_mutation_artifact_hashes(problem):
+def _local_artifact_hashes(problem, relatives):
     problem = Path(problem)
     snapshot = {}
-    for relative in _LOCAL_MUTATION_ARTIFACTS:
+    for relative in relatives:
         path = problem / relative
         if path.is_file() and not path.is_symlink():
             snapshot[relative] = _hash_bytes(path.read_bytes())
         elif path.exists() or path.is_symlink():
             snapshot[relative] = "non-regular"
     return snapshot
+
+
+def _local_mutation_artifact_hashes(problem):
+    return _local_artifact_hashes(problem, _LOCAL_MUTATION_ARTIFACTS)
+
+
+def _local_judge_artifact_hashes(problem):
+    return _local_artifact_hashes(problem, _LOCAL_JUDGE_ARTIFACTS)
 
 
 def _failure_result(task, code, message, *, classification="infrastructure-failed"):
@@ -290,6 +314,149 @@ def _failure_result(task, code, message, *, classification="infrastructure-faile
             "code": str(code)[:256],
             "message": str(message)[:2048],
         },
+    }
+
+
+def _cache_observation(judged):
+    cache = judged.get("cache") if isinstance(judged, dict) else None
+    if not isinstance(cache, dict) or not any(
+        key in cache for key in ("mode", "compile_hits", "case_hits")
+    ):
+        return {
+            "observed": False,
+            "mode": None,
+            "read_enabled": None,
+            "sections": {
+                section: {"hits": None, "misses": None}
+                for section in CACHE_SECTIONS
+            },
+        }
+    return {
+        "observed": True,
+        "mode": cache.get("mode"),
+        "read_enabled": cache.get("read_enabled"),
+        "sections": {
+            section: {
+                "hits": cache.get(f"{section}_hits"),
+                "misses": cache.get(f"{section}_misses"),
+            }
+            for section in CACHE_SECTIONS
+        },
+    }
+
+
+def _cache_seed_hashes(problem):
+    problem = Path(problem)
+    cache = problem / ".probhub" / "sandbox-cache-v1.json"
+    binaries = {}
+    for path in sorted(problem.rglob("*.exe")):
+        if path.is_file() and not path.is_symlink():
+            binaries[path.relative_to(problem).as_posix()] = _hash_bytes(path.read_bytes())
+    return {
+        "cache": _hash_bytes(cache.read_bytes()) if cache.is_file() else None,
+        "binaries": binaries,
+    }
+
+
+def _materialize_mutant(task, destination):
+    destination = Path(destination)
+    shutil.copytree(task.baseline, destination)
+    source_relative = Path(*PurePosixPath(task.source_relative).parts)
+    (destination / source_relative).write_text(
+        apply_mutation(task.source, task.mutation),
+        encoding="utf-8",
+        newline="",
+    )
+    config = copy.deepcopy(task.config)
+    config["solutions"] = {
+        "accepted": [{
+            "file": task.source_relative,
+            "expected": {"status": "AC", "all": True},
+        }],
+        "brute": [],
+        "wrong": [],
+    }
+    write_yaml(destination / "probhub.yaml", config)
+
+
+def _judge_task_problem(task, problem, cancel_event, *, use_cache):
+    started = time.perf_counter()
+    judged = judge_problem(
+        Path(problem).parent,
+        problem,
+        use_cache=use_cache,
+        timeout=task.mutant_timeout,
+        output_limit_bytes=task.execution_profile["judge_output_limit_bytes"],
+        memory_limit_mb=task.execution_profile["judge_memory_limit_mb"],
+        process_limit=task.execution_profile["judge_process_limit"],
+        cancel_check=cancel_event.is_set,
+    )
+    judge_wall_seconds = time.perf_counter() - started
+    if cancel_event.is_set() or (judged.get("final") or {}).get("code") == "judge_cancelled":
+        raise ProcessCancelled("judge cancelled by shadow scheduler")
+    classification, hits, diagnostic = _classify_judge_result(
+        judged, task.source_relative
+    )
+    events = judged.get("events") or []
+    case_events = [
+        event for event in events
+        if event.get("type") == "case" and event.get("program") == task.source_relative
+    ]
+    fresh_times = [
+        float(event["time"])
+        for event in case_events
+        if not event.get("cached") and isinstance(event.get("time"), (int, float))
+    ]
+    cached_times = [
+        float(event["time"])
+        for event in case_events
+        if event.get("cached") and isinstance(event.get("time"), (int, float))
+    ]
+    fresh_memories = [
+        float(event["memory"])
+        for event in case_events
+        if not event.get("cached") and isinstance(event.get("memory"), (int, float))
+    ]
+    cached_memories = [
+        float(event["memory"])
+        for event in case_events
+        if event.get("cached") and isinstance(event.get("memory"), (int, float))
+    ]
+    hit_signature = [
+        {
+            "case": hit.get("case"),
+            "status": hit.get("status"),
+            "termination_reason": hit.get("termination_reason"),
+            "failure_kind": hit.get("failure_kind"),
+        }
+        for hit in hits
+    ]
+    return {
+        "index": task.index,
+        "id": task.mutation_id,
+        "classification": classification,
+        "diagnostic": {"code": str(diagnostic or "unknown")[:256]},
+        "final_code": (judged.get("final") or {}).get("code"),
+        "hit_cases": hit_signature,
+        "hit_cases_total": len(hits),
+        "case_events": len(case_events),
+        "max_case_seconds": round(max(fresh_times), 6) if fresh_times else None,
+        "max_case_memory_mb": (
+            round(max(fresh_memories), 6) if fresh_memories else None
+        ),
+        "max_cached_case_seconds": (
+            round(max(cached_times), 6) if cached_times else None
+        ),
+        "max_cached_case_memory_mb": (
+            round(max(cached_memories), 6) if cached_memories else None
+        ),
+        "judge_wall_seconds": round(judge_wall_seconds, 6),
+        "cache": _cache_observation(judged),
+        "case_measurement_origin": (
+            "mixed-fresh-and-cached-primer"
+            if fresh_times and cached_times else
+            "cached-primer" if cached_times else "fresh"
+        ),
     }
 
 
@@ -397,74 +564,82 @@ def _run_synthetic(task, cancel_event):
 def _run_judge_task(task, cancel_event):
     worker_root = Path(task.worker_root)
     problem = worker_root / "problem"
-    shutil.copytree(task.baseline, problem)
-    source_relative = Path(*PurePosixPath(task.source_relative).parts)
-    (problem / source_relative).write_text(
-        apply_mutation(task.source, task.mutation),
-        encoding="utf-8",
-        newline="",
-    )
-    config = copy.deepcopy(task.config)
-    config["solutions"] = {
-        "accepted": [{
-            "file": task.source_relative,
-            "expected": {"status": "AC", "all": True},
-        }],
-        "brute": [],
-        "wrong": [],
-    }
-    write_yaml(problem / "probhub.yaml", config)
-    judged = judge_problem(
-        worker_root,
+    materialize_started = time.perf_counter()
+    if task.cache_profile == "warm":
+        if not task.primer_root:
+            raise RuntimeError("warm cache task is missing its immutable primer")
+        if Path(task.primer_root).resolve() != problem.resolve() or not problem.is_dir():
+            raise RuntimeError("warm cache primer is not at the final worker path")
+    else:
+        _materialize_mutant(task, problem)
+    materialize_seconds = time.perf_counter() - materialize_started
+    cache_before = _cache_seed_hashes(problem)
+    result = _judge_task_problem(
+        task,
         problem,
-        use_cache=task.use_cache,
-        timeout=task.mutant_timeout,
-        output_limit_bytes=task.execution_profile["judge_output_limit_bytes"],
-        memory_limit_mb=task.execution_profile["judge_memory_limit_mb"],
-        process_limit=task.execution_profile["judge_process_limit"],
-        cancel_check=cancel_event.is_set,
+        cancel_event,
+        use_cache=task.cache_profile == "warm",
     )
-    if cancel_event.is_set() or (judged.get("final") or {}).get("code") == "judge_cancelled":
-        raise ProcessCancelled("judge cancelled by shadow scheduler")
-    classification, hits, diagnostic = _classify_judge_result(
-        judged, task.source_relative
-    )
-    events = judged.get("events") or []
-    case_events = [
-        event for event in events
-        if event.get("type") == "case" and event.get("program") == task.source_relative
-    ]
-    times = [
-        float(event["time"])
-        for event in case_events
-        if isinstance(event.get("time"), (int, float))
-    ]
-    memories = [
-        float(event["memory"])
-        for event in case_events
-        if isinstance(event.get("memory"), (int, float))
-    ]
-    hit_signature = [
-        {
-            "case": hit.get("case"),
-            "status": hit.get("status"),
-            "termination_reason": hit.get("termination_reason"),
-            "failure_kind": hit.get("failure_kind"),
+    result["cache_seed_before"] = cache_before
+    result["cache_seed_after"] = _cache_seed_hashes(problem)
+    result["materialize_seconds"] = round(materialize_seconds, 6)
+    result["primer_signature"] = task.primer_signature
+    result["primer_equivalent"] = (
+        task.primer_signature is None
+        or task.primer_signature == {
+            key: result.get(key)
+            for key in ("classification", "final_code", "hit_cases", "hit_cases_total")
         }
-        for hit in hits
-    ]
-    return {
-        "index": task.index,
-        "id": task.mutation_id,
-        "classification": classification,
-        "diagnostic": {"code": str(diagnostic or "unknown")[:256]},
-        "final_code": (judged.get("final") or {}).get("code"),
-        "hit_cases": hit_signature,
-        "hit_cases_total": len(hits),
-        "case_events": len(case_events),
-        "max_case_seconds": round(max(times), 6) if times else None,
-        "max_case_memory_mb": round(max(memories), 6) if memories else None,
-    }
+    )
+    return result
+
+
+def _prepare_warm_primers(tasks):
+    started = time.perf_counter()
+    observations = []
+    prepared = []
+    cancel_event = threading.Event()
+    for task in tasks:
+        primer = Path(task.worker_root) / "problem"
+        _materialize_mutant(task, primer)
+        cold_task = replace(task, cache_profile="cold", primer_root=None)
+        observation = _judge_task_problem(
+            cold_task, primer, cancel_event, use_cache=False
+        )
+        if observation.get("classification") == "infrastructure-failed":
+            raise ProbHubError(
+                f"warm cache primer failed for {task.mutation_id}",
+                code="benchmark_primer_failed",
+            )
+        seed = _cache_seed_hashes(primer)
+        if seed["cache"] is None:
+            raise ProbHubError(
+                f"warm cache primer did not publish cache for {task.mutation_id}",
+                code="benchmark_primer_cache_missing",
+            )
+        signature = {
+            key: observation.get(key)
+            for key in (
+                "classification", "final_code", "hit_cases", "hit_cases_total"
+            )
+        }
+        observations.append({
+            "id": task.mutation_id,
+            "signature": signature,
+            "judge_wall_seconds": observation.get("judge_wall_seconds"),
+            "cache": observation.get("cache"),
+            "seed": seed,
+        })
+        prepared.append(replace(
+            task,
+            primer_root=str(primer),
+            primer_signature=signature,
+        ))
+    return (
+        tuple(prepared),
+        round(time.perf_counter() - started, 6),
+        tuple(observations),
+    )
 
 
 def _worker_entry(task, cancel_event, connection):
@@ -922,9 +1097,11 @@ def prepare_plan(
     max_mutants,
     operators,
     mutant_timeout,
-    use_cache=False,
+    cache_profile="cold",
     profile_name="balanced",
 ):
+    if cache_profile not in CACHE_PROFILES:
+        raise ValueError(f"invalid cache profile: {cache_profile}")
     try:
         profile = FIXTURE_PROFILES[profile_name]
     except KeyError as exc:
@@ -984,10 +1161,16 @@ def prepare_plan(
             config=config,
             execution_profile=execution_profile,
             mutant_timeout=float(mutant_timeout),
-            use_cache=bool(use_cache),
+            cache_profile=cache_profile,
         )
         for index, mutation in enumerate(mutation_plan["mutations"])
     )
+    primer_seconds = 0.0
+    primer_observations = ()
+    if cache_profile == "warm":
+        tasks, primer_seconds, primer_observations = (
+            _prepare_warm_primers(tasks)
+        )
     return BenchmarkPlan(
         profile_name=profile_name,
         profile=dict(profile),
@@ -1005,6 +1188,8 @@ def prepare_plan(
         baseline_hash=_hash_tree(baseline),
         snapshot_seconds=round(snapshot_seconds, 6),
         planning_seconds=round(planning_seconds, 6),
+        primer_seconds=primer_seconds,
+        primer_observations=primer_observations,
         candidate_counts={
             "raw": mutation_plan["raw_planned"],
             "excluded": mutation_plan["excluded"],
@@ -1024,7 +1209,7 @@ def run_benchmark(
     max_mutants,
     operators,
     mutant_timeout,
-    use_cache=False,
+    cache_profile="cold",
     profile_name="balanced",
 ):
     total_started = time.perf_counter()
@@ -1041,6 +1226,7 @@ def run_benchmark(
     live_before = _live_input_hashes(live_problem)
     formal_before = _formal_artifact_hashes(live_root, live_problem)
     mutation_artifacts_before = _local_mutation_artifact_hashes(live_problem)
+    judge_artifacts_before = _local_judge_artifact_hashes(live_problem)
     fixture_before = _hash_tree(live_root)
 
     with tempfile.TemporaryDirectory(prefix="probhub-mutation-shadow-") as temp:
@@ -1049,7 +1235,7 @@ def run_benchmark(
             max_mutants=max_mutants,
             operators=operators,
             mutant_timeout=mutant_timeout,
-            use_cache=use_cache,
+            cache_profile=cache_profile,
             profile_name=profile_name,
         )
         if not plan.tasks:
@@ -1063,10 +1249,27 @@ def run_benchmark(
         workers_cleaned = scheduled["workers_cleaned"] and not any(
             plan.workers_root.iterdir()
         )
+        primers_unchanged = all(
+            result.get("cache_seed_before") == observation.get("seed")
+            for result, observation in zip(
+                scheduled["mutations"], plan.primer_observations
+            )
+        ) if plan.primer_observations else True
+        primer_results_equivalent = all(
+            result.get("primer_equivalent", True)
+            for result in scheduled["mutations"]
+        )
+        cache_summary = _cache_summary(scheduled.get("mutations", []))
+        warm_cache_complete = _warm_cache_is_complete(
+            cache_profile,
+            cache_summary,
+            scheduled["completed"],
+        )
 
     live_after = _live_input_hashes(live_problem)
     formal_after = _formal_artifact_hashes(live_root, live_problem)
     mutation_artifacts_after = _local_mutation_artifact_hashes(live_problem)
+    judge_artifacts_after = _local_judge_artifact_hashes(live_problem)
     fixture_after = _hash_tree(live_root)
     wall_seconds = time.perf_counter() - total_started
     report = {
@@ -1083,7 +1286,21 @@ def run_benchmark(
             ),
         },
         "jobs": jobs,
-        "use_cache": bool(use_cache),
+        "cache_profile": cache_profile,
+        "cache_observation": {
+            "schema_version": 1,
+            "scope": "per-mutant-immutable-primer",
+            "sandbox_cache_schema_version": SANDBOX_CACHE_SCHEMA_VERSION,
+            "cross_mutant_shared": False,
+            "host_cache_controlled": False,
+            "primer_measured": False,
+            "primer_seconds": plan.primer_seconds,
+            "primer_observations": list(plan.primer_observations),
+            "primers_unchanged": primers_unchanged,
+            "primer_results_equivalent": primer_results_equivalent,
+            "warm_cache_complete": warm_cache_complete,
+            "warm_cache_partial": cache_profile == "warm" and not warm_cache_complete,
+        },
         "environment": _environment_identity(),
         "planned": scheduled["planned"],
         "started": scheduled["started"],
@@ -1102,10 +1319,12 @@ def run_benchmark(
         "resource_summary": _resource_summary(
             scheduled.get("mutations", []), scheduled.get("resource_peak")
         ),
+        "cache_summary": cache_summary,
         "failure_summary": _failure_summary(scheduled),
         "phase_seconds": {
             "snapshot": plan.snapshot_seconds,
             "planning": plan.planning_seconds,
+            "primer": plan.primer_seconds,
             "scheduler": scheduled["scheduler_wall_seconds"],
         },
         "stop_code": scheduled["stop_code"],
@@ -1118,6 +1337,8 @@ def run_benchmark(
             "formal_after": formal_after,
             "mutation_artifacts_before": mutation_artifacts_before,
             "mutation_artifacts_after": mutation_artifacts_after,
+            "judge_artifacts_before": judge_artifacts_before,
+            "judge_artifacts_after": judge_artifacts_after,
             "fixture_before": fixture_before,
             "fixture_after": fixture_after,
         },
@@ -1129,6 +1350,7 @@ def run_benchmark(
         "mutation_evidence_unchanged": (
             mutation_artifacts_before == mutation_artifacts_after
         ),
+        "judge_artifacts_unchanged": judge_artifacts_before == judge_artifacts_after,
         "fixture_unchanged": fixture_before == fixture_after,
         "workers_cleaned": workers_cleaned,
         "descendants_cleaned": scheduled["descendants_cleaned"],
@@ -1177,6 +1399,10 @@ def _resource_summary(mutations, resource_peak=None):
     worker_times = []
     worker_cpu_times = []
     worker_child_cpu_times = []
+    judge_wall_times = []
+    materialize_times = []
+    cached_case_times = []
+    cached_case_memories = []
     for item in mutations or ():
         if isinstance(item.get("elapsed_seconds"), (int, float)):
             worker_times.append(float(item["elapsed_seconds"]))
@@ -1186,6 +1412,17 @@ def _resource_summary(mutations, resource_peak=None):
             worker_child_cpu_times.append(
                 float(item["worker_children_cpu_seconds"])
             )
+        if isinstance(item.get("judge_wall_seconds"), (int, float)):
+            judge_wall_times.append(float(item["judge_wall_seconds"]))
+        if isinstance(item.get("materialize_seconds"), (int, float)):
+            materialize_times.append(float(item["materialize_seconds"]))
+        for key, destination in (
+            ("max_cached_case_seconds", cached_case_times),
+            ("max_cached_case_memory_mb", cached_case_memories),
+        ):
+            value = item.get(key)
+            if isinstance(value, (int, float)):
+                destination.append(float(value))
         for key, destination in (("max_case_seconds", case_times), ("max_case_memory_mb", case_memories)):
             value = item.get(key)
             if isinstance(value, (int, float)):
@@ -1198,6 +1435,24 @@ def _resource_summary(mutations, resource_peak=None):
         "case_memory_mb_max": round(max(case_memories), 6) if case_memories else None,
         "worker_elapsed_seconds_max": round(max(worker_times), 6) if worker_times else None,
         "worker_elapsed_seconds_sum": round(sum(worker_times), 6) if worker_times else 0.0,
+        "judge_wall_seconds_max": (
+            round(max(judge_wall_times), 6) if judge_wall_times else None
+        ),
+        "judge_wall_seconds_sum": (
+            round(sum(judge_wall_times), 6) if judge_wall_times else None
+        ),
+        "materialize_seconds_sum": (
+            round(sum(materialize_times), 6) if materialize_times else None
+        ),
+        "cached_case_time_seconds_max": (
+            round(max(cached_case_times), 6) if cached_case_times else None
+        ),
+        "cached_case_memory_mb_max": (
+            round(max(cached_case_memories), 6) if cached_case_memories else None
+        ),
+        "cached_case_values_are_primer_measurements": bool(
+            cached_case_times or cached_case_memories
+        ),
         "worker_cpu_seconds_sum": (
             round(sum(worker_cpu_times), 6) if worker_cpu_times else None
         ),
@@ -1233,6 +1488,51 @@ def _resource_summary(mutations, resource_peak=None):
     }
 
 
+def _cache_summary(mutations):
+    summary = {
+        section: {"hits": 0, "misses": 0, "observed": False}
+        for section in CACHE_SECTIONS
+    }
+    observed = 0
+    for item in mutations or ():
+        cache = item.get("cache") or {}
+        if not cache.get("observed"):
+            continue
+        observed += 1
+        for section in CACHE_SECTIONS:
+            values = (cache.get("sections") or {}).get(section) or {}
+            hits = values.get("hits")
+            misses = values.get("misses")
+            if isinstance(hits, int) and isinstance(misses, int):
+                summary[section]["hits"] += hits
+                summary[section]["misses"] += misses
+                summary[section]["observed"] = True
+    return {
+        "workers_observed": observed,
+        "workers_total": len(mutations or ()),
+        "sections": {
+            section: (
+                values if values["observed"] else {
+                    "hits": None, "misses": None, "observed": False
+                }
+            )
+            for section, values in summary.items()
+        },
+    }
+
+
+def _warm_cache_is_complete(cache_profile, cache_summary, completed):
+    return (
+        cache_profile == "warm"
+        and cache_summary["workers_observed"] == completed
+        and all(
+            cache_summary["sections"][section]["observed"]
+            and cache_summary["sections"][section]["misses"] == 0
+            for section in CACHE_SECTIONS
+        )
+    )
+
+
 def _failure_summary(scheduled):
     diagnostics = {}
     for item in scheduled.get("mutations", []):
@@ -1263,7 +1563,7 @@ def run_matrix(
     max_mutants,
     operators,
     mutant_timeout,
-    use_cache=False,
+    cache_profile="cold",
     profile_name="balanced",
 ):
     if repetitions <= 0:
@@ -1288,7 +1588,7 @@ def run_matrix(
                 max_mutants=max_mutants,
                 operators=operators,
                 mutant_timeout=mutant_timeout,
-                use_cache=use_cache,
+                cache_profile=cache_profile,
                 profile_name=profile_name,
             )
             signature = _comparison_signature(report)
@@ -1345,7 +1645,7 @@ def run_matrix(
         "fixture_profile": profile_name,
         "jobs": list(jobs_values),
         "repetitions": repetitions,
-        "use_cache": bool(use_cache),
+        "cache_profile": cache_profile,
         "results_equivalent": equivalent and identities_equivalent,
         "classifications_equivalent": equivalent,
         "identities_equivalent": identities_equivalent,
@@ -1353,6 +1653,242 @@ def run_matrix(
         "reference_identity": reference_identity or {},
         "summary": by_jobs,
         "runs": runs,
+        "performance_gate": False,
+    }
+
+
+def _run_complete(report):
+    classifications = report.get("classifications") or {}
+    return (
+        isinstance(report.get("planned"), int)
+        and report.get("completed") == report.get("planned")
+        and classifications.get("infrastructure-failed") == 0
+        and classifications.get("cancelled") == 0
+        and report.get("stop_code") is None
+    )
+
+
+def _run_safe(report):
+    fields = (
+        "live_inputs_unchanged",
+        "formal_artifacts_unchanged",
+        "mutation_evidence_unchanged",
+        "judge_artifacts_unchanged",
+        "fixture_unchanged",
+        "workers_cleaned",
+        "descendants_cleaned",
+    )
+    return _run_complete(report) and all(report.get(field) is True for field in fields)
+
+
+def _remove_concurrent_cpu_attribution(report):
+    resources = report.get("resource_summary")
+    if not isinstance(resources, dict):
+        return
+    resources["scheduler_parent_cpu_seconds"] = None
+    resources["scheduler_parent_cpu_observed"] = False
+    resources["direct_worker_cpu_seconds"] = None
+    resources["direct_worker_cpu_observed"] = False
+    resources["cpu_scope"] = (
+        "per-worker CPU only; scheduler/direct-child CPU is not independently "
+        "attributable while two schedulers share one parent process"
+    )
+
+
+def run_contention(
+    *,
+    profiles,
+    jobs_per_profile,
+    timeout,
+    max_mutants,
+    operators,
+    mutant_timeout,
+    cache_profile="cold",
+):
+    profiles = tuple(profiles)
+    if len(profiles) != 2 or len(set(profiles)) != 2:
+        raise ValueError("contention benchmark requires two distinct profiles")
+    if any(profile not in FIXTURE_PROFILES for profile in profiles):
+        raise ValueError("contention benchmark received an unknown profile")
+    if jobs_per_profile not in {1, 2}:
+        raise ValueError("contention jobs per profile must be 1 or 2")
+    if jobs_per_profile * len(profiles) > MAX_HOST_JOBS:
+        raise ValueError("contention benchmark exceeds the host job budget")
+
+    references = {
+        profile: run_benchmark(
+            jobs=jobs_per_profile,
+            timeout=timeout,
+            max_mutants=max_mutants,
+            operators=operators,
+            mutant_timeout=mutant_timeout,
+            cache_profile=cache_profile,
+            profile_name=profile,
+        )
+        for profile in profiles
+    }
+    started = time.perf_counter()
+    concurrent_reports = {}
+    host_peak = {
+        "process_count": None,
+        "rss_mb": None,
+        "observed": False,
+        "samples": 0,
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(profiles)) as executor:
+        futures = {
+            profile: executor.submit(
+                run_benchmark,
+                jobs=jobs_per_profile,
+                timeout=timeout,
+                max_mutants=max_mutants,
+                operators=operators,
+                mutant_timeout=mutant_timeout,
+                cache_profile=cache_profile,
+                profile_name=profile,
+            )
+            for profile in profiles
+        }
+        while not all(future.done() for future in futures.values()):
+            count, rss_mb = process_tree_metrics(os.getpid())
+            if count is not None and rss_mb is not None:
+                host_peak["observed"] = True
+                host_peak["samples"] += 1
+                host_peak["process_count"] = max(
+                    int(host_peak["process_count"] or 0), int(count)
+                )
+                host_peak["rss_mb"] = max(
+                    float(host_peak["rss_mb"] or 0.0), float(rss_mb)
+                )
+            time.sleep(0.05)
+        for profile in profiles:
+            try:
+                concurrent_reports[profile] = futures[profile].result()
+                _remove_concurrent_cpu_attribution(concurrent_reports[profile])
+            except BaseException as exc:
+                concurrent_reports[profile] = {
+                    "ok": False,
+                    "error": getattr(exc, "code", None) or type(exc).__name__,
+                    "message": str(exc),
+                }
+    wall_seconds = time.perf_counter() - started
+    comparisons = {}
+    for profile in profiles:
+        reference = references[profile]
+        report = concurrent_reports[profile]
+        comparisons[profile] = {
+            "completed": "mutations" in report,
+            "results_equivalent": (
+                "mutations" in report
+                and _comparison_signature(report) == _comparison_signature(reference)
+            ),
+            "identities_equivalent": (
+                "hashes" in report
+                and _comparison_identity(report) == _comparison_identity(reference)
+            ),
+            "wall_seconds_reference": reference.get("wall_seconds"),
+            "wall_seconds_contended": report.get("wall_seconds"),
+            "slowdown_vs_reference": (
+                round(report["wall_seconds"] / reference["wall_seconds"], 6)
+                if isinstance(report.get("wall_seconds"), (int, float))
+                and isinstance(reference.get("wall_seconds"), (int, float))
+                and reference["wall_seconds"] > 0
+                else None
+            ),
+        }
+    all_reports = tuple(references.values()) + tuple(concurrent_reports.values())
+    all_safe = all(_run_safe(report) for report in all_reports)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "benchmark": BENCHMARK + "-contention",
+        "profiles": list(profiles),
+        "jobs_per_profile": jobs_per_profile,
+        "host_job_budget": MAX_HOST_JOBS,
+        "cache_profile": cache_profile,
+        "failure_scope": "per-problem-independent",
+        "cpu_attribution": (
+            "per-problem child CPU is unavailable under concurrent thread schedulers; "
+            "host process-tree metrics are authoritative where observed"
+        ),
+        "wall_seconds": round(wall_seconds, 6),
+        "host_resource_observation": {
+            "observed": host_peak["observed"],
+            "provider": "linux-procfs" if host_peak["observed"] else None,
+            "scope": (
+                "benchmark-parent-and-descendant-process-tree"
+                if host_peak["observed"] else None
+            ),
+            "process_count_peak": host_peak["process_count"],
+            "active_rss_mb_peak": (
+                round(host_peak["rss_mb"], 6)
+                if host_peak["rss_mb"] is not None else None
+            ),
+            "samples": host_peak["samples"],
+        },
+        "references": references,
+        "reports": concurrent_reports,
+        "comparisons": comparisons,
+        "results_equivalent": all(
+            item["results_equivalent"] and item["identities_equivalent"]
+            for item in comparisons.values()
+        ),
+        "all_safe": all_safe,
+        "performance_gate": False,
+    }
+
+
+def run_cache_pair(
+    *,
+    jobs,
+    timeout,
+    max_mutants,
+    operators,
+    mutant_timeout,
+    profile_name="balanced",
+):
+    reports = {
+        profile: run_benchmark(
+            jobs=jobs,
+            timeout=timeout,
+            max_mutants=max_mutants,
+            operators=operators,
+            mutant_timeout=mutant_timeout,
+            cache_profile=profile,
+            profile_name=profile_name,
+        )
+        for profile in CACHE_PROFILES
+    }
+    cold = reports["cold"]
+    warm = reports["warm"]
+    cold_measured = (cold.get("resource_summary") or {}).get("judge_wall_seconds_sum")
+    warm_measured = (warm.get("resource_summary") or {}).get("judge_wall_seconds_sum")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "benchmark": BENCHMARK + "-cache-pair",
+        "fixture_profile": profile_name,
+        "jobs": jobs,
+        "cache_scope": "logical-sandbox-cache-not-host-cache",
+        "host_cache_controlled": False,
+        "reports": reports,
+        "results_equivalent": (
+            _comparison_signature(cold) == _comparison_signature(warm)
+            and _comparison_identity(cold) == _comparison_identity(warm)
+            and warm["cache_observation"]["primer_results_equivalent"]
+        ),
+        "all_safe": all(_run_safe(report) for report in reports.values()),
+        "measured_judge_wall_seconds": {
+            "cold": cold_measured,
+            "warm": warm_measured,
+        },
+        "warm_speedup_vs_cold": (
+            round(cold_measured / warm_measured, 6)
+            if isinstance(cold_measured, (int, float))
+            and isinstance(warm_measured, (int, float))
+            and warm_measured > 0
+            else None
+        ),
+        "warm_cache_complete": warm["cache_observation"]["warm_cache_complete"],
+        "warm_cache_partial": warm["cache_observation"]["warm_cache_partial"],
         "performance_gate": False,
     }
 
@@ -1373,6 +1909,19 @@ def _write_stdout(payload):
     stream.flush()
 
 
+def _validate_output_path(output):
+    if output is None:
+        return
+    resolved = Path(output).resolve()
+    protected_roots = [FIXTURE_WORKSPACES_ROOT.resolve()]
+    for root in protected_roots:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        raise ValueError("benchmark output must stay outside committed Fixture workspaces")
+
+
 def build_parser():
     parser = _StructuredArgumentParser(description=__doc__)
     parser.add_argument("--jobs", type=int, choices=(1, 2, 4), default=1)
@@ -1391,9 +1940,26 @@ def build_parser():
     parser.add_argument("--max-mutants", type=int, default=3)
     parser.add_argument("--operator", action="append", choices=MUTATION_OPERATORS)
     parser.add_argument(
-        "--use-cache",
+        "--cache-profile",
+        choices=CACHE_PROFILES,
+        default="cold",
+        help="observe a forced-refresh cold run or an immutable per-mutant warm primer",
+    )
+    parser.add_argument(
+        "--contention",
         action="store_true",
-        help="allow each isolated Judge worker to use its own temporary cache",
+        help="compare two independent profiles alone and concurrently on one host",
+    )
+    parser.add_argument(
+        "--cache-pair",
+        action="store_true",
+        help="compare forced-refresh cold and per-mutant primed warm runs",
+    )
+    parser.add_argument(
+        "--contention-profile",
+        action="append",
+        choices=tuple(FIXTURE_PROFILES),
+        help="profile for --contention; provide exactly two distinct values",
     )
     parser.add_argument("--output", type=Path)
     return parser
@@ -1403,29 +1969,59 @@ def main(argv=None):
     parser = build_parser()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     output = None
+    validated_output = None
     for index, value in enumerate(raw_argv):
         if value == "--output" and index + 1 < len(raw_argv):
             output = Path(raw_argv[index + 1])
         elif value.startswith("--output="):
             output = Path(value.split("=", 1)[1])
     try:
+        _validate_output_path(output)
+        validated_output = output
         args = parser.parse_args(raw_argv)
         output = args.output
+        _validate_output_path(output)
+        validated_output = output
         if args.timeout <= 0 or args.mutant_timeout <= 0:
             raise ValueError("timeouts must be positive")
         if args.repetitions <= 0:
             raise ValueError("repetitions must be positive")
         if args.max_mutants <= 0 or args.max_mutants > MAX_MUTANTS:
             raise ValueError(f"max-mutants must be in 1..{MAX_MUTANTS}")
+        selected_modes = sum(bool(value) for value in (
+            args.matrix, args.contention, args.cache_pair
+        ))
+        if selected_modes > 1:
+            raise ValueError("--matrix, --contention, and --cache-pair are mutually exclusive")
+        if args.contention_profile and not args.contention:
+            raise ValueError("--contention-profile requires --contention")
+        if args.cache_pair and args.cache_profile != "cold":
+            raise ValueError("--cache-pair manages cold and warm profiles internally")
         report = (
-            run_matrix(
+            run_contention(
+                profiles=args.contention_profile or ("many-light", "few-heavy"),
+                jobs_per_profile=args.jobs,
+                timeout=args.timeout,
+                max_mutants=args.max_mutants,
+                operators=args.operator,
+                mutant_timeout=args.mutant_timeout,
+                cache_profile=args.cache_profile,
+            )
+            if args.contention else run_cache_pair(
+                jobs=args.jobs,
+                timeout=args.timeout,
+                max_mutants=args.max_mutants,
+                operators=args.operator,
+                mutant_timeout=args.mutant_timeout,
+                profile_name=args.profile,
+            ) if args.cache_pair else run_matrix(
                 jobs_values=(1, 2, 4),
                 repetitions=args.repetitions,
                 timeout=args.timeout,
                 max_mutants=args.max_mutants,
                 operators=args.operator,
                 mutant_timeout=args.mutant_timeout,
-                use_cache=args.use_cache,
+                cache_profile=args.cache_profile,
                 profile_name=args.profile,
             )
             if args.matrix
@@ -1435,7 +2031,7 @@ def main(argv=None):
                 max_mutants=args.max_mutants,
                 operators=args.operator,
                 mutant_timeout=args.mutant_timeout,
-                use_cache=args.use_cache,
+                cache_profile=args.cache_profile,
                 profile_name=args.profile,
             )
         )
@@ -1454,16 +2050,18 @@ def main(argv=None):
             "error": getattr(exc, "code", None) or type(exc).__name__,
             "message": str(exc),
         }, ensure_ascii=False, indent=2) + "\n"
-        if output is not None:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(failure, encoding="utf-8", newline="")
+        if validated_output is not None:
+            validated_output.parent.mkdir(parents=True, exist_ok=True)
+            validated_output.write_text(failure, encoding="utf-8", newline="")
         _write_stdout(failure)
         return 1
     payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
-    if output is not None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(payload, encoding="utf-8", newline="")
+    if validated_output is not None:
+        validated_output.parent.mkdir(parents=True, exist_ok=True)
+        validated_output.write_text(payload, encoding="utf-8", newline="")
     _write_stdout(payload)
+    if args.contention or args.cache_pair:
+        return 0 if report["results_equivalent"] and report["all_safe"] else 1
     if args.matrix:
         return 0 if (
             report["results_equivalent"]
@@ -1473,6 +2071,7 @@ def main(argv=None):
                 and item["report"]["live_inputs_unchanged"]
                 and item["report"]["formal_artifacts_unchanged"]
                 and item["report"]["mutation_evidence_unchanged"]
+                and item["report"]["judge_artifacts_unchanged"]
                 and item["report"]["fixture_unchanged"]
                 and item["report"]["workers_cleaned"]
                 and item["report"]["descendants_cleaned"]
@@ -1485,6 +2084,7 @@ def main(argv=None):
         and report["live_inputs_unchanged"]
         and report["formal_artifacts_unchanged"]
         and report["mutation_evidence_unchanged"]
+        and report["judge_artifacts_unchanged"]
         and report["fixture_unchanged"]
         and report["workers_cleaned"]
         and report["descendants_cleaned"]
