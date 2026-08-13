@@ -4,11 +4,15 @@ name: Mutation benchmark
   pull_request:
     paths:
       - ".github/workflows/mutation-benchmark.yml"
-      - "probhub/mutation.py"
-      - "probhub/judging.py"
-      - "probhub/process_control.py"
+      - "probhub/**"
+      - "scripts/local_judge.py"
+      - "references/testlib.h"
+      - "requirements.txt"
       - "tests/benchmarks/benchmark_mutation.py"
+      - "tests/fixture_support.py"
       - "tests/fixtures/workspaces/mutation/**"
+      - "tests/fixtures/workspaces/mutation-many-light/**"
+      - "tests/fixtures/workspaces/mutation-few-heavy/**"
       - "tests/test_mutation.py"
       - "tests/test_mutation_benchmark.py"
   workflow_dispatch:
@@ -65,9 +69,36 @@ jobs:
               --timeout 600 `
               --mutant-timeout 180 `
               --max-mutants $profile.MaxMutants `
+              --cache-profile cold `
               --output "benchmark-results/mutation-$($profile.Name)-$($env:RUNNER_OS.ToLowerInvariant()).json"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+      - name: Observe logical sandbox cache cold and warm runs
+        shell: pwsh
+        run: |
+          python tests/benchmarks/benchmark_mutation.py `
+            --cache-pair `
+            --profile balanced `
+            --jobs 1 `
+            --timeout 600 `
+            --mutant-timeout 180 `
+            --max-mutants 1 `
+            --output "benchmark-results/mutation-cache-pair-$($env:RUNNER_OS.ToLowerInvariant()).json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Observe same-host two-problem contention
+        shell: pwsh
+        run: |
+          python tests/benchmarks/benchmark_mutation.py `
+            --contention `
+            --contention-profile many-light `
+            --contention-profile few-heavy `
+            --jobs 1 `
+            --cache-profile cold `
+            --timeout 600 `
+            --mutant-timeout 180 `
+            --max-mutants 2 `
+            --output "benchmark-results/mutation-contention-$($env:RUNNER_OS.ToLowerInvariant()).json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload JSON observation
         if: always()
         uses: actions/upload-artifact@v4
