@@ -21,6 +21,8 @@ WORKSPACE_FIXTURES = (
     "interactive",
     "stress",
     "mutation",
+    "mutation-many-light",
+    "mutation-few-heavy",
     *JUDGE_QA_FIXTURES,
 )
 

@@ -14,9 +14,9 @@ name: Mutation benchmark
   workflow_dispatch:
     inputs:
       repetitions:
-        description: Sequential repetitions of the jobs 1/2/4 matrix
+        description: Sequential repetitions of each jobs 1/2/4 profile matrix
         required: false
-        default: "5"
+        default: "1"
   schedule:
     - cron: "41 3 * * 3"
 
@@ -46,19 +46,28 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Assert g++ toolchain is available
         run: g++ --version
-      - name: Run sequential shadow scheduler matrix
+      - name: Run sequential shadow scheduler profile matrices
         shell: pwsh
         env:
-          BENCHMARK_REPETITIONS: ${{ inputs.repetitions || '5' }}
+          BENCHMARK_REPETITIONS: ${{ inputs.repetitions || '1' }}
         run: |
           New-Item -ItemType Directory -Force benchmark-results | Out-Null
-          python tests/benchmarks/benchmark_mutation.py `
-            --matrix `
-            --repetitions $env:BENCHMARK_REPETITIONS `
-            --timeout 300 `
-            --mutant-timeout 120 `
-            --max-mutants 4 `
-            --output "benchmark-results/mutation-$($env:RUNNER_OS.ToLowerInvariant()).json"
+          $profiles = @(
+            @{ Name = "balanced"; MaxMutants = 4 },
+            @{ Name = "many-light"; MaxMutants = 8 },
+            @{ Name = "few-heavy"; MaxMutants = 3 }
+          )
+          foreach ($profile in $profiles) {
+            python tests/benchmarks/benchmark_mutation.py `
+              --matrix `
+              --profile $profile.Name `
+              --repetitions $env:BENCHMARK_REPETITIONS `
+              --timeout 600 `
+              --mutant-timeout 180 `
+              --max-mutants $profile.MaxMutants `
+              --output "benchmark-results/mutation-$($profile.Name)-$($env:RUNNER_OS.ToLowerInvariant()).json"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Upload JSON observation
         if: always()
         uses: actions/upload-artifact@v4

@@ -61,6 +61,11 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertEqual(result["classifications"]["survived"], 1)
         self.assertEqual(result["classifications"]["killed"], 1)
         self.assertEqual(result["classifications"]["compile-invalid"], 1)
+        if result["resource_peak"]["process_count_observed"]:
+            if result["resource_peak"]["resource_provider"] == "linux-procfs":
+                self.assertTrue(result["resource_peak"]["process_count_exact"])
+            else:
+                self.assertFalse(result["resource_peak"]["process_count_exact"])
         self.assertTrue(result["workers_cleaned"])
 
     def test_jobs_two_is_bounded_and_aggregates_in_plan_order(self):
@@ -331,6 +336,66 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertGreaterEqual(plan.planning_seconds, 0)
         self.assertTrue(all(task.use_cache for task in plan.tasks))
 
+    def test_fixture_profiles_have_distinct_candidate_scales(self):
+        expected = {
+            "balanced": ("mutation", "M01", 5),
+            "many-light": ("mutation-many-light", "M02", 30),
+            "few-heavy": ("mutation-few-heavy", "M03", 3),
+        }
+        for profile_name, (workspace, problem_id, raw_candidates) in expected.items():
+            with self.subTest(profile=profile_name), tempfile.TemporaryDirectory() as temp:
+                plan = benchmark.prepare_plan(
+                    Path(temp),
+                    max_mutants=benchmark.MAX_MUTANTS,
+                    operators=None,
+                    mutant_timeout=60,
+                    profile_name=profile_name,
+                )
+            self.assertEqual(plan.profile_name, profile_name)
+            self.assertEqual(plan.problem_id, problem_id)
+            self.assertEqual(plan.live_root.name, workspace)
+            self.assertEqual(plan.live_problem.name, problem_id)
+            self.assertEqual(plan.candidate_counts["raw"], raw_candidates)
+            self.assertEqual(plan.candidate_counts["selected"], raw_candidates)
+            self.assertFalse(plan.candidate_counts["truncated"])
+
+    def test_profile_selection_is_forwarded_through_matrix(self):
+        calls = []
+
+        def fake_run(**kwargs):
+            calls.append(kwargs["profile_name"])
+            return {
+                "wall_seconds": 1.0,
+                "mutants_per_second": 1.0,
+                "mutations": [],
+                "hashes": {
+                    "source": "source",
+                    "data": "data",
+                    "plan": "plan",
+                    "baseline": "baseline",
+                },
+            }
+
+        with patch("benchmark_mutation.run_benchmark", side_effect=fake_run):
+            report = benchmark.run_matrix(
+                jobs_values=(1, 2),
+                repetitions=1,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+                profile_name="many-light",
+            )
+
+        self.assertEqual(calls, ["many-light", "many-light"])
+        self.assertEqual(report["fixture_profile"], "many-light")
+
+    def test_fixture_profile_targets_match_ci_selection(self):
+        self.assertEqual(
+            benchmark.FIXTURE_PROFILES["many-light"]["candidate_target"],
+            {"raw": 30, "ci_selected": 8},
+        )
+
     def test_formal_artifact_snapshot_detects_changes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -384,6 +449,21 @@ class SpawnSchedulerTests(unittest.TestCase):
                 "scheduler_wall_seconds": 1.0,
                 "scheduler_mutants_per_second": 1.0,
                 "max_active": 1,
+                "resource_peak": {
+                    "process_count": 2,
+                    "process_count_observed": True,
+                    "process_count_exact": True,
+                    "process_count_scope": "active-worker-process-trees",
+                    "resource_provider": "linux-procfs",
+                    "rss_mb": 32.5,
+                    "rss_observed": True,
+                    "samples": 3,
+                    "parent_cpu_seconds": 0.1,
+                    "direct_children_cpu_seconds": 0.2,
+                    "parent_cpu_observed": True,
+                    "direct_children_cpu_observed": True,
+                    "cpu_scope": "scheduler-and-direct-workers-only",
+                },
                 "stop_code": None,
                 "workers_cleaned": True,
                 "descendants_cleaned": True,
@@ -431,6 +511,94 @@ class SpawnSchedulerTests(unittest.TestCase):
             ]
         )
         self.assertFalse(report["performance_gate"])
+        self.assertEqual(report["fixture"]["profile"], "balanced")
+        self.assertEqual(report["fixture"]["problem_id"], "M01")
+        self.assertEqual(report["candidate_plan"]["selected"], 1)
+        self.assertEqual(report["resource_summary"]["process_count_peak"], 2)
+        self.assertTrue(report["resource_summary"]["process_count_exact"])
+        self.assertEqual(report["resource_summary"]["active_rss_mb_peak"], 32.5)
+        self.assertEqual(report["failure_summary"]["infrastructure_failed"], 0)
+        self.assertIn("cpu_scope", report["resource_summary"])
+
+    def test_resource_and_failure_summaries_are_stable(self):
+        scheduled = {
+            "classifications": {
+                "infrastructure-failed": 1,
+                "cancelled": 2,
+            },
+            "mutations": [
+                {
+                    "classification": "infrastructure-failed",
+                    "diagnostic": {"code": "judge_timeout"},
+                    "elapsed_seconds": 3,
+                    "worker_cpu_seconds": 0.5,
+                    "worker_children_cpu_seconds": 0.75,
+                    "max_case_seconds": 1.25,
+                    "max_case_memory_mb": 64,
+                },
+                {
+                    "classification": "cancelled",
+                    "diagnostic": {"code": "scheduler-timeout"},
+                    "elapsed_seconds": None,
+                },
+                {
+                    "classification": "cancelled",
+                    "diagnostic": {"code": "scheduler-timeout"},
+                    "elapsed_seconds": None,
+                },
+            ],
+            "stop_code": "infrastructure-failed",
+        }
+        resources = benchmark._resource_summary(
+            scheduled["mutations"],
+            {
+                "process_count": 7,
+                "process_count_observed": True,
+                "process_count_exact": False,
+                "process_count_scope": "cumulative-worker-pids-seen-upper-bound",
+                "resource_provider": "pid-snapshot-fallback",
+                "rss_mb": None,
+                "rss_observed": False,
+                "samples": 5,
+                "parent_cpu_seconds": 0.25,
+                "direct_children_cpu_seconds": 1.5,
+                "parent_cpu_observed": True,
+                "direct_children_cpu_observed": True,
+                "cpu_scope": "scheduler-and-direct-workers-only",
+            },
+        )
+        failures = benchmark._failure_summary(scheduled)
+
+        self.assertEqual(resources["case_time_seconds_max"], 1.25)
+        self.assertEqual(resources["case_memory_mb_max"], 64)
+        self.assertEqual(resources["process_count_peak"], 7)
+        self.assertFalse(resources["process_count_exact"])
+        self.assertEqual(
+            resources["process_count_scope"],
+            "cumulative-worker-pids-seen-upper-bound",
+        )
+        self.assertFalse(resources["active_rss_observed"])
+        self.assertEqual(resources["direct_worker_cpu_seconds"], 1.5)
+        self.assertTrue(resources["direct_worker_cpu_observed"])
+        self.assertEqual(resources["worker_cpu_seconds_sum"], 0.5)
+        self.assertEqual(resources["worker_children_cpu_seconds_sum"], 0.75)
+        self.assertTrue(resources["worker_cpu_observed"])
+        self.assertEqual(
+            failures["diagnostic_codes"],
+            {"judge_timeout": 1, "scheduler-timeout": 2},
+        )
+
+    def test_missing_worker_cpu_is_null_instead_of_zero(self):
+        resources = benchmark._resource_summary(
+            [{"classification": "cancelled", "elapsed_seconds": None}],
+            {},
+        )
+
+        self.assertIsNone(resources["worker_cpu_seconds_sum"])
+        self.assertFalse(resources["worker_cpu_observed"])
+        self.assertEqual(resources["worker_cpu_samples"], 0)
+        self.assertIsNone(resources["worker_children_cpu_seconds_sum"])
+        self.assertFalse(resources["worker_children_cpu_observed"])
 
     def test_matrix_runs_sequentially_and_checks_structured_equivalence(self):
         calls = []
