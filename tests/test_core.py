@@ -246,6 +246,13 @@ class CoreWorkspaceTests(unittest.TestCase):
         self.assertTrue(parser.parse_args(["sample-check", "A", "--no-cache"]).no_cache)
         self.assertTrue(parser.parse_args(["build", "A", "--no-cache"]).no_cache)
 
+    def test_mutation_jobs_are_explicit_and_bounded(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["mutation", "A"]).jobs, 1)
+        self.assertEqual(parser.parse_args(["mutation", "A", "--jobs", "2"]).jobs, 2)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["mutation", "A", "--jobs", "4"])
+
     def test_verify_package_can_use_workspace_problem_context(self):
         from probhub.package_tools import build_package, generate_domjudge_config
 

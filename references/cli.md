@@ -400,13 +400,13 @@ probhub judge-qa [ID...] [--no-cache]
 ## 9.2 `mutation`
 
 ```powershell
-probhub mutation ID [--operator OPERATOR] [--max-mutants N] [--timeout SECONDS] [--no-cache]
-probhub mutate ID [--operator OPERATOR] [--max-mutants N] [--timeout SECONDS] [--no-cache]
+probhub mutation ID [--operator OPERATOR] [--max-mutants N] [--jobs {1,2}] [--timeout SECONDS] [--no-cache]
+probhub mutate ID [--operator OPERATOR] [--max-mutants N] [--jobs {1,2}] [--timeout SECONDS] [--no-cache]
 ```
 
 `mutation` 只对 `judge.type: standard` 且首个 accepted 为 C++ 源码的题目执行。它使用固定 Tree-sitter C++ 语法树在函数/lambda 复合语句体内生成比较边界、布尔条件和十进制整数边界变异，跳过模板、宏、运算符声明、`<=>`、`case` 标签和未求值上下文，再从一次一致的不可变 baseline 为每个变异建立独立 worker，复用正式 Validator/Judge 逐点运行；解析器能报告的失败会结构化终止，不回退到 Token 猜测。命令不会把变异体登记为 accepted/wrong，也不会改写题目源文件或正式产物。`--operator` 可重复指定，`--max-mutants` 范围为 1..256，`--timeout` 是每题总秒数。题目可用 `mutation.schema_version: 1` 和 `mutation.exclusions: [{id, reason}]` 记录经人工审查的精确排除；排除先于数量上限应用。
 
-当前按计划顺序串行运行，不提供 `--jobs`。题目级 `mutation.lock` 覆盖整次命令；全局 `build.lock` 只在 baseline 捕获和最终输入围栏/证据发布期间短暂持有，不覆盖 Judge。每个 Judge 受共享进程控制的超时、128 MiB 输出、内存、进程与取消监督；单个监督器资源失败为 `infrastructure-failed`，整题 `--timeout` 到期为 `mutation_timeout`。取消、超时、live 输入变化和发布失败都保留旧 evidence。
+`--jobs` 默认为 1；显式 `--jobs 2` 才启用 spawn-bounded 并行，输出仍按计划顺序稳定聚合。调度器按问题级 2 个 worker token、8192 MiB Judge 内存额度和 160 个 Judge 进程额度计算 `effective_jobs`，题目 per-worker 上限过高时可从 2 降为 1；这些是配置额度，不是宿主机资源预留。题目级 `mutation.lock` 覆盖整次命令；全局 `build.lock` 只在 baseline 捕获和最终输入围栏/证据发布期间短暂持有，不覆盖 Judge。首个基础设施失败会停止派发、协作取消活动 worker，并在 2 秒后强制清理进程树；失败结果的 `execution.mutations` 会按 plan 顺序包含 `cancelled` 项，但取消项不计为 killed。整题 `--timeout` 到期为 `mutation_timeout`。取消、超时、live 输入变化和发布失败都保留旧 evidence。
 
 JSON 结果保持与其他多题命令相同的外层结构：
 
@@ -431,7 +431,7 @@ JSON 结果保持与其他多题命令相同的外层结构：
 
 `raw_planned` 是本次所选算子从源码生成的原始候选数，`excluded` 是命中本次计划的人工排除数，`planned` 是过滤后的有效候选数，`selected` 是数量上限后实际选择数。evidence 还保存每个排除 ID、理由和 `matched` / `out-of-scope` / `unmatched` 三态：仍存在但不属于本次所选算子的 ID 为 `out-of-scope`，只有已不在完整当前计划中的失效 ID 才产生 `mutation_exclusion_unmatched` warning。
 
-`status: passed` 只表示所有选择的变异都完成执行；summary 中的 `survived` 必须人工分析。`compile-invalid` 不计入可执行变异分母，`infrastructure-failed` 表示题目基础设施或沙箱失败，不能当成击杀。每个变异最多保留 16 个命中详情，完整数量由 `hit_cases_total` 和 `hit_cases_truncated` 表示；单份 evidence 上限为 4 MiB。成功才原子发布 `<ID>/.probhub/mutation-evidence-v2.json`；旧 v1 evidence 不再读取。v2 evidence 可选记录串行调度、不可变快照和外层 Judge 预算；缺少该字段的旧 v2 仍兼容，畸形字段为 `invalid`，预算变化本身不使计划 stale。失败、取消、超时、解析错误、证据超限、输入变化、锁竞争或发布故障保留旧 evidence。报告会验证 source/data hash、当前 Core/编译器/解析器指纹、locator 与算子计划 hash、排除记录、计数和有界记录结构；变化后显示 `stale` 或 `invalid`。stale 时 report 会重算当前计划与排除三态，并清空旧 evidence 的执行分类，避免把两代统计并列解释。
+`status: passed` 只表示所有选择的变异都完成执行；summary 中的 `survived` 必须人工分析。`compile-invalid` 不计入可执行变异分母，`infrastructure-failed` 表示题目基础设施或沙箱失败，不能当成击杀。每个变异最多保留 16 个命中详情，完整数量由 `hit_cases_total` 和 `hit_cases_truncated` 表示；单份 evidence 上限为 4 MiB。成功才原子发布 `<ID>/.probhub/mutation-evidence-v2.json`；旧 v1 evidence 不再读取。v2 evidence 的 execution profile 可记录 requested/effective jobs、调度器、不可变快照、取消宽限、per-worker 上限与问题级配置额度；旧 profile v1 或缺少该字段的旧 v2 仍兼容，畸形字段为 `invalid`，预算变化本身不使计划 stale。失败、取消、超时、解析错误、证据超限、输入变化、锁竞争或发布故障保留旧 evidence。报告会验证 source/data hash、当前 Core/编译器/解析器指纹、locator 与算子计划 hash、排除记录、计数和有界记录结构；变化后显示 `stale` 或 `invalid`。stale 时 report 会重算当前计划与排除三态，并清空旧 evidence 的执行分类，避免把两代统计并列解释。
 
 完整限制、算子语义和解释边界见 [std 变异测试](mutation-testing.md)。
 

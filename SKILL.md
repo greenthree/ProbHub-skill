@@ -97,7 +97,7 @@ probhub build
 | `judge [ID...]` | 编译并运行 Validator、accepted、brute、wrong |
 | `judge-qa [ID...]` | 对已配置的 Checker/Interactor fixture 和鲁棒性探针做主动 Judge QA；只缓存编译结果 |
 | `stress ID...` | 反复生成小数据，对拍 accepted 与 brute，保存首个可重放反例；`--against <解法>` 反向找刀，`--fixate <case>` 把命中一步固化为 secret 数据 + 配方 + 定向数据组 |
-| `mutation ID...` | 从一次不可变 baseline 串行执行标准题 C++ accepted 的保守语法变异，报告分类、原始/排除/有效计数和人工排除记录；不写正式产物 |
+| `mutation ID...` | 从一次不可变 baseline 执行标准题 C++ accepted 的保守语法变异；默认串行，显式 `--jobs 2` 可有界并行；报告分类、原始/排除/有效计数和人工排除记录，不写正式产物 |
 | `checkpoint ID` | 发布当前题目的不可变 draft checkpoint，供并行组卷使用 |
 | `seal ID` | lint、judge、stress 后冻结 revision，并自动生成一版完整试卷 |
 | `assemble` | 使用各题最新 checkpoint 生成隔离的完整试卷 generation |
@@ -155,7 +155,7 @@ Judge QA 每次都会重新执行 fixture 和内建探针；`--no-cache` 只额�
 probhub mutation L01 --operator comparison-boundary --no-cache
 ```
 
-变异测试是开放世界探测的补充证据，不替代算法证明、独立标程、期望矩阵或 stress。`survived` 只说明当前测试数据没有区分该变异；编译失败和 Judge/Validator/资源故障不得计为击杀。Core 使用固定 Tree-sitter C++ 语法树，只定位函数/lambda 复合语句体；解析失败时不得绕过错误或退回正则替换。一次运行只捕获一份不可变 baseline，每个变异使用独立 worker；当前保持串行，不得假定存在 `--jobs`。全局构建锁不覆盖长时间 Judge，但同题 mutation 锁覆盖整次运行。只有主 Agent 审查源码并确认变异等价、不适用或无法表达真实错误后，才可在 `probhub.yaml` 的 `mutation.exclusions` 中按稳定 ID 写入非空理由；不得为了提高分数批量排除幸存变异。排除后必须重跑 mutation，并检查 `report` 的 raw/excluded/effective/selected、out-of-scope、unmatched exclusion 与理由。成功 evidence 原子写入题目 `.probhub`，失败、取消、超时或输入变化不覆盖上一份成功 evidence；该能力不作为 build 硬门禁，也不接入 Legacy、WebUI 或 Checker/Interactor 执行。
+变异测试是开放世界探测的补充证据，不替代算法证明、独立标程、期望矩阵或 stress。`survived` 只说明当前测试数据没有区分该变异；编译失败和 Judge/Validator/资源故障不得计为击杀。Core 使用固定 Tree-sitter C++ 语法树，只定位函数/lambda 复合语句体；解析失败时不得绕过错误或退回正则替换。一次运行只捕获一份不可变 baseline，每个变异使用独立 worker；默认 `--jobs 1`，只有需要缩短墙钟且本机资源足够时才显式使用 `--jobs 2`。必须读取返回的 requested/effective jobs，不能把配置额度解释为宿主机资源预留；首个基础设施失败后的取消项不得计为 killed。全局构建锁不覆盖长时间 Judge，但同题 mutation 锁覆盖整次运行。只有主 Agent 审查源码并确认变异等价、不适用或无法表达真实错误后，才可在 `probhub.yaml` 的 `mutation.exclusions` 中按稳定 ID 写入非空理由；不得为了提高分数批量排除幸存变异。排除后必须重跑 mutation，并检查 `report` 的 raw/excluded/effective/selected、out-of-scope、unmatched exclusion 与理由。成功 evidence 原子写入题目 `.probhub`，失败、取消、超时或输入变化不覆盖上一份成功 evidence；该能力不作为 build 硬门禁，也不接入 Legacy、WebUI 或 Checker/Interactor 执行。
 
 完整语法、产物、退出码和故障处理见 `references/cli.md`。配置或执行差分测试前读取 `references/stress.md`；修改资源限制、解释 OLE 或排查残留进程时读取 `references/process-control.md`。
 
