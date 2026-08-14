@@ -13,12 +13,14 @@ name: Mutation benchmark
       - "tests/fixtures/workspaces/mutation/**"
       - "tests/fixtures/workspaces/mutation-many-light/**"
       - "tests/fixtures/workspaces/mutation-few-heavy/**"
+      - "tests/fixtures/workspaces/mutation-mixed-runtime/**"
       - "tests/test_mutation.py"
       - "tests/test_mutation_benchmark.py"
+      - "tests/test_mutation_mixed_fixture.py"
   workflow_dispatch:
     inputs:
       repetitions:
-        description: Sequential repetitions of each jobs 1/2/4 profile matrix
+        description: Repetitions for cache-pair and contention observations (1-20)
         required: false
         default: "1"
   schedule:
@@ -33,12 +35,14 @@ concurrency:
 
 jobs:
   shadow-matrix:
+    env:
+      OBSERVATION_REPETITIONS: ${{ github.event_name == 'schedule' && '5' || inputs.repetitions || '1' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -52,20 +56,19 @@ jobs:
         run: g++ --version
       - name: Run sequential shadow scheduler profile matrices
         shell: pwsh
-        env:
-          BENCHMARK_REPETITIONS: ${{ inputs.repetitions || '1' }}
         run: |
           New-Item -ItemType Directory -Force benchmark-results | Out-Null
           $profiles = @(
             @{ Name = "balanced"; MaxMutants = 4 },
             @{ Name = "many-light"; MaxMutants = 8 },
-            @{ Name = "few-heavy"; MaxMutants = 3 }
+            @{ Name = "few-heavy"; MaxMutants = 3 },
+            @{ Name = "mixed-runtime"; MaxMutants = 6 }
           )
           foreach ($profile in $profiles) {
             python tests/benchmarks/benchmark_mutation.py `
               --matrix `
               --profile $profile.Name `
-              --repetitions $env:BENCHMARK_REPETITIONS `
+              --repetitions 1 `
               --timeout 600 `
               --mutant-timeout 180 `
               --max-mutants $profile.MaxMutants `
@@ -83,6 +86,7 @@ jobs:
             --timeout 600 `
             --mutant-timeout 180 `
             --max-mutants 1 `
+            --repetitions $env:OBSERVATION_REPETITIONS `
             --output "benchmark-results/mutation-cache-pair-$($env:RUNNER_OS.ToLowerInvariant()).json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Observe same-host two-problem contention
@@ -91,12 +95,13 @@ jobs:
           python tests/benchmarks/benchmark_mutation.py `
             --contention `
             --contention-profile many-light `
-            --contention-profile few-heavy `
+            --contention-profile mixed-runtime `
             --jobs 1 `
             --cache-profile cold `
             --timeout 600 `
             --mutant-timeout 180 `
             --max-mutants 2 `
+            --repetitions $env:OBSERVATION_REPETITIONS `
             --output "benchmark-results/mutation-contention-$($env:RUNNER_OS.ToLowerInvariant()).json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload JSON observation

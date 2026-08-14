@@ -23,6 +23,7 @@ WORKSPACE_FIXTURES = (
     "mutation",
     "mutation-many-light",
     "mutation-few-heavy",
+    "mutation-mixed-runtime",
     *JUDGE_QA_FIXTURES,
 )
 

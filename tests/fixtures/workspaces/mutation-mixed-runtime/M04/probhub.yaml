@@ -1,0 +1,19 @@
+schema_version: 1
+id: M04
+name: Mixed Runtime Mutation Fixture
+limits:
+  time: 2
+  memory: 256
+  output: 64
+  processes: 32
+statement:
+  source: problem.md
+judge:
+  type: standard
+  validator: code/validator.cpp
+solutions:
+  accepted:
+    - code/std.cpp
+data:
+  sample_dir: data/sample
+  secret_dir: data/secret

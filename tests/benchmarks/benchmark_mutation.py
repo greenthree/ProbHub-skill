@@ -60,12 +60,13 @@ from probhub.solutions import normalize_solution_entries, resolve_solution_sourc
 from probhub.workspace import load_workspace, problem_entries, resolve_problem_dir
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BENCHMARK = "mutation-shadow-spawn-v1"
 CANCEL_GRACE_SECONDS = 2.0
 CACHE_PROFILES = ("cold", "warm")
 CACHE_SECTIONS = ("compile", "validator", "case", "probe")
 MAX_HOST_JOBS = 4
+MAX_REPETITIONS = 20
 FIXTURE_WORKSPACES_ROOT = ROOT / "tests" / "fixtures" / "workspaces"
 # Kept as the balanced fixture alias for focused worker tests.
 FIXTURE_ROOT = FIXTURE_WORKSPACES_ROOT / "mutation"
@@ -91,6 +92,21 @@ FIXTURE_PROFILES = {
         "workload": "few-heavy",
         "description": "few candidates with comparatively heavy accepted cases",
         "candidate_target": {"raw": 3, "ci_selected": 3},
+    },
+    "mixed-runtime": {
+        "workspace": "mutation-mixed-runtime",
+        "problem_id": "M04",
+        "workload": "mixed-runtime",
+        "description": "grid BFS with early-return, sparse, and heavy cases",
+        "candidate_target": {"raw": 38, "ci_selected": 6},
+        "ci_mutation_ids": (
+            "cpp-token-v1:comparison-boundary:22:35:54380e6aee9c2e93",
+            "cpp-token-v1:integer-boundary:22:38:2a993834eb5e3097",
+            "cpp-token-v1:boolean-negation:34:11:98d77505b574ff84",
+            "cpp-token-v1:comparison-boundary:40:43:7b2df35308466712",
+            "cpp-token-v1:boolean-negation:43:16:2e07a2d22645ee74",
+            "cpp-token-v1:comparison-boundary:45:28:f9182b0006605bb2",
+        ),
     },
 }
 CLASSIFICATIONS = (
@@ -1142,8 +1158,30 @@ def prepare_plan(
     mutation_plan = plan_mutations(
         source,
         operators=selected_operators,
-        max_mutants=max_mutants,
+        max_mutants=MAX_MUTANTS,
     )
+    planned_mutations = list(mutation_plan["mutations"])
+    pinned_ids = profile.get("ci_mutation_ids")
+    if pinned_ids is not None and operators is None:
+        by_id = {mutation.id: mutation for mutation in planned_mutations}
+        missing = [mutation_id for mutation_id in pinned_ids if mutation_id not in by_id]
+        if missing:
+            raise ProbHubError(
+                f"{problem_id} pinned mutation IDs are unavailable: "
+                + ", ".join(missing),
+                code="mutation_fixture_plan_changed",
+            )
+        planned_mutations = [by_id[mutation_id] for mutation_id in pinned_ids]
+    planned_mutations = planned_mutations[:max_mutants]
+    benchmark_plan_hash = _hash_bytes(json.dumps(
+        {
+            "core_plan_hash": mutation_plan["plan_hash"],
+            "max_mutants": max_mutants,
+            "selected_ids": [mutation.id for mutation in planned_mutations],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8"))
     planning_seconds = time.perf_counter() - planning_started
     source_relative = PurePosixPath(
         str(accepted[0]["file"]).replace("\\", "/")
@@ -1163,7 +1201,7 @@ def prepare_plan(
             mutant_timeout=float(mutant_timeout),
             cache_profile=cache_profile,
         )
-        for index, mutation in enumerate(mutation_plan["mutations"])
+        for index, mutation in enumerate(planned_mutations)
     )
     primer_seconds = 0.0
     primer_observations = ()
@@ -1184,7 +1222,7 @@ def prepare_plan(
         config=config,
         source_hash=source_hash,
         data_hash=data_hash,
-        plan_hash=mutation_plan["plan_hash"],
+        plan_hash=benchmark_plan_hash,
         baseline_hash=_hash_tree(baseline),
         snapshot_seconds=round(snapshot_seconds, 6),
         planning_seconds=round(planning_seconds, 6),
@@ -1194,8 +1232,8 @@ def prepare_plan(
             "raw": mutation_plan["raw_planned"],
             "excluded": mutation_plan["excluded"],
             "effective": mutation_plan["planned"],
-            "selected": mutation_plan["selected"],
-            "truncated": mutation_plan["truncated"],
+            "selected": len(planned_mutations),
+            "truncated": mutation_plan["planned"] > len(planned_mutations),
         },
         execution_profile=execution_profile,
         tasks=tasks,
@@ -1555,6 +1593,90 @@ def _comparison_identity(report):
     }
 
 
+def _distribution_summary(
+    values,
+    metric,
+    *,
+    requested_runs=None,
+    completed_runs=None,
+    failed_runs=0,
+    cancelled_runs=0,
+    safe_runs=None,
+):
+    values = sorted(
+        float(value)
+        for value in values
+        if isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+    requested_runs = len(values) if requested_runs is None else requested_runs
+    completed_runs = requested_runs if completed_runs is None else completed_runs
+    safe_runs = completed_runs if safe_runs is None else safe_runs
+    observed_runs = len(values)
+    coverage = {
+        "requested_runs": requested_runs,
+        "completed_runs": completed_runs,
+        "observed_runs": observed_runs,
+        "missing_runs": max(0, requested_runs - observed_runs),
+        "safe_runs": safe_runs,
+        "failed_runs": failed_runs,
+        "cancelled_runs": cancelled_runs,
+    }
+    if not values:
+        return {
+            "runs": 0,
+            metric: [],
+            f"median_{metric}": None,
+            f"p95_{metric}": None,
+            f"iqr_{metric}": None,
+            "statistics_meaningful": False,
+            "distribution_statistics_meaningful": False,
+            "tail_statistics_meaningful": False,
+            **coverage,
+        }
+    lower = values[: max(1, len(values) // 2)]
+    upper = values[(len(values) + 1) // 2 :] or values[-1:]
+    p95_index = max(
+        0,
+        min(len(values) - 1, int(math.ceil(len(values) * 0.95)) - 1),
+    )
+    complete_safe_observation = (
+        observed_runs == requested_runs
+        and completed_runs == requested_runs
+        and safe_runs == requested_runs
+        and failed_runs == 0
+        and cancelled_runs == 0
+    )
+    distribution_statistics_meaningful = (
+        len(values) >= 5 and complete_safe_observation
+    )
+    tail_statistics_meaningful = (
+        len(values) >= 20 and complete_safe_observation
+    )
+    return {
+        "runs": len(values),
+        metric: values,
+        f"median_{metric}": median(values),
+        f"p95_{metric}": (
+            values[p95_index] if tail_statistics_meaningful else None
+        ),
+        f"iqr_{metric}": (
+            median(upper) - median(lower)
+            if distribution_statistics_meaningful else None
+        ),
+        "statistics_meaningful": (
+            distribution_statistics_meaningful
+            and tail_statistics_meaningful
+        ),
+        "distribution_statistics_meaningful": (
+            distribution_statistics_meaningful
+        ),
+        "tail_statistics_meaningful": tail_statistics_meaningful,
+        **coverage,
+    }
+
+
 def run_matrix(
     *,
     jobs_values,
@@ -1566,8 +1688,8 @@ def run_matrix(
     cache_profile="cold",
     profile_name="balanced",
 ):
-    if repetitions <= 0:
-        raise ValueError("repetitions must be positive")
+    if repetitions <= 0 or repetitions > MAX_REPETITIONS:
+        raise ValueError(f"repetitions must be in 1..{MAX_REPETITIONS}")
     jobs_values = tuple(jobs_values)
     if not jobs_values or any(value not in {1, 2, 4} for value in jobs_values):
         raise ValueError("jobs matrix must contain only 1, 2, or 4")
@@ -1610,28 +1732,7 @@ def run_matrix(
     by_jobs = {}
     for jobs in jobs_values:
         values = [item["wall_seconds"] for item in runs if item["jobs"] == jobs]
-        values.sort()
-        lower = values[: max(1, len(values) // 2)]
-        upper = values[(len(values) + 1) // 2 :] or values[-1:]
-        p95_index = max(0, min(len(values) - 1, int(math.ceil(len(values) * 0.95)) - 1))
-        distribution_statistics_meaningful = len(values) >= 5
-        tail_statistics_meaningful = len(values) >= 20
-        by_jobs[str(jobs)] = {
-            "runs": len(values),
-            "wall_seconds": values,
-            "median_wall_seconds": median(values),
-            "p95_wall_seconds": values[p95_index] if tail_statistics_meaningful else None,
-            "iqr_wall_seconds": (
-                median(upper) - median(lower)
-                if distribution_statistics_meaningful else None
-            ),
-            "statistics_meaningful": (
-                distribution_statistics_meaningful
-                and tail_statistics_meaningful
-            ),
-            "distribution_statistics_meaningful": distribution_statistics_meaningful,
-            "tail_statistics_meaningful": tail_statistics_meaningful,
-        }
+        by_jobs[str(jobs)] = _distribution_summary(values, "wall_seconds")
     baseline = by_jobs.get("1", {}).get("median_wall_seconds")
     if baseline:
         for summary in by_jobs.values():
@@ -1681,6 +1782,14 @@ def _run_safe(report):
     return _run_complete(report) and all(report.get(field) is True for field in fields)
 
 
+def _run_cancelled(report):
+    classifications = report.get("classifications") or {}
+    return classifications.get("cancelled", 0) > 0 or report.get("stop_code") in {
+        "cancelled",
+        "mutation_cancelled",
+    }
+
+
 def _remove_concurrent_cpu_attribution(report):
     resources = report.get("resource_summary")
     if not isinstance(resources, dict):
@@ -1695,7 +1804,7 @@ def _remove_concurrent_cpu_attribution(report):
     )
 
 
-def run_contention(
+def _run_contention_once(
     *,
     profiles,
     jobs_per_profile,
@@ -1713,7 +1822,7 @@ def run_contention(
     if jobs_per_profile not in {1, 2}:
         raise ValueError("contention jobs per profile must be 1 or 2")
     if jobs_per_profile * len(profiles) > MAX_HOST_JOBS:
-        raise ValueError("contention benchmark exceeds the host job budget")
+        raise ValueError("contention benchmark exceeds the worker token budget")
 
     references = {
         profile: run_benchmark(
@@ -1729,6 +1838,26 @@ def run_contention(
     }
     started = time.perf_counter()
     concurrent_reports = {}
+    start_barrier = threading.Barrier(len(profiles) + 1)
+    ready_times = {}
+    start_times = {}
+    timing_lock = threading.Lock()
+
+    def run_synchronized(profile):
+        with timing_lock:
+            ready_times[profile] = time.perf_counter()
+        start_barrier.wait(timeout=min(30.0, timeout))
+        with timing_lock:
+            start_times[profile] = time.perf_counter()
+        return run_benchmark(
+            jobs=jobs_per_profile,
+            timeout=timeout,
+            max_mutants=max_mutants,
+            operators=operators,
+            mutant_timeout=mutant_timeout,
+            cache_profile=cache_profile,
+            profile_name=profile,
+        )
     host_peak = {
         "process_count": None,
         "rss_mb": None,
@@ -1738,17 +1867,17 @@ def run_contention(
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(profiles)) as executor:
         futures = {
             profile: executor.submit(
-                run_benchmark,
-                jobs=jobs_per_profile,
-                timeout=timeout,
-                max_mutants=max_mutants,
-                operators=operators,
-                mutant_timeout=mutant_timeout,
-                cache_profile=cache_profile,
-                profile_name=profile,
+                run_synchronized,
+                profile,
             )
             for profile in profiles
         }
+        barrier_released = False
+        try:
+            start_barrier.wait(timeout=min(30.0, timeout))
+            barrier_released = True
+        except threading.BrokenBarrierError:
+            pass
         while not all(future.done() for future in futures.values()):
             count, rss_mb = process_tree_metrics(os.getpid())
             if count is not None and rss_mb is not None:
@@ -1797,33 +1926,89 @@ def run_contention(
             ),
         }
     all_reports = tuple(references.values()) + tuple(concurrent_reports.values())
-    all_safe = all(_run_safe(report) for report in all_reports)
+    all_complete = all(_run_complete(report) for report in all_reports)
+    all_safe = (
+        barrier_released
+        and len(start_times) == len(profiles)
+        and all_complete
+        and all(_run_safe(report) for report in all_reports)
+    )
+    active_worker_tokens = jobs_per_profile * len(profiles)
+    per_profile_resources = {}
+    theoretical_memory_limit_mb = 0
+    theoretical_process_limit = 0
+    resource_totals_available = True
+    for profile in profiles:
+        execution_profile = references[profile].get("execution_profile") or {}
+        memory_per_worker = execution_profile.get("judge_memory_limit_mb")
+        processes_per_worker = execution_profile.get("judge_process_limit")
+        per_profile_resources[profile] = {
+            "active_worker_tokens": jobs_per_profile,
+            "memory_limit_mb_per_worker": memory_per_worker,
+            "process_limit_per_worker": processes_per_worker,
+        }
+        if isinstance(memory_per_worker, (int, float)) and isinstance(
+            processes_per_worker, int
+        ):
+            theoretical_memory_limit_mb += memory_per_worker * jobs_per_profile
+            theoretical_process_limit += processes_per_worker * jobs_per_profile
+        else:
+            resource_totals_available = False
+    launch_skew = (
+        max(start_times.values()) - min(start_times.values())
+        if len(start_times) == len(profiles) else None
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "benchmark": BENCHMARK + "-contention",
         "profiles": list(profiles),
         "jobs_per_profile": jobs_per_profile,
-        "host_job_budget": MAX_HOST_JOBS,
+        "configured_worker_token_budget": MAX_HOST_JOBS,
+        "configured_worker_resources": {
+            "active_worker_tokens": active_worker_tokens,
+            "profiles": per_profile_resources,
+            "theoretical_memory_limit_mb": (
+                theoretical_memory_limit_mb if resource_totals_available else None
+            ),
+            "theoretical_process_limit": (
+                theoretical_process_limit if resource_totals_available else None
+            ),
+            "scope": (
+                "sum-of-independent-worker-supervisor-limits; not a host-wide "
+                "reservation or measured peak"
+            ),
+        },
         "cache_profile": cache_profile,
         "failure_scope": "per-problem-independent",
         "cpu_attribution": (
             "per-problem child CPU is unavailable under concurrent thread schedulers; "
-            "host process-tree metrics are authoritative where observed"
+            "host process-tree metrics are sampled lower bounds where observed"
         ),
         "wall_seconds": round(wall_seconds, 6),
         "host_resource_observation": {
             "observed": host_peak["observed"],
             "provider": "linux-procfs" if host_peak["observed"] else None,
             "scope": (
-                "benchmark-parent-and-descendant-process-tree"
+                "sampled-benchmark-parent-and-descendant-process-tree-lower-bound"
                 if host_peak["observed"] else None
             ),
+            "sampling_interval_seconds": 0.05 if host_peak["observed"] else None,
+            "exact_peak": False,
             "process_count_peak": host_peak["process_count"],
             "active_rss_mb_peak": (
                 round(host_peak["rss_mb"], 6)
                 if host_peak["rss_mb"] is not None else None
             ),
             "samples": host_peak["samples"],
+        },
+        "launch_synchronization": {
+            "barrier_parties": len(profiles) + 1,
+            "profiles_ready": sorted(ready_times),
+            "barrier_released": barrier_released,
+            "profiles_started": sorted(start_times),
+            "launch_skew_seconds": (
+                round(launch_skew, 6) if launch_skew is not None else None
+            ),
         },
         "references": references,
         "reports": concurrent_reports,
@@ -1832,12 +2017,187 @@ def run_contention(
             item["results_equivalent"] and item["identities_equivalent"]
             for item in comparisons.values()
         ),
+        "all_complete": all_complete,
         "all_safe": all_safe,
         "performance_gate": False,
     }
 
 
-def run_cache_pair(
+def run_contention(
+    *,
+    profiles,
+    jobs_per_profile,
+    timeout,
+    max_mutants,
+    operators,
+    mutant_timeout,
+    cache_profile="cold",
+    repetitions=1,
+):
+    if repetitions <= 0 or repetitions > MAX_REPETITIONS:
+        raise ValueError(f"repetitions must be in 1..{MAX_REPETITIONS}")
+    profiles = tuple(profiles)
+    runs = []
+    reference_identities = None
+    reference_signatures = None
+    for repetition in range(repetitions):
+        run_profiles = (
+            profiles if repetition % 2 == 0 else tuple(reversed(profiles))
+        )
+        report = _run_contention_once(
+            profiles=run_profiles,
+            jobs_per_profile=jobs_per_profile,
+            timeout=timeout,
+            max_mutants=max_mutants,
+            operators=operators,
+            mutant_timeout=mutant_timeout,
+            cache_profile=cache_profile,
+        )
+        reference_run_identities = {
+            profile: _comparison_identity(report["references"][profile])
+            for profile in profiles
+        }
+        reference_run_signatures = {
+            profile: _comparison_signature(report["references"][profile])
+            for profile in profiles
+        }
+        contended_run_identities = {
+            profile: _comparison_identity(report["reports"][profile])
+            for profile in profiles
+        }
+        contended_run_signatures = {
+            profile: _comparison_signature(report["reports"][profile])
+            for profile in profiles
+        }
+        if reference_identities is None:
+            reference_identities = reference_run_identities
+            reference_signatures = reference_run_signatures
+        runs.append({
+            "repetition": repetition + 1,
+            "profile_order": list(run_profiles),
+            "reference_identities": reference_run_identities,
+            "reference_signatures": reference_run_signatures,
+            "contended_identities": contended_run_identities,
+            "contended_signatures": contended_run_signatures,
+            "report": report,
+        })
+
+    results_equivalent = all(
+        item["report"]["results_equivalent"]
+        and item["reference_identities"] == reference_identities
+        and item["contended_identities"] == reference_identities
+        and item["reference_signatures"] == reference_signatures
+        and item["contended_signatures"] == reference_signatures
+        for item in runs
+    )
+    safe_runs = sum(item["report"]["all_safe"] is True for item in runs)
+    cancelled_runs = sum(
+        any(
+            _run_cancelled(report)
+            for report in (
+                tuple(item["report"]["references"].values())
+                + tuple(item["report"]["reports"].values())
+            )
+        )
+        for item in runs
+    )
+    completed_runs = sum(
+        item["report"].get("all_complete", item["report"]["all_safe"]) is True
+        for item in runs
+    )
+    failed_runs = repetitions - safe_runs - cancelled_runs
+    safe_items = [item for item in runs if item["report"]["all_safe"] is True]
+    coverage = {
+        "requested_runs": repetitions,
+        "completed_runs": completed_runs,
+        "safe_runs": safe_runs,
+        "failed_runs": failed_runs,
+        "cancelled_runs": cancelled_runs,
+    }
+    slowdown = {
+        profile: _distribution_summary(
+            [
+                item["report"]["comparisons"][profile][
+                    "slowdown_vs_reference"
+                ]
+                for item in safe_items
+                if item["report"]["comparisons"][profile][
+                    "slowdown_vs_reference"
+                ] is not None
+            ],
+            "slowdown_vs_reference",
+            **coverage,
+        )
+        for profile in profiles
+    }
+    observed_host = [
+        item["report"]["host_resource_observation"]
+        for item in safe_items
+        if item["report"]["host_resource_observation"]["observed"]
+    ]
+    compatibility = runs[0]["report"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "benchmark": BENCHMARK + "-contention-series",
+        "profiles": list(profiles),
+        "jobs_per_profile": jobs_per_profile,
+        "configured_worker_token_budget": MAX_HOST_JOBS,
+        "configured_worker_resources": compatibility.get(
+            "configured_worker_resources"
+        ),
+        "cache_profile": cache_profile,
+        "failure_scope": "per-problem-independent",
+        "cpu_attribution": compatibility["cpu_attribution"],
+        "repetitions": repetitions,
+        "order_rotation": "alternate-profile-order",
+        "reference_identity": reference_identities or {},
+        "reference_signature": reference_signatures or {},
+        "compatibility_run": 1,
+        "wall_seconds": compatibility["wall_seconds"],
+        "host_resource_observation": compatibility[
+            "host_resource_observation"
+        ],
+        "launch_synchronization": compatibility.get(
+            "launch_synchronization"
+        ),
+        "references": compatibility["references"],
+        "reports": compatibility["reports"],
+        "comparisons": compatibility["comparisons"],
+        "observation_coverage": coverage,
+        "summary": {
+            "wall_seconds": _distribution_summary(
+                [item["report"]["wall_seconds"] for item in safe_items],
+                "wall_seconds",
+                **coverage,
+            ),
+            "slowdown": slowdown,
+            "host_process_count_peak": _distribution_summary(
+                [
+                    item["process_count_peak"]
+                    for item in observed_host
+                    if item["process_count_peak"] is not None
+                ],
+                "process_count_peak",
+                **coverage,
+            ),
+            "host_active_rss_mb_peak": _distribution_summary(
+                [
+                    item["active_rss_mb_peak"]
+                    for item in observed_host
+                    if item["active_rss_mb_peak"] is not None
+                ],
+                "active_rss_mb_peak",
+                **coverage,
+            ),
+        },
+        "runs": runs,
+        "results_equivalent": results_equivalent,
+        "all_safe": safe_runs == repetitions,
+        "performance_gate": False,
+    }
+
+
+def _run_cache_pair_once(
     *,
     jobs,
     timeout,
@@ -1845,7 +2205,11 @@ def run_cache_pair(
     operators,
     mutant_timeout,
     profile_name="balanced",
+    profile_order=CACHE_PROFILES,
 ):
+    profile_order = tuple(profile_order)
+    if set(profile_order) != set(CACHE_PROFILES) or len(profile_order) != 2:
+        raise ValueError("cache pair requires one cold and one warm run")
     reports = {
         profile: run_benchmark(
             jobs=jobs,
@@ -1856,7 +2220,7 @@ def run_cache_pair(
             cache_profile=profile,
             profile_name=profile_name,
         )
-        for profile in CACHE_PROFILES
+        for profile in profile_order
     }
     cold = reports["cold"]
     warm = reports["warm"]
@@ -1875,6 +2239,7 @@ def run_cache_pair(
             and _comparison_identity(cold) == _comparison_identity(warm)
             and warm["cache_observation"]["primer_results_equivalent"]
         ),
+        "all_complete": all(_run_complete(report) for report in reports.values()),
         "all_safe": all(_run_safe(report) for report in reports.values()),
         "measured_judge_wall_seconds": {
             "cold": cold_measured,
@@ -1889,6 +2254,139 @@ def run_cache_pair(
         ),
         "warm_cache_complete": warm["cache_observation"]["warm_cache_complete"],
         "warm_cache_partial": warm["cache_observation"]["warm_cache_partial"],
+        "performance_gate": False,
+    }
+
+
+def run_cache_pair(
+    *,
+    jobs,
+    timeout,
+    max_mutants,
+    operators,
+    mutant_timeout,
+    profile_name="balanced",
+    repetitions=1,
+):
+    if repetitions <= 0 or repetitions > MAX_REPETITIONS:
+        raise ValueError(f"repetitions must be in 1..{MAX_REPETITIONS}")
+    runs = []
+    reference_identity = None
+    reference_signature = None
+    for repetition in range(repetitions):
+        order = (
+            CACHE_PROFILES
+            if repetition % 2 == 0
+            else tuple(reversed(CACHE_PROFILES))
+        )
+        report = _run_cache_pair_once(
+            jobs=jobs,
+            timeout=timeout,
+            max_mutants=max_mutants,
+            operators=operators,
+            mutant_timeout=mutant_timeout,
+            profile_name=profile_name,
+            profile_order=order,
+        )
+        cold = report["reports"]["cold"]
+        warm = report["reports"]["warm"]
+        identity = _comparison_identity(cold)
+        signature = _comparison_signature(cold)
+        warm_identity = _comparison_identity(warm)
+        warm_signature = _comparison_signature(warm)
+        if reference_identity is None:
+            reference_identity = identity
+            reference_signature = signature
+        runs.append({
+            "repetition": repetition + 1,
+            "profile_order": list(order),
+            "cold_identity": identity,
+            "cold_signature": signature,
+            "warm_identity": warm_identity,
+            "warm_signature": warm_signature,
+            "report": report,
+        })
+    results_equivalent = all(
+        item["report"]["results_equivalent"]
+        and item["cold_identity"] == reference_identity
+        and item["warm_identity"] == reference_identity
+        and item["cold_signature"] == reference_signature
+        and item["warm_signature"] == reference_signature
+        for item in runs
+    )
+    safe_runs = sum(item["report"]["all_safe"] is True for item in runs)
+    cancelled_runs = sum(
+        any(_run_cancelled(report) for report in item["report"]["reports"].values())
+        for item in runs
+    )
+    completed_runs = sum(
+        item["report"].get("all_complete", item["report"]["all_safe"]) is True
+        for item in runs
+    )
+    failed_runs = repetitions - safe_runs - cancelled_runs
+    safe_items = [item for item in runs if item["report"]["all_safe"] is True]
+    coverage = {
+        "requested_runs": repetitions,
+        "completed_runs": completed_runs,
+        "safe_runs": safe_runs,
+        "failed_runs": failed_runs,
+        "cancelled_runs": cancelled_runs,
+    }
+    compatibility = runs[0]["report"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "benchmark": BENCHMARK + "-cache-pair-series",
+        "fixture_profile": profile_name,
+        "jobs": jobs,
+        "repetitions": repetitions,
+        "order_rotation": "alternate-cold-warm-order",
+        "cache_scope": "logical-sandbox-cache-not-host-cache",
+        "host_cache_controlled": False,
+        "reference_identity": reference_identity or {},
+        "reference_signature": reference_signature or [],
+        "compatibility_run": 1,
+        "reports": compatibility["reports"],
+        "measured_judge_wall_seconds": compatibility[
+            "measured_judge_wall_seconds"
+        ],
+        "warm_speedup_vs_cold": compatibility["warm_speedup_vs_cold"],
+        "observation_coverage": coverage,
+        "summary": {
+            "cold_judge_wall_seconds": _distribution_summary(
+                [
+                    item["report"]["measured_judge_wall_seconds"]["cold"]
+                    for item in safe_items
+                ],
+                "judge_wall_seconds",
+                **coverage,
+            ),
+            "warm_judge_wall_seconds": _distribution_summary(
+                [
+                    item["report"]["measured_judge_wall_seconds"]["warm"]
+                    for item in safe_items
+                ],
+                "judge_wall_seconds",
+                **coverage,
+            ),
+            "warm_speedup_vs_cold": _distribution_summary(
+                [
+                    item["report"]["warm_speedup_vs_cold"]
+                    for item in safe_items
+                    if item["report"]["warm_speedup_vs_cold"] is not None
+                ],
+                "speedup",
+                **coverage,
+            ),
+        },
+        "runs": runs,
+        "results_equivalent": results_equivalent,
+        "all_safe": safe_runs == repetitions,
+        "warm_cache_complete": all(
+            item["report"]["warm_cache_complete"] for item in runs
+        ),
+        "warm_cache_partial": any(
+            item["report"]["warm_cache_partial"] for item in runs
+        ),
         "performance_gate": False,
     }
 
@@ -1984,8 +2482,8 @@ def main(argv=None):
         validated_output = output
         if args.timeout <= 0 or args.mutant_timeout <= 0:
             raise ValueError("timeouts must be positive")
-        if args.repetitions <= 0:
-            raise ValueError("repetitions must be positive")
+        if args.repetitions <= 0 or args.repetitions > MAX_REPETITIONS:
+            raise ValueError(f"repetitions must be in 1..{MAX_REPETITIONS}")
         if args.max_mutants <= 0 or args.max_mutants > MAX_MUTANTS:
             raise ValueError(f"max-mutants must be in 1..{MAX_MUTANTS}")
         selected_modes = sum(bool(value) for value in (
@@ -2006,6 +2504,7 @@ def main(argv=None):
                 operators=args.operator,
                 mutant_timeout=args.mutant_timeout,
                 cache_profile=args.cache_profile,
+                repetitions=args.repetitions,
             )
             if args.contention else run_cache_pair(
                 jobs=args.jobs,
@@ -2014,6 +2513,7 @@ def main(argv=None):
                 operators=args.operator,
                 mutant_timeout=args.mutant_timeout,
                 profile_name=args.profile,
+                repetitions=args.repetitions,
             ) if args.cache_pair else run_matrix(
                 jobs_values=(1, 2, 4),
                 repetitions=args.repetitions,
