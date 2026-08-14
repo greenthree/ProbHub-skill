@@ -40,6 +40,19 @@ def synthetic_tasks(root, specs):
 
 
 class SpawnSchedulerTests(unittest.TestCase):
+    def test_workflow_keeps_matrices_single_run_and_expands_observations_only(self):
+        workflow = (
+            Path(__file__).parents[1]
+            / ".github/workflows/mutation-benchmark.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("OBSERVATION_REPETITIONS:", workflow)
+        self.assertIn("--matrix `\n              --profile $profile.Name `\n              --repetitions 1 `", workflow)
+        self.assertEqual(
+            workflow.count("--repetitions $env:OBSERVATION_REPETITIONS"), 2
+        )
+        self.assertIn("--contention-profile mixed-runtime", workflow)
+
     def test_jobs_one_still_uses_spawn_scheduler_and_preserves_order(self):
         with tempfile.TemporaryDirectory() as temp:
             tasks = synthetic_tasks(temp, [
@@ -396,6 +409,10 @@ class SpawnSchedulerTests(unittest.TestCase):
             benchmark.FIXTURE_PROFILES["many-light"]["candidate_target"],
             {"raw": 30, "ci_selected": 8},
         )
+        self.assertEqual(
+            benchmark.FIXTURE_PROFILES["mixed-runtime"]["candidate_target"],
+            {"raw": 38, "ci_selected": 6},
+        )
 
     def test_real_warm_primer_reuses_cache_and_preserves_signature(self):
         cold = benchmark.run_benchmark(
@@ -544,7 +561,7 @@ class SpawnSchedulerTests(unittest.TestCase):
             "workers_cleaned", "descendants_cleaned",
         }
         self.assertTrue(required.issubset(report))
-        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["schema_version"], 3)
         self.assertEqual(
             report["execution_profile"]["scheduler"],
             "spawn-bounded-shadow-v1",
@@ -772,6 +789,244 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertFalse(report["identities_equivalent"])
         self.assertFalse(report["results_equivalent"])
 
+    def test_distribution_summary_requires_enough_samples(self):
+        short = benchmark._distribution_summary(
+            [3, None, float("nan"), True, 1, 2], "seconds"
+        )
+        distribution = benchmark._distribution_summary(
+            [5, 1, 4, 2, 3], "seconds"
+        )
+
+        self.assertEqual(short["median_seconds"], 2.0)
+        self.assertIsNone(short["iqr_seconds"])
+        self.assertFalse(short["distribution_statistics_meaningful"])
+        self.assertEqual(distribution["median_seconds"], 3.0)
+        self.assertEqual(distribution["iqr_seconds"], 3.0)
+        self.assertTrue(distribution["distribution_statistics_meaningful"])
+        self.assertIsNone(distribution["p95_seconds"])
+
+    def test_distribution_summary_reports_missing_and_unsafe_coverage(self):
+        missing = benchmark._distribution_summary(
+            [],
+            "rss_mb",
+            requested_runs=5,
+            completed_runs=5,
+            safe_runs=5,
+        )
+        unsafe = benchmark._distribution_summary(
+            [1, 2, 3, 4, 5],
+            "seconds",
+            requested_runs=5,
+            completed_runs=5,
+            safe_runs=4,
+            failed_runs=1,
+        )
+
+        self.assertEqual(missing["requested_runs"], 5)
+        self.assertEqual(missing["observed_runs"], 0)
+        self.assertEqual(missing["missing_runs"], 5)
+        self.assertIsNone(missing["median_rss_mb"])
+        self.assertFalse(unsafe["distribution_statistics_meaningful"])
+        self.assertIsNone(unsafe["iqr_seconds"])
+
+    def test_distribution_summary_requires_twenty_safe_samples_for_p95(self):
+        nineteen = benchmark._distribution_summary(range(1, 20), "seconds")
+        twenty = benchmark._distribution_summary(range(1, 21), "seconds")
+
+        self.assertIsNone(nineteen["p95_seconds"])
+        self.assertEqual(twenty["p95_seconds"], 19.0)
+        self.assertTrue(twenty["tail_statistics_meaningful"])
+
+    def test_contention_series_rejects_reference_signature_drift(self):
+        calls = 0
+
+        def fake_once(**kwargs):
+            nonlocal calls
+            calls += 1
+            profiles = kwargs["profiles"]
+            references = {
+                profile: {
+                    "hashes": {
+                        "source": profile,
+                        "data": profile,
+                        "plan": profile,
+                        "baseline": profile,
+                    },
+                    "mutations": [{
+                        "id": profile,
+                        "classification": "killed",
+                        "final_code": "expectation_not_met",
+                        "hit_cases": [{"case": f"case-{calls}"}],
+                        "hit_cases_total": 1,
+                    }],
+                }
+                for profile in profiles
+            }
+            return {
+                "cpu_attribution": "test",
+                "wall_seconds": 1.0,
+                "host_resource_observation": {"observed": False},
+                "references": references,
+                "reports": references,
+                "comparisons": {
+                    profile: {"slowdown_vs_reference": 1.0}
+                    for profile in profiles
+                },
+                "results_equivalent": True,
+                "all_safe": True,
+            }
+
+        with patch(
+            "benchmark_mutation._run_contention_once", side_effect=fake_once
+        ):
+            report = benchmark.run_contention(
+                profiles=("many-light", "few-heavy"),
+                jobs_per_profile=1,
+                repetitions=2,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertFalse(report["results_equivalent"])
+
+    def test_contention_series_rejects_contended_signature_drift(self):
+        calls = 0
+
+        def fake_once(**kwargs):
+            nonlocal calls
+            calls += 1
+            profiles = kwargs["profiles"]
+            references = {
+                profile: {
+                    "hashes": {
+                        "source": profile,
+                        "data": profile,
+                        "plan": profile,
+                        "baseline": profile,
+                    },
+                    "mutations": [{"id": profile, "hit_cases": []}],
+                }
+                for profile in profiles
+            }
+            reports = {
+                profile: {
+                    **references[profile],
+                    "mutations": [{
+                        "id": profile,
+                        "hit_cases": ([] if calls == 1 else [{"case": "drift"}]),
+                    }],
+                }
+                for profile in profiles
+            }
+            return {
+                "cpu_attribution": "test",
+                "wall_seconds": 1.0,
+                "host_resource_observation": {"observed": False},
+                "references": references,
+                "reports": reports,
+                "comparisons": {
+                    profile: {"slowdown_vs_reference": 1.0}
+                    for profile in profiles
+                },
+                "results_equivalent": True,
+                "all_safe": True,
+            }
+
+        with patch(
+            "benchmark_mutation._run_contention_once", side_effect=fake_once
+        ):
+            report = benchmark.run_contention(
+                profiles=("many-light", "few-heavy"),
+                jobs_per_profile=1,
+                repetitions=2,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertFalse(report["results_equivalent"])
+
+    def test_contention_series_rotates_order_and_summarizes_slowdown(self):
+        orders = []
+
+        def fake_once(**kwargs):
+            orders.append(kwargs["profiles"])
+            index = len(orders)
+            profiles = kwargs["profiles"]
+            references = {
+                profile: {
+                    "hashes": {
+                        "source": profile,
+                        "data": profile,
+                        "plan": profile,
+                        "baseline": profile,
+                    },
+                    "mutations": [],
+                }
+                for profile in profiles
+            }
+            return {
+                "cpu_attribution": "test",
+                "wall_seconds": float(index),
+                "host_resource_observation": {
+                    "observed": True,
+                    "process_count_peak": index + 2,
+                    "active_rss_mb_peak": 100 + index,
+                },
+                "references": references,
+                "reports": references,
+                "comparisons": {
+                    profile: {
+                        "slowdown_vs_reference": 1.0 + index / 10.0,
+                    }
+                    for profile in profiles
+                },
+                "results_equivalent": True,
+                "all_safe": True,
+            }
+
+        with patch(
+            "benchmark_mutation._run_contention_once", side_effect=fake_once
+        ):
+            report = benchmark.run_contention(
+                profiles=("many-light", "few-heavy"),
+                jobs_per_profile=1,
+                repetitions=5,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertEqual(
+            orders,
+            [
+                ("many-light", "few-heavy"),
+                ("few-heavy", "many-light"),
+                ("many-light", "few-heavy"),
+                ("few-heavy", "many-light"),
+                ("many-light", "few-heavy"),
+            ],
+        )
+        self.assertTrue(report["results_equivalent"])
+        self.assertTrue(report["all_safe"])
+        self.assertEqual(report["compatibility_run"], 1)
+        self.assertEqual(report["observation_coverage"]["safe_runs"], 5)
+        self.assertEqual(
+            report["summary"]["slowdown"]["many-light"][
+                "median_slowdown_vs_reference"
+            ],
+            1.3,
+        )
+        self.assertTrue(
+            report["summary"]["wall_seconds"][
+                "distribution_statistics_meaningful"
+            ]
+        )
+
     def test_contention_runs_two_profiles_independently(self):
         calls = []
 
@@ -785,6 +1040,10 @@ class SpawnSchedulerTests(unittest.TestCase):
                     "scheduler_parent_cpu_observed": True,
                     "direct_worker_cpu_seconds": 2.0,
                     "direct_worker_cpu_observed": True,
+                },
+                "execution_profile": {
+                    "judge_memory_limit_mb": 4096,
+                    "judge_process_limit": 80,
                 },
                 "planned": 1,
                 "completed": 1,
@@ -830,6 +1089,23 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertEqual(report["failure_scope"], "per-problem-independent")
         self.assertTrue(report["results_equivalent"])
         self.assertTrue(report["all_safe"])
+        synchronization = report["launch_synchronization"]
+        self.assertTrue(synchronization["barrier_released"])
+        self.assertEqual(
+            synchronization["profiles_ready"], ["few-heavy", "many-light"]
+        )
+        self.assertEqual(
+            synchronization["profiles_started"], ["few-heavy", "many-light"]
+        )
+        self.assertIsInstance(synchronization["launch_skew_seconds"], float)
+        resources = report["configured_worker_resources"]
+        self.assertEqual(resources["active_worker_tokens"], 4)
+        self.assertEqual(
+            set(resources["profiles"]), {"many-light", "few-heavy"}
+        )
+        self.assertEqual(resources["theoretical_memory_limit_mb"], 16384)
+        self.assertEqual(resources["theoretical_process_limit"], 320)
+        self.assertNotIn("host_job_budget", report)
         self.assertIsNone(
             report["reports"]["many-light"]["resource_summary"][
                 "scheduler_parent_cpu_seconds"
@@ -882,6 +1158,50 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertEqual(report["reports"]["many-light"]["error"], "fixture_failed")
         self.assertIn("mutations", report["reports"]["few-heavy"])
         self.assertFalse(report["results_equivalent"])
+        self.assertFalse(report["all_safe"])
+
+    def test_contention_broken_barrier_is_unsafe(self):
+        complete = {
+            "wall_seconds": 1.0,
+            "planned": 0,
+            "completed": 0,
+            "classifications": {
+                "infrastructure-failed": 0,
+                "cancelled": 0,
+            },
+            "stop_code": None,
+            "mutations": [],
+            "hashes": {},
+            "live_inputs_unchanged": True,
+            "formal_artifacts_unchanged": True,
+            "mutation_evidence_unchanged": True,
+            "judge_artifacts_unchanged": True,
+            "fixture_unchanged": True,
+            "workers_cleaned": True,
+            "descendants_cleaned": True,
+            "execution_profile": {},
+        }
+
+        class BrokenBarrier:
+            def __init__(self, parties):
+                self.parties = parties
+
+            def wait(self, timeout=None):
+                raise threading.BrokenBarrierError
+
+        with patch("benchmark_mutation.run_benchmark", return_value=complete), patch(
+            "benchmark_mutation.threading.Barrier", BrokenBarrier
+        ):
+            report = benchmark._run_contention_once(
+                profiles=("many-light", "few-heavy"),
+                jobs_per_profile=1,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertFalse(report["launch_synchronization"]["barrier_released"])
         self.assertFalse(report["all_safe"])
 
     def test_contention_rejects_host_oversubscription(self):
@@ -1033,6 +1353,172 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertTrue(report["all_safe"])
         self.assertEqual(report["warm_speedup_vs_cold"], 2.0)
         self.assertFalse(report["host_cache_controlled"])
+
+    def test_cache_pair_series_rotates_order_and_summarizes_speedup(self):
+        orders = []
+
+        def fake_once(**kwargs):
+            orders.append(kwargs["profile_order"])
+            index = len(orders)
+            base = {
+                "hashes": {
+                    "source": "source",
+                    "data": "data",
+                    "plan": "plan",
+                    "baseline": "baseline",
+                },
+                "mutations": [],
+            }
+            return {
+                "reports": {"cold": base, "warm": base},
+                "results_equivalent": True,
+                "all_safe": True,
+                "measured_judge_wall_seconds": {
+                    "cold": float(index * 2),
+                    "warm": float(index),
+                },
+                "warm_speedup_vs_cold": float(index),
+                "warm_cache_complete": True,
+                "warm_cache_partial": False,
+            }
+
+        with patch(
+            "benchmark_mutation._run_cache_pair_once", side_effect=fake_once
+        ):
+            report = benchmark.run_cache_pair(
+                jobs=1,
+                repetitions=5,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertEqual(
+            orders,
+            [
+                ("cold", "warm"),
+                ("warm", "cold"),
+                ("cold", "warm"),
+                ("warm", "cold"),
+                ("cold", "warm"),
+            ],
+        )
+        self.assertTrue(report["results_equivalent"])
+        self.assertTrue(report["all_safe"])
+        self.assertEqual(
+            report["summary"]["warm_speedup_vs_cold"]["median_speedup"],
+            3.0,
+        )
+        self.assertTrue(
+            report["summary"]["warm_speedup_vs_cold"][
+                "distribution_statistics_meaningful"
+            ]
+        )
+
+    def test_aggregate_modes_reject_repetitions_over_limit(self):
+        arguments = {
+            "timeout": 10,
+            "max_mutants": 1,
+            "operators": None,
+            "mutant_timeout": 10,
+            "repetitions": benchmark.MAX_REPETITIONS + 1,
+        }
+        with self.assertRaisesRegex(ValueError, "repetitions must be in"):
+            benchmark.run_matrix(jobs_values=(1,), **arguments)
+        with self.assertRaisesRegex(ValueError, "repetitions must be in"):
+            benchmark.run_cache_pair(jobs=1, **arguments)
+        with self.assertRaisesRegex(ValueError, "repetitions must be in"):
+            benchmark.run_contention(
+                profiles=("many-light", "few-heavy"),
+                jobs_per_profile=1,
+                **arguments,
+            )
+
+    def test_cache_pair_series_rejects_identity_drift(self):
+        calls = 0
+
+        def fake_once(**kwargs):
+            nonlocal calls
+            calls += 1
+            base = {
+                "hashes": {
+                    "source": "source",
+                    "data": "data",
+                    "plan": f"plan-{calls}",
+                    "baseline": "baseline",
+                },
+                "mutations": [],
+            }
+            return {
+                "reports": {"cold": base, "warm": base},
+                "results_equivalent": True,
+                "all_safe": True,
+                "measured_judge_wall_seconds": {"cold": 2.0, "warm": 1.0},
+                "warm_speedup_vs_cold": 2.0,
+                "warm_cache_complete": True,
+                "warm_cache_partial": False,
+            }
+
+        with patch(
+            "benchmark_mutation._run_cache_pair_once", side_effect=fake_once
+        ):
+            report = benchmark.run_cache_pair(
+                jobs=1,
+                repetitions=2,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertFalse(report["results_equivalent"])
+
+    def test_cache_pair_series_rejects_warm_signature_drift(self):
+        calls = 0
+
+        def fake_once(**kwargs):
+            nonlocal calls
+            calls += 1
+            cold = {
+                "hashes": {
+                    "source": "source",
+                    "data": "data",
+                    "plan": "plan",
+                    "baseline": "baseline",
+                },
+                "mutations": [{"id": "m1", "hit_cases": []}],
+            }
+            warm = {
+                **cold,
+                "mutations": [{
+                    "id": "m1",
+                    "hit_cases": ([] if calls == 1 else [{"case": "drift"}]),
+                }],
+            }
+            return {
+                "reports": {"cold": cold, "warm": warm},
+                "results_equivalent": True,
+                "all_safe": True,
+                "measured_judge_wall_seconds": {"cold": 2.0, "warm": 1.0},
+                "warm_speedup_vs_cold": 2.0,
+                "warm_cache_complete": True,
+                "warm_cache_partial": False,
+            }
+
+        with patch(
+            "benchmark_mutation._run_cache_pair_once", side_effect=fake_once
+        ):
+            report = benchmark.run_cache_pair(
+                jobs=1,
+                repetitions=2,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
+        self.assertFalse(report["results_equivalent"])
 
     def test_judge_cancellation_is_classified_as_cancelled(self):
         with tempfile.TemporaryDirectory() as temp:
