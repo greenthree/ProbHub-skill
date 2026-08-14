@@ -25,6 +25,7 @@ from .errors import ProbHubError
 from .io import normalize_newlines as _normalize_newlines, read_yaml, write_json
 from .process_control import DEFAULT_PROCESS_LIMIT
 from .special_judges import run_checker_to_files
+from .source_diagnostics import diagnose_source, format_diagnostic
 from .stressing import _prepare_program, _run
 from .transactions import (
     TRANSACTION_PHASE_COMMITTED,
@@ -581,6 +582,73 @@ def generate_problem_data(
         if judge_type == "custom":
             checker_rel = (config.get("judge") or {}).get("checker")
             checker_source = _resolve_inside(problem_dir, checker_rel, "judge.checker")
+        generated_cases = [recipe["case"] for recipe in selected if not recipe["manual"]]
+        preflight_specs = {
+            (str(validator_source), "validator"): {
+                "source_path": validator_source,
+                "role": "validator",
+                "display_path": validator_rel,
+                "affected_cases": set(generated_cases),
+            },
+        }
+        # Keep the established per-case config failure for missing or unsafe
+        # recipe generators. Static source checks only apply once a path is
+        # resolvable; otherwise generator_command() reports the original error.
+        for recipe in selected:
+            generator_rel = recipe.get("generator") or default_generator
+            if not generator_rel:
+                continue
+            try:
+                generator_source = _resolve_inside(problem_dir, generator_rel, "generator")
+            except ProbHubError:
+                continue
+            key = (str(generator_source), "generator")
+            spec = preflight_specs.setdefault(key, {
+                "source_path": generator_source,
+                "role": "generator",
+                "display_path": generator_rel,
+                "affected_cases": set(),
+            })
+            spec["affected_cases"].add(recipe["case"])
+        preflight_diagnostics = []
+        for spec in preflight_specs.values():
+            for diagnostic in diagnose_source(
+                spec["source_path"],
+                spec["role"],
+                display_path=spec["display_path"],
+            ):
+                preflight_diagnostics.append((diagnostic, spec["affected_cases"]))
+        preflight_failures = []
+        for diagnostic, affected_cases in preflight_diagnostics:
+            if diagnostic.get("severity") != "error":
+                continue
+            preflight_failures.append({
+                "case": None,
+                "stage": "preflight",
+                "code": diagnostic.get("code"),
+                "path": diagnostic.get("path"),
+                "line": diagnostic.get("line"),
+                "message": format_diagnostic(diagnostic),
+                "hint": diagnostic.get("hint"),
+                "affected_cases": [
+                    case for case in generated_cases if case in affected_cases
+                ],
+            })
+        if preflight_failures:
+            return {
+                "ok": False,
+                "code": "gen_preflight_failed",
+                "applied": False,
+                "manifest_written": False,
+                "results": [],
+                "failures": preflight_failures,
+                "warnings": [],
+                "summary": {
+                    "recipes": len(recipes),
+                    "selected": len(selected),
+                    "preflight_failures": len(preflight_failures),
+                },
+            }
     with tempfile.TemporaryDirectory(prefix="probhub-gen-") as temp:
         build_dir = Path(temp) / "build"
         build_dir.mkdir()

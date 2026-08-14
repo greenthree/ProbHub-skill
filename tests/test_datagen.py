@@ -746,6 +746,76 @@ class DatagenIntegrationTests(unittest.TestCase):
             self.assertFalse((problem / "data/secret/gen01.in").exists())
             self.assertFalse((problem / GEN_MANIFEST_PATH).exists())
 
+    def test_testlib_source_preflight_blocks_before_generation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.make_workspace(root)
+            (problem / "code/inmaker.cpp").write_text(
+                '#include "testlib.h"\nint main() { return 0; }\n',
+                encoding="utf-8",
+            )
+            (problem / "code/plain-generator.cpp").write_text(
+                '#include <cstdio>\nint main() { std::puts("1 2"); }\n',
+                encoding="utf-8",
+            )
+            set_recipes(problem, [
+                {"case": "random01", "args": ["small", "1"]},
+                {
+                    "case": "plain01",
+                    "generator": "code/plain-generator.cpp",
+                    "args": [],
+                },
+            ])
+
+            code, result = run_cli([
+                "--workspace", str(root), "--json", "gen", "A", "--apply",
+            ])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(result["code"], "gen_preflight_failed")
+            self.assertEqual(result["failures"][0]["stage"], "preflight")
+            self.assertEqual(result["failures"][0]["code"], "generator_missing_registerGen")
+            self.assertEqual(result["failures"][0]["affected_cases"], ["random01"])
+            self.assertFalse((problem / GEN_MANIFEST_PATH).exists())
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.make_workspace(root)
+            (problem / "code/validator.cpp").write_text(
+                '#include "testlib.h"\n'
+                'int main() { std::string s = inf.readToken("s"); }\n',
+                encoding="utf-8",
+            )
+
+            code, result = run_cli([
+                "--workspace", str(root), "--json", "gen", "A", "--apply",
+            ])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(result["code"], "gen_preflight_failed")
+            self.assertEqual(result["failures"][0]["code"], "validator_readToken_label_as_pattern")
+            self.assertIn('readToken("[a-z]+", "s")', result["failures"][0]["hint"])
+            self.assertFalse((problem / GEN_MANIFEST_PATH).exists())
+
+    def test_missing_recipe_generator_keeps_case_level_config_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.make_workspace(root)
+            set_recipes(problem, [
+                {"case": "random01", "manual": True},
+                {"case": "missing01", "generator": "code/does-not-exist.cpp", "args": []},
+            ])
+
+            code, result = run_cli([
+                "--workspace", str(root), "--json", "gen", "A", "--apply",
+            ])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(result["code"], "gen_failed")
+            self.assertEqual(result["failures"][0]["case"], "missing01")
+            self.assertEqual(result["failures"][0]["stage"], "config")
+            self.assertFalse((problem / GEN_MANIFEST_PATH).exists())
+
     def test_failures_block_all_writes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

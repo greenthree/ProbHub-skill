@@ -135,6 +135,7 @@ probhub gen L05 --case max01    # 只处理指定配方（可重复）
 
 要点：
 
+- **先做源代码预检**：在编译或运行任何生成器前，`gen` 会检查 testlib Generator 是否调用 `registerGen(...)`，以及 Validator 是否把 `readToken("s")`/`readWord("s")` 这类变量名误当成正则。高置信错误以 `gen_preflight_failed` 返回，并给出 `generator_missing_registerGen` 或 `validator_readToken_label_as_pattern`、源码路径、行号和修复提示；不会创建数据文件或 Manifest。无法解析的生成器路径仍按原有 case 级 `gen_failed`/`config` 报告。
 - **失败即零写入**：任一配方出现生成器崩溃、Validator 拒绝、accepted 非正常退出或 Checker 不接受正式答案，整次 `gen` 以 `gen_failed` 失败（exit 1），不写任何数据文件。
 - plan 严格只读；`--apply` 全程持有工作区写锁（与 `build`/`new` 相同的 `build.lock`），并发写入返回 `build_busy`。
 - `--apply` 在取得锁后重新加载 live workspace 与 `probhub.yaml`，发布前再次核对配置身份；`.in`、`.ans` 与 gen manifest 全部先 staging，任一 replace 失败会恢复原文件并以 `gen_write_failed` 退出。
