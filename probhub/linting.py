@@ -24,6 +24,7 @@ from .metadata import build_meta, normalize_display_name
 from .mutation_config import inspect_mutation_config
 from .problem_paths import ProblemPathError, resolve_problem_regular_file
 from .solutions import analyze_solution_verification
+from .source_diagnostics import diagnose_source, format_diagnostic
 from .statement import parse_statement
 from .statement_consistency import analyze_constraint_consistency, reconcile_constraints
 from .typesetting import typst_boundary_protocol_supported
@@ -333,6 +334,7 @@ def lint_problem(root, workspace, entry):
 
     validator = judge.get("validator")
     validator_path = None
+    source_diagnostics = []
     if not validator:
         errors.append("judge.validator is required")
     else:
@@ -344,6 +346,10 @@ def lint_problem(root, workspace, entry):
                 validator_reason,
                 "validator",
             ))
+    if validator_path is not None:
+        source_diagnostics.extend(
+            diagnose_source(validator_path, "validator", display_path=validator)
+        )
 
     constraint_reconciliation = reconcile_constraints([], [])
     if parsed is not None and validator_path is not None:
@@ -574,12 +580,25 @@ def lint_problem(root, workspace, entry):
                 f"(they collapse on Windows checkouts): {', '.join(collisions)}"
             )
 
+    generator_sources = []
+    for generator in config.get("generators") or []:
+        generator_value = generator.get("file") if isinstance(generator, dict) else generator
+        if generator_value:
+            generator_sources.append((generator_value, "generator"))
+    stress_config = config.get("stress") or {}
+    if isinstance(stress_config, dict) and stress_config.get("generator"):
+        generator_sources.append((stress_config["generator"], "stress_generator"))
     try:
         recipes, uncovered = recipe_coverage(problem_dir, config)
     except ProbHubError as exc:
         errors.append(str(exc))
     else:
         if recipes:
+            generator_sources.extend(
+                (recipe.get("generator"), "generator")
+                for recipe in recipes
+                if recipe.get("generator")
+            )
             recipe_generators = {
                 recipe.get("generator")
                 for recipe in recipes
@@ -617,6 +636,23 @@ def lint_problem(root, workspace, entry):
                     f"secret data has no generation recipes "
                     f"({len(uncovered)} case(s) not reproducible)"
                 )
+    seen_sources = set()
+    for relative, role in generator_sources:
+        generator_path = _problem_relative_path(problem_dir, relative)
+        if generator_path is None or not generator_path.is_file():
+            continue
+        key = (str(generator_path), role)
+        if key in seen_sources:
+            continue
+        seen_sources.add(key)
+        source_diagnostics.extend(
+            diagnose_source(generator_path, role, display_path=relative)
+        )
+    errors.extend(
+        format_diagnostic(diagnostic)
+        for diagnostic in source_diagnostics
+        if diagnostic.get("severity") == "error"
+    )
     solution_verification = analyze_solution_verification(problem_dir, config)
     errors.extend(solution_verification.get("errors") or [])
     warnings.extend(solution_verification.get("warnings") or [])
@@ -645,6 +681,7 @@ def lint_problem(root, workspace, entry):
         *judge_qa["diagnostics"],
         *judge_qa_evidence["diagnostics"],
         *mutation_config["diagnostics"],
+        *source_diagnostics,
     ]
     return {
         "id": entry["id"],

@@ -111,7 +111,7 @@ domjudge:
 
 ### Test recipes (`data.recipes`)
 
-每个 secret 测试点可声明来源配方：`manual: true`（手工数据，字节即事实来源），或生成器调用（可选 `generator` 路径 + 精确 `args` 列表）。case 名大小写不敏感去重（Windows 文件系统会塌缩 `gen01`/`GEN01`）；生成器、Validator 和 Checker 单次运行默认 60 秒超时，可用 `data.gen_tool_timeout`（秒，≤3600）覆盖；沙箱遵循 `limits.processes`。`probhub gen <ID>` 依配方生成输入 → Validator 过检 → 用首个 accepted 产 `.ans` → Custom Checker 复核，plan 模式报告 new/changed/unchanged（字节级一致才算 unchanged），`--apply` 才在工作区写锁内发布。配置会在取锁后重载，并在发布前再次核对；`.in`、`.ans` 与 gen manifest 全部先 staging，任一替换失败会回滚已有正式文件。输出统一 LF，保证 Windows/Linux 字节一致；生成证据写入本地 `.probhub/gen-manifest.json`（不提交，`--case` 局部运行按 case 合并）。交互题不支持 `gen`（答案由 Interactor 协议定义）。没有配方的 secret 测试点在 lint 中以 warning 呈现（存量数据兼容，不硬失败）。`stress --against --fixate` 命中后会先按原 argv 重放确认字节一致，再登记配方、数据组和目标错解。
+每个 secret 测试点可声明来源配方：`manual: true`（手工数据，字节即事实来源），或生成器调用（可选 `generator` 路径 + 精确 `args` 列表）。case 名大小写不敏感去重（Windows 文件系统会塌缩 `gen01`/`GEN01`）；生成器、Validator 和 Checker 单次运行默认 60 秒超时，可用 `data.gen_tool_timeout`（秒，≤3600）覆盖；沙箱遵循 `limits.processes`。`probhub gen <ID>` 会在编译前执行高置信源预检：testlib Generator 必须调用 `registerGen(...)`，Validator 不得把 `readToken("s")`/`readWord("s")` 中的变量名误当成正则；失败返回结构化诊断并保持零写入。通过预检后才依配方生成输入 → Validator 过检 → 用首个 accepted 产 `.ans` → Custom Checker 复核，plan 模式报告 new/changed/unchanged（字节级一致才算 unchanged），`--apply` 才在工作区写锁内发布。配置会在取锁后重载，并在发布前再次核对；`.in`、`.ans` 与 gen manifest 全部先 staging，任一替换失败会回滚已有正式文件。输出统一 LF，保证 Windows/Linux 字节一致；生成证据写入本地 `.probhub/gen-manifest.json`（不提交，`--case` 局部运行按 case 合并）。交互题不支持 `gen`（答案由 Interactor 协议定义）。没有配方的 secret 测试点在 lint 中以 warning 呈现（存量数据兼容，不硬失败）。`stress --against --fixate` 命中后会先按原 argv 重放确认字节一致，再登记配方、数据组和目标错解。
 
 ### Resource limits
 

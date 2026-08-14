@@ -89,7 +89,7 @@ probhub build
 | `doctor` | 在业务依赖缺失时也可启动，检查 Python >=3.10、Node >=18、Typst 0.14.2、固定 CJK 字体、g++ 和 Python 依赖 |
 | `init` | 创建 Workspace Schema v1、固定时间戳和可直接组卷的 Typst 模板 |
 | `new <ID>` | 创建可编译、judge 开箱即过的题目骨架（`--judge` 可选 standard/custom/interactive），含带独立性声明的双 accepted、示例错解与定向数据组 |
-| `gen <ID>` | 按 `data.recipes` 配方生成/校验 secret 数据；默认 plan 只报告，`--apply` 才写入，失败零写入 |
+| `gen <ID>` | 先预检常见 testlib 源码错误，再按 `data.recipes` 生成/校验 secret 数据；默认 plan 只报告，`--apply` 才写入，失败零写入 |
 | `lint [ID...]` | 检查规范源文件、代码路径和数据配对 |
 | `status [ID...]` | 报告 `current`、`stale`、`never-built` |
 | `report [ID...]` | 只读汇总难度、数据画像、recipe、TL 余量和错解击杀矩阵；`--format markdown` 输出 Markdown |
@@ -244,7 +244,7 @@ probhub mutation L01 --operator comparison-boundary --no-cache
 - 数据严格放在 `data/sample` 和 `data/secret`，每个 `.in` 必须有同名 `.ans`。
 - 样例 `.ans` 必须由配置顺序中的首个 accepted 精确复现；只归一 CRLF/CR 为 LF，尾空格、缺少尾换行和其他字节差异仍失败。Custom Checker 的非唯一输出语义不能替代这条样例不变量；交互题明确不适用。
 - 题面只能有一个 H1，必需 H2 依次为题目描述、输入格式、输出格式且内容非空；提示位于输出之后，样例输入/输出只来自 `data/sample`。lint 的约束对账会保守识别直接 LaTeX/中文累计上限与 Validator 直接累加器，并在多测但未发现累计上限时提示复核；结果始终是 `analysis_state: partial`，启发式 mismatch 只能 warning，不能替代复杂度分析或正确性证明。
-- secret 数据优先通过 `data.recipes` 配方生成（`probhub gen`）：生成器 + 精确 args 可复现同一字节，手工数据显式 `manual: true`；没有配方的测试点 lint 会给 warning。配方格式见 `references/workspace-schema-v1.md`。
+- secret 数据优先通过 `data.recipes` 配方生成（`probhub gen`）：生成器 + 精确 args 可复现同一字节，手工数据显式 `manual: true`；生成前会拦截高置信的 testlib Generator 缺少 `registerGen(...)`、Validator 把变量名当 `readToken` 正则等错误，失败时不写入数据；没有配方的测试点 lint 会给 warning。配方格式见 `references/workspace-schema-v1.md`。
 - 为定向卡错解和复杂度数据配置 `data.groups` 与结构化 `solutions.*[].expected`；实现或审查时读取 `references/data-groups-expectations.md`。要求错解必须 WA 时显式写 `status: WA`，不得用偶然 RE/TLE 代替。
 - 慢参考解可在第二及后续 accepted 上配置 `run_on: [groups]`；多个组取并集，sample 始终执行。首个 accepted 禁止缩域；局部 accepted 必须显式写 `expected.groups`，且期望和 target 覆盖不得超出运行域。该字段只影响本地 Judge，不影响 stress 或 DOMjudge 包。
 - 第二及后续 accepted 用 `independence: {from, basis, note}` 记录独立思路或关键实现及人工复核说明；`basis` 只能是 `algorithm` / `key_implementation`。不得用变量重命名、I/O 改写、同字节源码或直接 include 主实现冒充独立解。Core 只能检查确定反证，不能自动证明算法独立。

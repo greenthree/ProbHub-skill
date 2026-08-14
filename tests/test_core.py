@@ -632,6 +632,36 @@ class CoreWorkspaceTests(unittest.TestCase):
                 result["problems"][0]["errors"],
             )
 
+    def test_lint_reports_high_confidence_testlib_source_mistakes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            (problem / "code/validator.cpp").write_text(
+                '#include "testlib.h"\n'
+                'int main() { std::string s = inf.readToken("s"); }\n',
+                encoding="utf-8",
+            )
+            (problem / "code/inmaker.cpp").write_text(
+                '#include "testlib.h"\nint main() { return 0; }\n',
+                encoding="utf-8",
+            )
+            config = read_yaml(problem / "probhub.yaml")
+            config["generators"] = ["code/inmaker.cpp"]
+            write_yaml(problem / "probhub.yaml", config)
+            _, workspace = load_workspace(root)
+
+            result = lint_workspace(root, workspace)
+
+            self.assertFalse(result["ok"])
+            errors = result["problems"][0]["errors"]
+            self.assertTrue(any("[generator_missing_registerGen]" in item for item in errors))
+            self.assertTrue(any("[validator_readToken_label_as_pattern]" in item for item in errors))
+            diagnostics = result["problems"][0]["diagnostics"]
+            self.assertEqual(
+                {item["code"] for item in diagnostics if item["code"].startswith(("generator_", "validator_"))},
+                {"generator_missing_registerGen", "validator_readToken_label_as_pattern"},
+            )
+
     def test_stress_arg_expansion_rejects_positional_template(self):
         from probhub.stressing import expand_generator_args
 
