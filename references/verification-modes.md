@@ -141,7 +141,7 @@ probhub seal <ID> --no-cache --rounds 100 --seed 12345
 
 ## 5. 完整模式
 
-完整模式包含普通模式的全部内容，并增加以下两个独立角色。
+完整模式包含普通模式的全部内容，并增加以下两个独立角色，以及适用时的 mutation 补充检查。
 
 ### 5.1 独立证明与参考实现审查者
 
@@ -168,6 +168,33 @@ probhub seal <ID> --no-cache --rounds 100 --seed 12345
 - 给出可重放、可固化的最小反例或定向生成策略。
 
 主 Agent 必须验证每条阻断意见。有效问题进入规范源并重跑相应门禁；错误或不适用意见也要记录理由，不能只写“已查看”。所有分歧解决前不得把完整模式标记为完成。
+
+### 5.3 条件性 mutation 检查
+
+完成独立证明、对抗审查并冻结题面、Validator、标程和正式数据后，主 Agent 应评估是否运行 mutation。它只适用于 `judge.type: standard` 且首个 accepted 为 C++ 的题目；Checker、Interactor、浮点判定和非 C++ 标程记录 `not_applicable`，不把跳过当作失败或通过。
+
+适用题目存在候选变异时，完整模式的默认建议命令为：
+
+```powershell
+probhub mutation <ID> --jobs 2 --no-cache
+```
+
+mutation 是补充证据，不是完整模式的统一硬门禁，也不接入普通模式、`seal` 或 `build`。运行前应根据源码规模、历史 `raw_planned` 和本机无缓存 Judge 吞吐估算墙钟；初期经验提示如下（不是 Core 限制）：
+
+- 预计不超过 16 个候选：通常可以直接建议运行；
+- 17 至 64 个候选：先向交接记录预计耗时和资源，再运行；
+- 超过 64 个候选：不要无预算自动启动，应先缩小算子/`max-mutants` 或取得明确的时间预算。
+
+命令返回后必须读取结构化 evidence，而不是只看 score：
+
+- `raw_planned`、`excluded`、`planned`、`selected` 和 `executed` 必须互相一致；
+- `infrastructure-failed`、`cancelled`、超时或发布失败不计为 killed，且 mutation 子检查未完成；
+- `no_candidates` 表示没有可执行候选，不表示题目已获得 mutation 保证；
+- `survived` 必须由主 Agent 阅读源码位置、变换和命中范围后分类。
+
+对 survivor 的处置只有三种：补数据或修复题目后重跑；确认等价、不适用或越界未定义行为并按稳定 ID 写出具体 exclusion 理由；无法判断时保留 residual risk。不能为了提高 score 批量排除，也不能把“全部已知变异被击杀”写成“没有未知错解”。
+
+完整模式交接必须记录 mutation 的适用性、命令、requested/effective jobs、候选计数、分类、人工处置和剩余风险。若适用 mutation 未完成，`verification_complete` 不得无条件写成 `true`；若用户明确接受缺口，需在交接中保留 `mutation: incomplete` 及原因。
 
 ## 6. 上下文隔离与审查角色
 
@@ -249,6 +276,23 @@ verification:
     - command: probhub stress L10 --rounds 3000 --seed 12345
       exit_code: 0
       result: passed
+  mutation:
+    applicability: applicable
+    command: probhub mutation L10 --jobs 2 --no-cache
+    status: reviewed
+    requested_jobs: 2
+    effective_jobs: 2
+    raw_planned: 12
+    selected: 12
+    executed: 12
+    killed: 11
+    survived: 1
+    compile_invalid: 0
+    infrastructure_failed: 0
+    survivor_disposition:
+      - id: cpp-token-v1:comparison-boundary:42:17:0123456789abcdef
+        result: excluded
+        reason: Validator guarantee makes the changed branch unreachable
   disagreements: []
   residual_risks:
     - target Linux time limit still requires final calibration
@@ -263,6 +307,7 @@ verification:
 - 审查角色、允许上下文、产物、独立性依据和结论；
 - 证明/实现/Checker 分歧及其解决证据；
 - Judge、stress、oracle、seal/build、验包和 PDF QA 的命令与结构化结果；
+- 完整模式 mutation 的 applicability、候选/执行计数、requested/effective jobs、survivor 处置和未完成原因；
 - 自动验证与人工/Agent 判断的边界；
 - 未完成项、平台边界和剩余风险。
 

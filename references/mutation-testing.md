@@ -29,6 +29,31 @@ probhub mutation L01 --operator comparison-boundary --operator boolean-negation 
 
 也可以使用别名 `probhub mutate ...`。`--max-mutants` 范围为 1 至 256；未指定算子时运行首版全部算子。`--no-cache` 传给每个临时 worker 的 Judge，确保编译和逐点结果不复用旧缓存。命令退出码为 0 且 `status: passed` 时才表示本次变异执行完整；`survived` 是报告结果，不是命令失败。
 
+## Agent 完整模式建议
+
+mutation 只作为 Agent 完整模式的条件性补充检查。它必须排在独立证明/参考实现和对抗审查之后，并在题面、Validator、accepted 和正式数据冻结后执行。普通模式不运行，`seal` 和 `build` 也不会自动触发。
+
+首次试行可使用以下经验性成本提示：
+
+| 预计候选数 | Agent 行为 |
+|---:|---|
+| `0` | 记录 `no_candidates`；不把它解释为 mutation 通过。 |
+| `1..16` | 通常可直接建议 `--jobs 2 --no-cache`。 |
+| `17..64` | 先记录预计墙钟和资源，再运行或缩小算子范围。 |
+| `>64` | 先取得明确时间预算，或使用 `--max-mutants`/指定算子；不得无预算自动运行。 |
+
+这些区间来自少量 Windows 真题试点，只用于提示，不是 Core 的硬限制。实际执行后以 evidence 的 `raw_planned`、`selected`、`executed` 和 measured time 为准。不同题目 Judge 启动成本差异很大，多题任务同时运行时还要考虑 `effective_jobs` 和宿主机 contention。
+
+对适用题目建议运行：
+
+```powershell
+probhub mutation <ID> --jobs 2 --no-cache
+```
+
+`standard` 以外的 Judge、非 C++ accepted 或无可用变异候选时，应在验证记录中分别写 `not_applicable` 或 `no_candidates`。发生 infrastructure failure、cancel、timeout 或 evidence 发布失败时，mutation 子检查是 `incomplete`，不能用“没有发现反例”替代完成状态。
+
+存活变异需要主 Agent 逐项阅读。循环上界变为越界访问、编译器/未定义行为导致的不可解释结果、等价重写和真正的数据覆盖缺口必须区分：前两类只能在有具体理由时排除，后一类应补数据并重跑，无法判断则保留 residual risk。人工 exclusion 必须使用稳定 ID 和非空理由，并在重跑后检查 `raw/excluded/planned/selected` 以及 `unmatched`/`out-of-scope` 诊断。
+
 每次命令只从 live 题目捕获一次一致、不可变的 baseline；每个变异都从 baseline 建立独立 worker，不能继承其他变异的源码、编译产物或缓存写入。默认 `--jobs 1` 保持计划顺序串行执行；只有显式指定 `--jobs 2` 才使用 spawn worker 有界并行，结果仍按 mutation plan 顺序聚合。全局 `build.lock` 只覆盖事务恢复、baseline 捕获和最终输入围栏/证据发布，不覆盖长时间 Judge，因此 mutation 运行时不会阻塞其他遵守 Core 锁协议的题目写入。题目自身的 `mutation.lock` 仍覆盖整次命令，防止同题并发覆盖 evidence。
 
 每个 worker 通过共享进程控制启动正式 Judge，并具有独立的 3600 秒监督器上限、128 MiB stdout/stderr 共享预算，以及根据题目限制增加固定余量的外层内存和进程预算。问题级调度器最多提供 2 个 worker token、8192 MiB Judge 内存额度和 160 个 Judge 进程额度；若一个 worker 的配置上限已经无法让两个任务同时满足额度，`requested_jobs: 2` 会降为 `effective_jobs: 1`。这些值是调度器用于限制同时活动 worker 的配置额度，不是宿主机资源预留，也不表示运行时实际消耗。
