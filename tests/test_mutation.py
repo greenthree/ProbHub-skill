@@ -21,10 +21,17 @@ from probhub.mutation import (
     MUTATION_JUDGE_MEMORY_BASE_MB,
     MUTATION_JUDGE_PROCESS_HEADROOM,
     MUTATION_JUDGE_PROCESS_BASE,
+    MUTATION_MAX_JOBS,
+    MUTATION_PARALLEL_SCHEDULER,
     MUTATION_SCHEDULER,
     MUTATION_SNAPSHOT_MODEL,
     MUTATION_OPERATOR_VERSION,
     _classify_judge_result,
+    _mutation_execution_profile,
+    _mutation_result_record,
+    _cancelled_mutation_record,
+    _MutationWorkerTask,
+    _run_parallel_mutations,
     mutation_evidence_path,
     mutation_evidence_profile,
     mutation_test_problem,
@@ -32,7 +39,7 @@ from probhub.mutation import (
 )
 from probhub.io import read_yaml, write_yaml
 from probhub.judging import judge_problem
-from probhub.process_control import ProcessCancelled
+from probhub.process_control import ProcessCancelled, process_alive
 from probhub.problem_snapshot import copy_problem_consistently
 from probhub.reporting import (
     build_workspace_report,
@@ -40,6 +47,7 @@ from probhub.reporting import (
     render_text_report,
 )
 from probhub.workspace import load_workspace
+from tests.mutation_scheduler_fixture import controlled_mutation_worker
 
 
 FIXTURE = Path(__file__).parent / "fixtures/workspaces/mutation/M01"
@@ -201,6 +209,216 @@ class MutationFixtureTests(unittest.TestCase):
             (problem / ".probhub").rmdir()
         except OSError:
             pass
+
+    def _scheduler_tasks(self, temp, mode, count=3):
+        temporary = Path(temp)
+        baseline = temporary / "baseline"
+        execution = temporary / "execution"
+        baseline.mkdir()
+        execution.mkdir()
+        source = (FIXTURE / "code/std.cpp").read_text(encoding="utf-8")
+        mutations = plan_mutations(source, max_mutants=count)["mutations"]
+        config = read_yaml(FIXTURE / "probhub.yaml")
+        config["_scheduler_test_mode"] = mode
+        profile = _mutation_execution_profile(
+            config,
+            requested_jobs=2,
+            selected=len(mutations),
+        )
+        return tuple(
+            _MutationWorkerTask(
+                index=index,
+                mutation=mutation,
+                baseline=str(baseline),
+                execution_root=str(execution),
+                worker_root=str(execution / f"problem-{index:04d}"),
+                source=source,
+                source_relative="code/std.cpp",
+                config=config,
+                use_cache=False,
+                execution_profile=profile,
+                deadline=None,
+            )
+            for index, mutation in enumerate(mutations)
+        )
+
+    def test_parallel_scheduler_stops_dispatch_and_aggregates_in_plan_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            tasks = self._scheduler_tasks(temp, "cooperative")
+            result = _run_parallel_mutations(
+                tasks,
+                jobs=2,
+                cancel_check=None,
+                deadline=None,
+                cancel_grace=0.5,
+                worker_target=controlled_mutation_worker,
+            )
+
+            self.assertEqual(result["stop_code"], "infrastructure-failed")
+            self.assertEqual(
+                [item["id"] for item in result["results"]],
+                [task.mutation.id for task in tasks],
+            )
+            self.assertEqual(
+                [item["classification"] for item in result["results"]],
+                ["infrastructure-failed", "cancelled", "cancelled"],
+            )
+            self.assertFalse(any(
+                item["classification"] == "killed"
+                for item in result["results"][1:]
+            ))
+            self.assertTrue(all(
+                not Path(task.worker_root).exists() for task in tasks
+            ))
+
+    def test_parallel_scheduler_force_cleans_stubborn_worker_tree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            tasks = self._scheduler_tasks(temp, "stubborn")
+            result = _run_parallel_mutations(
+                tasks,
+                jobs=2,
+                cancel_check=None,
+                deadline=None,
+                cancel_grace=0.1,
+                worker_target=controlled_mutation_worker,
+            )
+
+            child_pid = int(
+                (Path(temp) / "stubborn-peer.pid").read_text(encoding="utf-8")
+            )
+            self.assertEqual(result["stop_code"], "infrastructure-failed")
+            self.assertEqual(result["results"][1]["classification"], "cancelled")
+            self.assertFalse(process_alive(child_pid))
+            self.assertTrue(all(
+                not Path(task.worker_root).exists() for task in tasks
+            ))
+
+    def test_parallel_external_cancellation_cleans_active_workers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            tasks = self._scheduler_tasks(temp, "external", count=2)
+            ready = Path(temp) / "external-peer.pid"
+            with self.assertRaises(ProbHubError) as raised:
+                _run_parallel_mutations(
+                    tasks,
+                    jobs=2,
+                    cancel_check=ready.is_file,
+                    deadline=None,
+                    cancel_grace=0.5,
+                    worker_target=controlled_mutation_worker,
+                )
+
+            self.assertEqual(raised.exception.code, "mutation_cancelled")
+            self.assertTrue(all(
+                not Path(task.worker_root).exists() for task in tasks
+            ))
+
+    def test_parallel_failure_keeps_previous_evidence_and_reports_cancellation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            problem = root / "M01"
+            evidence = mutation_evidence_path(problem)
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            previous = b"previous successful evidence\n"
+            evidence.write_bytes(previous)
+
+            def fail_in_plan_order(tasks, **_kwargs):
+                return {
+                    "results": [
+                        _mutation_result_record(
+                            tasks[0].mutation,
+                            "infrastructure-failed",
+                            diagnostic="fixture_failure",
+                        ),
+                        _cancelled_mutation_record(
+                            tasks[1],
+                            "infrastructure-failed",
+                            "peer cancelled",
+                        ),
+                    ],
+                    "stop_code": "infrastructure-failed",
+                }
+
+            with patch(
+                "probhub.mutation._run_parallel_mutations",
+                side_effect=fail_in_plan_order,
+            ):
+                result = mutation_test_problem(
+                    root,
+                    problem,
+                    operators=["comparison-boundary", "boolean-negation"],
+                    max_mutants=2,
+                    jobs=2,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(evidence.read_bytes(), previous)
+            self.assertEqual(result["execution"]["effective_jobs"], 2)
+            self.assertEqual(result["execution"]["summary"]["cancelled"], 1)
+            self.assertEqual(
+                [item["classification"] for item in result["execution"]["mutations"]],
+                ["infrastructure-failed", "cancelled"],
+            )
+
+    def test_jobs_two_matches_serial_identity_and_classification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            problem = root / "M01"
+            arguments = {
+                "use_cache": False,
+                "operators": ["comparison-boundary", "boolean-negation"],
+                "max_mutants": 2,
+            }
+            serial = mutation_test_problem(root, problem, jobs=1, **arguments)
+            parallel = mutation_test_problem(root, problem, jobs=2, **arguments)
+
+            self.assertTrue(serial["ok"], serial)
+            self.assertTrue(parallel["ok"], parallel)
+            self.assertEqual(
+                serial["evidence"]["plan_hash"],
+                parallel["evidence"]["plan_hash"],
+            )
+            self.assertEqual(
+                serial["evidence"]["summary"],
+                parallel["evidence"]["summary"],
+            )
+            comparable = lambda result: [{
+                key: item[key]
+                for key in ("id", "classification", "hit_cases", "hit_cases_total")
+            } for item in result["evidence"]["mutations"]]
+            self.assertEqual(comparable(serial), comparable(parallel))
+            self.assertEqual(
+                parallel["evidence"]["execution_profile"]["scheduler"],
+                MUTATION_PARALLEL_SCHEDULER,
+            )
+            self.assertEqual(parallel["execution"]["effective_jobs"], 2)
+
+    def test_resource_budget_can_reduce_requested_parallelism(self):
+        profile = _mutation_execution_profile(
+            {"limits": {"memory": 4096, "processes": 128}},
+            requested_jobs=2,
+            selected=2,
+        )
+        self.assertEqual(profile["requested_jobs"], MUTATION_MAX_JOBS)
+        self.assertEqual(profile["effective_jobs"], 1)
+        self.assertEqual(profile["scheduler"], MUTATION_SCHEDULER)
+        self.assertLessEqual(
+            profile["configured_concurrent_memory_ceiling_mb"],
+            profile["whole_memory_budget_mb"],
+        )
+        self.assertLessEqual(
+            profile["configured_concurrent_process_ceiling"],
+            profile["whole_process_budget"],
+        )
+
+    def test_jobs_outside_production_boundary_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "workspace"
+            shutil.copytree(FIXTURE.parent, root)
+            with self.assertRaises(ProbHubError) as raised:
+                mutation_test_problem(root, root / "M01", jobs=4)
+        self.assertEqual(raised.exception.code, "mutation_jobs_invalid")
 
     def test_weak_data_survivor_is_killed_after_fixture_strengthening(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -473,6 +691,22 @@ class MutationFixtureTests(unittest.TestCase):
             legacy = json.loads(json.dumps(original))
             legacy.pop("execution_profile")
             evidence_path.write_text(json.dumps(legacy), encoding="utf-8")
+            self.assertEqual(mutation_evidence_profile(problem, config)["state"], "current")
+
+            legacy_profile = json.loads(json.dumps(original))
+            legacy_profile["execution_profile"] = {
+                key: original["execution_profile"][key]
+                for key in (
+                    "scheduler",
+                    "snapshot",
+                    "mutant_timeout_seconds",
+                    "judge_output_limit_bytes",
+                    "judge_memory_limit_mb",
+                    "judge_process_limit",
+                )
+            }
+            legacy_profile["execution_profile"]["schema_version"] = 1
+            evidence_path.write_text(json.dumps(legacy_profile), encoding="utf-8")
             self.assertEqual(mutation_evidence_profile(problem, config)["state"], "current")
 
             changed_budget = json.loads(json.dumps(original))

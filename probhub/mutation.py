@@ -13,8 +13,10 @@ import bisect
 import hashlib
 import json
 import math
+import multiprocessing
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
@@ -48,6 +50,8 @@ from .problem_snapshot import copy_problem_consistently
 from .process_control import (
     ProcessCancelled,
     cancellation_requested,
+    snapshot_process_tree,
+    terminate_external_process_tree,
     run_managed_to_files,
 )
 from .solutions import (
@@ -67,14 +71,20 @@ MAX_MUTATION_TEXT_BYTES = 512
 MAX_HIT_CASES = 16
 MAX_HIT_FIELD_BYTES = 256
 MAX_MUTATION_EVIDENCE_BYTES = 4 * 1024 * 1024
-MUTATION_EXECUTION_PROFILE_SCHEMA_VERSION = 1
+MUTATION_EXECUTION_PROFILE_SCHEMA_VERSION = 2
 MUTATION_SCHEDULER = "serial-v1"
+MUTATION_PARALLEL_SCHEDULER = "spawn-bounded-v1"
 MUTATION_SNAPSHOT_MODEL = "immutable-problem-v1"
 MUTATION_JUDGE_MEMORY_BASE_MB = 4096
 MUTATION_JUDGE_MEMORY_HEADROOM_MB = 2048
 MUTATION_JUDGE_PROCESS_BASE = 64
 MUTATION_JUDGE_PROCESS_HEADROOM = 16
-_MUTATION_EXECUTION_PROFILE_KEYS = frozenset({
+MUTATION_MAX_JOBS = 2
+MUTATION_WORKER_TOKEN_BUDGET = 2
+MUTATION_WHOLE_MEMORY_BUDGET_MB = 8192
+MUTATION_WHOLE_PROCESS_BUDGET = 160
+MUTATION_CANCEL_GRACE_SECONDS = 2.0
+_MUTATION_EXECUTION_PROFILE_V1_KEYS = frozenset({
     "schema_version",
     "scheduler",
     "snapshot",
@@ -82,6 +92,17 @@ _MUTATION_EXECUTION_PROFILE_KEYS = frozenset({
     "judge_output_limit_bytes",
     "judge_memory_limit_mb",
     "judge_process_limit",
+})
+_MUTATION_EXECUTION_PROFILE_V2_KEYS = _MUTATION_EXECUTION_PROFILE_V1_KEYS | frozenset({
+    "requested_jobs",
+    "effective_jobs",
+    "worker_token_budget",
+    "whole_memory_budget_mb",
+    "whole_process_budget",
+    "configured_concurrent_memory_ceiling_mb",
+    "configured_concurrent_process_ceiling",
+    "resource_budget_scope",
+    "cancel_grace_seconds",
 })
 _MUTATION_CLASSIFICATION_ORDER = (
     "killed",
@@ -115,6 +136,21 @@ class Mutation:
             "replacement": _bounded(self.replacement, MAX_MUTATION_TEXT_BYTES),
             "description": _bounded(self.description, MAX_MUTATION_TEXT_BYTES),
         }
+
+
+@dataclass(frozen=True)
+class _MutationWorkerTask:
+    index: int
+    mutation: Mutation
+    baseline: str
+    execution_root: str
+    worker_root: str
+    source: str
+    source_relative: str
+    config: dict
+    use_cache: bool
+    execution_profile: dict
+    deadline: float | None
 
 
 _INTEGER_RE = re.compile(
@@ -344,7 +380,7 @@ def apply_mutation(source, mutation):
     return source[:mutation.start] + mutation.replacement + source[mutation.end:]
 
 
-def _mutation_execution_profile(config):
+def _mutation_execution_profile(config, *, requested_jobs=1, selected=1):
     limits = config.get("limits") if isinstance(config.get("limits"), dict) else {}
     problem_memory = limits.get("memory", 256)
     if not isinstance(problem_memory, int) or isinstance(problem_memory, bool) or problem_memory <= 0:
@@ -352,31 +388,63 @@ def _mutation_execution_profile(config):
     problem_processes = limits.get("processes", 32)
     if not isinstance(problem_processes, int) or isinstance(problem_processes, bool) or problem_processes <= 0:
         problem_processes = 32
+    judge_memory_limit = max(
+        MUTATION_JUDGE_MEMORY_BASE_MB,
+        2 * problem_memory + MUTATION_JUDGE_MEMORY_HEADROOM_MB,
+    )
+    judge_process_limit = max(
+        MUTATION_JUDGE_PROCESS_BASE,
+        2 * problem_processes + MUTATION_JUDGE_PROCESS_HEADROOM,
+    )
+    whole_memory_budget = max(MUTATION_WHOLE_MEMORY_BUDGET_MB, judge_memory_limit)
+    whole_process_budget = max(MUTATION_WHOLE_PROCESS_BUDGET, judge_process_limit)
+    budget_jobs = min(
+        MUTATION_WORKER_TOKEN_BUDGET,
+        whole_memory_budget // judge_memory_limit,
+        whole_process_budget // judge_process_limit,
+    )
+    effective_jobs = min(requested_jobs, max(selected, 0), budget_jobs)
     return {
         "schema_version": MUTATION_EXECUTION_PROFILE_SCHEMA_VERSION,
-        "scheduler": MUTATION_SCHEDULER,
+        "scheduler": (
+            MUTATION_PARALLEL_SCHEDULER
+            if effective_jobs > 1 else MUTATION_SCHEDULER
+        ),
         "snapshot": MUTATION_SNAPSHOT_MODEL,
         "mutant_timeout_seconds": JUDGE_TIMEOUT_SECONDS,
         "judge_output_limit_bytes": JUDGE_OUTPUT_LIMIT_BYTES,
-        "judge_memory_limit_mb": max(
-            MUTATION_JUDGE_MEMORY_BASE_MB,
-            2 * problem_memory + MUTATION_JUDGE_MEMORY_HEADROOM_MB,
-        ),
-        "judge_process_limit": max(
-            MUTATION_JUDGE_PROCESS_BASE,
-            2 * problem_processes + MUTATION_JUDGE_PROCESS_HEADROOM,
-        ),
+        "judge_memory_limit_mb": judge_memory_limit,
+        "judge_process_limit": judge_process_limit,
+        "requested_jobs": requested_jobs,
+        "effective_jobs": effective_jobs,
+        "worker_token_budget": MUTATION_WORKER_TOKEN_BUDGET,
+        "whole_memory_budget_mb": whole_memory_budget,
+        "whole_process_budget": whole_process_budget,
+        "configured_concurrent_memory_ceiling_mb": effective_jobs * judge_memory_limit,
+        "configured_concurrent_process_ceiling": effective_jobs * judge_process_limit,
+        "resource_budget_scope": "scheduler-configured-not-host-reservation",
+        "cancel_grace_seconds": MUTATION_CANCEL_GRACE_SECONDS,
     }
 
 
 def _valid_mutation_execution_profile(value):
-    if not isinstance(value, dict) or set(value) != _MUTATION_EXECUTION_PROFILE_KEYS:
+    if not isinstance(value, dict):
+        return False
+    schema_version = value.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        return False
+    if schema_version == 1:
+        if set(value) != _MUTATION_EXECUTION_PROFILE_V1_KEYS:
+            return False
+        schedulers = {MUTATION_SCHEDULER}
+    elif schema_version == MUTATION_EXECUTION_PROFILE_SCHEMA_VERSION:
+        if set(value) != _MUTATION_EXECUTION_PROFILE_V2_KEYS:
+            return False
+        schedulers = {MUTATION_SCHEDULER, MUTATION_PARALLEL_SCHEDULER}
+    else:
         return False
     if (
-        not isinstance(value["schema_version"], int)
-        or isinstance(value["schema_version"], bool)
-        or value["schema_version"] != MUTATION_EXECUTION_PROFILE_SCHEMA_VERSION
-        or value["scheduler"] != MUTATION_SCHEDULER
+        value["scheduler"] not in schedulers
         or value["snapshot"] != MUTATION_SNAPSHOT_MODEL
     ):
         return False
@@ -388,7 +456,7 @@ def _valid_mutation_execution_profile(value):
         or timeout <= 0
     ):
         return False
-    return all(
+    if not all(
         isinstance(value[key], int)
         and not isinstance(value[key], bool)
         and value[key] > 0
@@ -397,6 +465,47 @@ def _valid_mutation_execution_profile(value):
             "judge_memory_limit_mb",
             "judge_process_limit",
         )
+    ):
+        return False
+    if schema_version == 1:
+        return True
+    positive_integer_keys = (
+        "requested_jobs",
+        "worker_token_budget",
+        "whole_memory_budget_mb",
+        "whole_process_budget",
+    )
+    nonnegative_integer_keys = (
+        "effective_jobs",
+        "configured_concurrent_memory_ceiling_mb",
+        "configured_concurrent_process_ceiling",
+    )
+    if not all(
+        isinstance(value[key], int)
+        and not isinstance(value[key], bool)
+        and value[key] > 0
+        for key in positive_integer_keys
+    ) or not all(
+        isinstance(value[key], int)
+        and not isinstance(value[key], bool)
+        and value[key] >= 0
+        for key in nonnegative_integer_keys
+    ):
+        return False
+    grace = value["cancel_grace_seconds"]
+    return bool(
+        value["requested_jobs"] <= MUTATION_MAX_JOBS
+        and value["worker_token_budget"] <= MUTATION_WORKER_TOKEN_BUDGET
+        and value["effective_jobs"] <= value["requested_jobs"]
+        and value["effective_jobs"] <= value["worker_token_budget"]
+        and value["resource_budget_scope"] == "scheduler-configured-not-host-reservation"
+        and isinstance(grace, (int, float))
+        and not isinstance(grace, bool)
+        and math.isfinite(grace)
+        and grace >= 0
+        and (
+            value["scheduler"] == MUTATION_PARALLEL_SCHEDULER
+        ) == (value["effective_jobs"] > 1)
     )
 
 
@@ -523,6 +632,481 @@ def _control_check(cancel_check, deadline):
         raise ProbHubError("mutation testing deadline exceeded", code="mutation_timeout")
 
 
+def _mutation_result_record(mutation, classification, hits=(), diagnostic=None):
+    bounded_hits = [{
+        "case": _bounded_optional(item.get("case"), MAX_HIT_FIELD_BYTES),
+        "status": _bounded(item.get("status"), MAX_HIT_FIELD_BYTES),
+        "termination_reason": _bounded_optional(
+            item.get("termination_reason"), MAX_HIT_FIELD_BYTES
+        ),
+        "failure_kind": _bounded_optional(
+            item.get("failure_kind"), MAX_HIT_FIELD_BYTES
+        ),
+    } for item in list(hits)[:MAX_HIT_CASES]]
+    return {
+        **mutation.as_dict(),
+        "classification": classification,
+        "hit_cases": bounded_hits,
+        "hit_cases_total": len(hits),
+        "hit_cases_truncated": len(hits) > len(bounded_hits),
+        "diagnostic": {"code": _bounded(diagnostic or "unknown")},
+    }
+
+
+def _cancelled_mutation_record(task, code, message):
+    return _mutation_result_record(
+        task.mutation,
+        "cancelled",
+        diagnostic=code or message or "mutation_cancelled",
+    )
+
+
+def _valid_mutation_run_record(task, value):
+    expected = task.mutation.as_dict()
+    if not isinstance(value, dict) or any(
+        value.get(key) != expected_value
+        for key, expected_value in expected.items()
+    ):
+        return False
+    classification = value.get("classification")
+    hit_cases = value.get("hit_cases")
+    hit_cases_total = value.get("hit_cases_total")
+    diagnostic = value.get("diagnostic")
+    return bool(
+        classification in {*_MUTATION_CLASSIFICATIONS, "cancelled"}
+        and isinstance(hit_cases, list)
+        and isinstance(hit_cases_total, int)
+        and not isinstance(hit_cases_total, bool)
+        and hit_cases_total >= len(hit_cases)
+        and isinstance(value.get("hit_cases_truncated"), bool)
+        and isinstance(diagnostic, dict)
+        and isinstance(diagnostic.get("code"), str)
+    )
+
+
+def _execute_mutation_task(task, cancel_check):
+    worker = Path(task.worker_root)
+    phase = "prepare"
+    try:
+        if worker.exists():
+            shutil.rmtree(worker)
+        shutil.copytree(task.baseline, worker)
+        source_relative = Path(*PurePosixPath(task.source_relative).parts)
+        (worker / source_relative).write_text(
+            apply_mutation(task.source, task.mutation),
+            encoding="utf-8",
+            newline="",
+        )
+        config_copy = copy.deepcopy(task.config)
+        config_copy["solutions"] = {
+            "accepted": [{
+                "file": task.source_relative,
+                "expected": {"status": "AC", "all": True},
+            }],
+            "brute": [],
+            "wrong": [],
+        }
+        write_yaml(worker / "probhub.yaml", config_copy)
+        remaining = (
+            None if task.deadline is None
+            else float(task.deadline) - time.monotonic()
+        )
+        judge_timeout = task.execution_profile["mutant_timeout_seconds"]
+        if remaining is not None:
+            if remaining <= 0:
+                raise ProbHubError(
+                    "mutation testing deadline exceeded",
+                    code="mutation_timeout",
+                )
+            judge_timeout = max(0.001, min(judge_timeout, remaining))
+
+        def judge_cancel_check():
+            return bool(
+                cancel_check()
+                or (
+                    task.deadline is not None
+                    and time.monotonic() >= float(task.deadline)
+                )
+            )
+
+        phase = "judge"
+        judged = judge_problem(
+            task.execution_root,
+            worker,
+            use_cache=task.use_cache,
+            timeout=judge_timeout,
+            output_limit_bytes=task.execution_profile["judge_output_limit_bytes"],
+            memory_limit_mb=task.execution_profile["judge_memory_limit_mb"],
+            process_limit=task.execution_profile["judge_process_limit"],
+            cancel_check=judge_cancel_check,
+        )
+        if cancel_check():
+            raise ProcessCancelled("mutation worker was cancelled")
+        if task.deadline is not None and time.monotonic() >= float(task.deadline):
+            raise ProbHubError(
+                "mutation testing deadline exceeded",
+                code="mutation_timeout",
+            )
+        if (
+            remaining is not None
+            and remaining < task.execution_profile["mutant_timeout_seconds"]
+            and (judged.get("final") or {}).get("code") == "judge_timeout"
+        ):
+            raise ProbHubError(
+                "mutation testing deadline exceeded",
+                code="mutation_timeout",
+            )
+        classification, hits, diagnostic = _classify_judge_result(
+            judged, task.source_relative
+        )
+        return _mutation_result_record(
+            task.mutation,
+            classification,
+            hits,
+            diagnostic,
+        )
+    except ProcessCancelled:
+        raise
+    except ProbHubError as exc:
+        if exc.code in {"mutation_cancelled", "mutation_timeout"}:
+            raise
+        return _mutation_result_record(
+            task.mutation,
+            "infrastructure-failed",
+            diagnostic=exc.code or (
+                "mutation_worker_prepare_failed"
+                if phase == "prepare" else "mutation_judge_failed"
+            ),
+        )
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return _mutation_result_record(
+            task.mutation,
+            "infrastructure-failed",
+            diagnostic=(
+                "mutation_worker_prepare_failed"
+                if phase == "prepare" else "mutation_judge_failed"
+            ),
+        )
+
+
+def _cleanup_mutation_worker(path, *, timeout=2.0):
+    path = Path(path)
+    deadline = time.monotonic() + max(float(timeout), 0.0)
+    while True:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        else:
+            return True
+
+
+def _mutation_worker_entry(task, cancel_event, connection):
+    try:
+        result = _execute_mutation_task(task, cancel_event.is_set)
+    except ProcessCancelled as exc:
+        result = _cancelled_mutation_record(
+            task, "mutation_cancelled", str(exc)
+        )
+    except ProbHubError as exc:
+        if exc.code in {"mutation_cancelled", "mutation_timeout"}:
+            result = _cancelled_mutation_record(task, exc.code, str(exc))
+        else:
+            result = _mutation_result_record(
+                task.mutation,
+                "infrastructure-failed",
+                diagnostic=exc.code or "mutation_worker_failed",
+            )
+    except BaseException as exc:
+        result = _mutation_result_record(
+            task.mutation,
+            "infrastructure-failed",
+            diagnostic=f"mutation_worker_{type(exc).__name__}",
+        )
+    if not _cleanup_mutation_worker(task.worker_root):
+        result = _mutation_result_record(
+            task.mutation,
+            "infrastructure-failed",
+            diagnostic="mutation_worker_cleanup_failed",
+        )
+    if result["classification"] == "infrastructure-failed":
+        cancel_event.set()
+    try:
+        connection.send(result)
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+class _MultiprocessingProcessAdapter:
+    def __init__(self, process):
+        self._process = process
+        self.pid = process.pid
+
+    def wait(self, timeout=None):
+        self._process.join(timeout=timeout)
+        if self._process.is_alive():
+            raise subprocess.TimeoutExpired("mutation worker", timeout)
+        return self._process.exitcode
+
+    def kill(self):
+        self._process.kill()
+
+
+def _force_stop_mutation_worker(process, known_pids):
+    if process.pid and process.is_alive():
+        known_pids.update(snapshot_process_tree(process.pid))
+    if process.is_alive():
+        terminate_external_process_tree(
+            _MultiprocessingProcessAdapter(process), known_pids
+        )
+    process.join(timeout=1.0)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=1.0)
+    stopped = not process.is_alive()
+    if stopped:
+        try:
+            process.close()
+        except (OSError, ValueError):
+            pass
+    return stopped
+
+
+def _run_serial_mutations(tasks, *, cancel_check, deadline):
+    results = []
+    stop_code = None
+    check = cancellation_requested if cancel_check is None else cancel_check
+    for task in tasks:
+        _control_check(cancel_check, deadline)
+        try:
+            result = _execute_mutation_task(task, check)
+        except ProcessCancelled as exc:
+            _control_check(cancel_check, deadline)
+            raise ProbHubError(
+                "mutation testing was cancelled",
+                code="mutation_cancelled",
+            ) from exc
+        finally:
+            cleaned = _cleanup_mutation_worker(task.worker_root)
+        if not cleaned:
+            result = _mutation_result_record(
+                task.mutation,
+                "infrastructure-failed",
+                diagnostic="mutation_worker_cleanup_failed",
+            )
+        results.append(result)
+        if result["classification"] == "infrastructure-failed":
+            stop_code = "infrastructure-failed"
+            break
+    for task in tasks[len(results):]:
+        results.append(_cancelled_mutation_record(
+            task,
+            stop_code or "mutation_not_started",
+            "mutation was not started after scheduler cancellation",
+        ))
+    return {"results": results, "stop_code": stop_code}
+
+
+def _run_parallel_mutations(
+    tasks,
+    *,
+    jobs,
+    cancel_check,
+    deadline,
+    cancel_grace=MUTATION_CANCEL_GRACE_SECONDS,
+    worker_target=_mutation_worker_entry,
+):
+    context = multiprocessing.get_context("spawn")
+    cancel_event = context.Event()
+    active = {}
+    results = {}
+    next_task = 0
+    stop_code = None
+    cancellation_started = None
+    check = cancellation_requested if cancel_check is None else cancel_check
+
+    def begin_stop(code):
+        nonlocal stop_code, cancellation_started
+        if stop_code is None:
+            stop_code = code
+            cancellation_started = time.monotonic()
+            cancel_event.set()
+
+    def launch(task):
+        parent, child = context.Pipe(duplex=False)
+        process = context.Process(
+            target=worker_target,
+            args=(task, cancel_event, child),
+            name=f"probhub-mutation-{task.index}",
+        )
+        try:
+            process.start()
+        except BaseException:
+            parent.close()
+            child.close()
+            try:
+                process.close()
+            except (OSError, ValueError):
+                pass
+            raise
+        child.close()
+        active[task.index] = (process, parent, task, {process.pid})
+
+    try:
+        while active or (next_task < len(tasks) and stop_code is None):
+            if stop_code is None:
+                if check():
+                    begin_stop("mutation_cancelled")
+                elif deadline is not None and time.monotonic() >= float(deadline):
+                    begin_stop("mutation_timeout")
+                elif cancel_event.is_set():
+                    begin_stop("infrastructure-failed")
+
+            made_progress = False
+            for index in sorted(tuple(active)):
+                process, connection, task, known_pids = active[index]
+                if process.pid and process.is_alive():
+                    known_pids.update(snapshot_process_tree(process.pid))
+                if connection.poll():
+                    try:
+                        result = connection.recv()
+                    except (EOFError, OSError):
+                        result = _mutation_result_record(
+                            task.mutation,
+                            "infrastructure-failed",
+                            diagnostic="mutation_worker_result_failed",
+                        )
+                    if not _valid_mutation_run_record(task, result):
+                        result = _mutation_result_record(
+                            task.mutation,
+                            "infrastructure-failed",
+                            diagnostic="mutation_worker_result_invalid",
+                        )
+                    connection.close()
+                    process.join(timeout=1.0)
+                    if process.is_alive():
+                        _force_stop_mutation_worker(process, known_pids)
+                        result = _mutation_result_record(
+                            task.mutation,
+                            "infrastructure-failed",
+                            diagnostic="mutation_worker_did_not_exit",
+                        )
+                    else:
+                        try:
+                            process.close()
+                        except (OSError, ValueError):
+                            pass
+                    if not _cleanup_mutation_worker(task.worker_root):
+                        result = _mutation_result_record(
+                            task.mutation,
+                            "infrastructure-failed",
+                            diagnostic="mutation_worker_cleanup_failed",
+                        )
+                    results[index] = result
+                    del active[index]
+                    made_progress = True
+                    if result.get("classification") == "infrastructure-failed":
+                        begin_stop("infrastructure-failed")
+                    elif result.get("classification") == "cancelled" and stop_code is None:
+                        diagnostic = (result.get("diagnostic") or {}).get("code")
+                        begin_stop(
+                            "mutation_timeout"
+                            if diagnostic == "mutation_timeout"
+                            else "infrastructure-failed"
+                        )
+                elif not process.is_alive():
+                    connection.close()
+                    process.join(timeout=0.5)
+                    try:
+                        process.close()
+                    except (OSError, ValueError):
+                        pass
+                    _cleanup_mutation_worker(task.worker_root)
+                    results[index] = _mutation_result_record(
+                        task.mutation,
+                        "infrastructure-failed",
+                        diagnostic="mutation_worker_exited",
+                    )
+                    del active[index]
+                    made_progress = True
+                    begin_stop("infrastructure-failed")
+
+            now = time.monotonic()
+            if (
+                stop_code is not None
+                and active
+                and cancellation_started is not None
+                and now - cancellation_started >= cancel_grace
+            ):
+                for index in sorted(tuple(active)):
+                    process, connection, task, known_pids = active.pop(index)
+                    connection.close()
+                    _force_stop_mutation_worker(process, known_pids)
+                    _cleanup_mutation_worker(task.worker_root)
+                    results[index] = _cancelled_mutation_record(
+                        task,
+                        stop_code,
+                        "worker terminated after scheduler cancellation",
+                    )
+                    made_progress = True
+
+            while (
+                stop_code is None
+                and not cancel_event.is_set()
+                and len(active) < jobs
+                and next_task < len(tasks)
+            ):
+                task = tasks[next_task]
+                try:
+                    launch(task)
+                except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+                    results[task.index] = _mutation_result_record(
+                        task.mutation,
+                        "infrastructure-failed",
+                        diagnostic="mutation_worker_start_failed",
+                    )
+                    next_task += 1
+                    begin_stop("infrastructure-failed")
+                    made_progress = True
+                    break
+                next_task += 1
+                made_progress = True
+
+            if not made_progress and (active or next_task < len(tasks)):
+                time.sleep(0.01)
+    finally:
+        cancel_event.set()
+        for process, connection, task, known_pids in active.values():
+            connection.close()
+            _force_stop_mutation_worker(process, known_pids)
+            _cleanup_mutation_worker(task.worker_root)
+
+    for task in tasks[next_task:]:
+        results[task.index] = _cancelled_mutation_record(
+            task,
+            stop_code or "mutation_not_started",
+            "mutation was not started after scheduler cancellation",
+        )
+    ordered = [results[task.index] for task in tasks]
+    if stop_code == "mutation_cancelled":
+        raise ProbHubError(
+            "mutation testing was cancelled",
+            code="mutation_cancelled",
+        )
+    if stop_code == "mutation_timeout":
+        raise ProbHubError(
+            "mutation testing deadline exceeded",
+            code="mutation_timeout",
+        )
+    return {"results": ordered, "stop_code": stop_code}
+
+
 def mutation_test_problem(
     root,
     problem_dir,
@@ -530,11 +1114,21 @@ def mutation_test_problem(
     use_cache=True,
     operators=None,
     max_mutants=MAX_MUTANTS,
+    jobs=1,
     cancel_check=None,
     deadline=None,
 ):
     root = Path(root).resolve()
     problem_dir = Path(problem_dir).resolve()
+    if (
+        not isinstance(jobs, int)
+        or isinstance(jobs, bool)
+        or jobs not in {1, MUTATION_MAX_JOBS}
+    ):
+        raise ProbHubError(
+            f"mutation jobs must be 1 or {MUTATION_MAX_JOBS}",
+            code="mutation_jobs_invalid",
+        )
     evidence_path = mutation_evidence_path(problem_dir)
     results = []
     status = "infrastructure-failed"
@@ -551,7 +1145,6 @@ def mutation_test_problem(
         temporary_root = Path(temp)
         baseline = temporary_root / "baseline"
         execution_root = temporary_root / "execution"
-        worker = execution_root / "problem"
 
         with workspace_build_lock(root):
             _, workspace = load_workspace(root)
@@ -643,7 +1236,11 @@ def mutation_test_problem(
                 "mutation testing requires an available g++ C++17 compiler",
                 code="mutation_compiler_unavailable",
             )
-        execution_profile = _mutation_execution_profile(config)
+        execution_profile = _mutation_execution_profile(
+            config,
+            requested_jobs=jobs,
+            selected=plan["selected"],
+        )
         # The strict source fence above already validated the configured path.
         # Reuse that logical path instead of deriving it from resolved physical
         # paths, which may mix Windows long and 8.3 aliases for the same tree.
@@ -652,135 +1249,62 @@ def mutation_test_problem(
         ).parts)
         mutant_name = source_relative.as_posix()
         execution_root.mkdir()
-
-        for mutation in plan["mutations"]:
-            _control_check(cancel_check, deadline)
-            phase = "prepare"
-            try:
-                if worker.exists():
-                    shutil.rmtree(worker)
-                shutil.copytree(baseline, worker)
-                source_in_worker = worker / source_relative
-                source_in_worker.write_text(
-                    apply_mutation(source, mutation),
-                    encoding="utf-8",
-                    newline="",
-                )
-                config_copy = copy.deepcopy(config)
-                config_copy["solutions"] = {
-                    "accepted": [{
-                        "file": mutant_name,
-                        "expected": {"status": "AC", "all": True},
-                    }],
-                    "brute": [],
-                    "wrong": [],
-                }
-                write_yaml(worker / "probhub.yaml", config_copy)
-                remaining = (
-                    None if deadline is None
-                    else float(deadline) - time.monotonic()
-                )
-                judge_timeout = execution_profile["mutant_timeout_seconds"]
-                if remaining is not None:
-                    if remaining <= 0:
-                        raise ProbHubError(
-                            "mutation testing deadline exceeded",
-                            code="mutation_timeout",
-                        )
-                    judge_timeout = max(0.001, min(judge_timeout, remaining))
-
-                def judge_cancel_check():
-                    return bool(
-                        (
-                            cancellation_requested()
-                            if cancel_check is None
-                            else cancel_check()
-                        )
-                        or (
-                            deadline is not None
-                            and time.monotonic() >= float(deadline)
-                        )
+        effective_jobs = execution_profile["effective_jobs"]
+        tasks = tuple(
+            _MutationWorkerTask(
+                index=index,
+                mutation=mutation,
+                baseline=str(baseline),
+                execution_root=str(execution_root),
+                worker_root=str(
+                    execution_root / (
+                        "problem"
+                        if effective_jobs <= 1
+                        else f"problem-{index:04d}"
                     )
-
-                phase = "judge"
-                judged = judge_problem(
-                    execution_root,
-                    worker,
-                    use_cache=use_cache,
-                    timeout=judge_timeout,
-                    output_limit_bytes=execution_profile["judge_output_limit_bytes"],
-                    memory_limit_mb=execution_profile["judge_memory_limit_mb"],
-                    process_limit=execution_profile["judge_process_limit"],
-                    cancel_check=judge_cancel_check,
-                )
-                _control_check(cancel_check, deadline)
-                if (
-                    remaining is not None
-                    and remaining < execution_profile["mutant_timeout_seconds"]
-                    and (judged.get("final") or {}).get("code") == "judge_timeout"
-                ):
-                    raise ProbHubError(
-                        "mutation testing deadline exceeded",
-                        code="mutation_timeout",
-                    )
-                classification, hits, diagnostic = _classify_judge_result(
-                    judged, mutant_name
-                )
-            except ProcessCancelled as exc:
-                _control_check(cancel_check, deadline)
-                raise ProbHubError(
-                    "mutation testing was cancelled",
-                    code="mutation_cancelled",
-                ) from exc
-            except ProbHubError as exc:
-                if exc.code in {"mutation_cancelled", "mutation_timeout"}:
-                    raise
-                classification, hits, diagnostic = (
-                    "infrastructure-failed",
-                    [],
-                    exc.code or (
-                        "mutation_worker_prepare_failed"
-                        if phase == "prepare"
-                        else "mutation_judge_failed"
-                    ),
-                )
-            except (OSError, UnicodeError, ValueError, TypeError):
-                classification, hits, diagnostic = (
-                    "infrastructure-failed",
-                    [],
-                    (
-                        "mutation_worker_prepare_failed"
-                        if phase == "prepare"
-                        else "mutation_judge_failed"
-                    ),
-                )
-
-            bounded_hits = [{
-                "case": _bounded_optional(item.get("case"), MAX_HIT_FIELD_BYTES),
-                "status": _bounded(item.get("status"), MAX_HIT_FIELD_BYTES),
-                "termination_reason": _bounded_optional(
-                    item.get("termination_reason"), MAX_HIT_FIELD_BYTES
                 ),
-                "failure_kind": _bounded_optional(
-                    item.get("failure_kind"), MAX_HIT_FIELD_BYTES
-                ),
-            } for item in hits[:MAX_HIT_CASES]]
-            results.append({
-                **mutation.as_dict(),
-                "classification": classification,
-                "hit_cases": bounded_hits,
-                "hit_cases_total": len(hits),
-                "hit_cases_truncated": len(hits) > len(bounded_hits),
-                "diagnostic": {"code": _bounded(diagnostic or "unknown")},
-            })
-            if classification == "infrastructure-failed":
-                break
+                source=source,
+                source_relative=mutant_name,
+                config=config,
+                use_cache=use_cache,
+                execution_profile=execution_profile,
+                deadline=deadline,
+            )
+            for index, mutation in enumerate(plan["mutations"])
+        )
+        scheduled = (
+            _run_parallel_mutations(
+                tasks,
+                jobs=effective_jobs,
+                cancel_check=cancel_check,
+                deadline=deadline,
+            )
+            if effective_jobs > 1
+            else _run_serial_mutations(
+                tasks,
+                cancel_check=cancel_check,
+                deadline=deadline,
+            )
+        )
+        run_results = scheduled["results"]
+        results = [
+            item for item in run_results
+            if item["classification"] != "cancelled"
+        ]
 
         _control_check(cancel_check, deadline)
         counts = {name: sum(
             item["classification"] == name for item in results
         ) for name in _MUTATION_CLASSIFICATION_ORDER}
-        status = "infrastructure-failed" if counts["infrastructure-failed"] else "passed"
+        status = (
+            "infrastructure-failed"
+            if scheduled["stop_code"] or counts["infrastructure-failed"]
+            else "passed"
+        )
+        run_counts = {
+            name: sum(item["classification"] == name for item in run_results)
+            for name in (*_MUTATION_CLASSIFICATION_ORDER, "cancelled")
+        }
         evidence = {
             "schema_version": MUTATION_EVIDENCE_SCHEMA_VERSION,
             "status": status,
@@ -838,11 +1362,20 @@ def mutation_test_problem(
                         code="mutation_evidence_publish_failed",
                     ) from exc
 
-    return {
+    result = {
         "ok": status == "passed",
         "status": status,
         "evidence": evidence,
+        "execution": {
+            "requested_jobs": execution_profile["requested_jobs"],
+            "effective_jobs": execution_profile["effective_jobs"],
+            "stop_code": scheduled["stop_code"],
+            "summary": run_counts,
+        },
     }
+    if status != "passed":
+        result["execution"]["mutations"] = run_results
+    return result
 
 
 def mutation_evidence_profile(problem_dir, config):

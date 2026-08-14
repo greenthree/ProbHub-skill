@@ -175,7 +175,7 @@ Agent 和 WebUI 都会调用同一套 Core。只有需要手动排查或编排�
 | `probhub report L01` | 查看数据画像、错解击杀和累计约束状态 |
 | `probhub judge L01` | 编译并运行 Validator、标程、暴力和错解 |
 | `probhub judge-qa L01 --no-cache` | 主动测试 Checker/Interactor 的 fixture 和鲁棒性 |
-| `probhub mutation L01 --no-cache` | 对标准题 C++ 标程做保守变异，补充发现数据薄弱点并审计人工排除 |
+| `probhub mutation L01 --no-cache` | 对标准题 C++ 标程做保守变异；默认串行，可显式 `--jobs 2` 有界并行 |
 | `probhub stress L01 --rounds 1000 --seed 12345` | 用随机小数据对拍 |
 | `probhub seal L01 --no-cache` | 验证并冻结当前题目版本 |
 | `probhub build L01 --no-cache` | 正式生成 PDF、ZIP 和 Manifest |
@@ -238,7 +238,7 @@ Agent 完成题目后，应明确报告下列结果：
 
 对 `judge.type: custom` 或 `judge.type: interactive` 的新题，或修改 Checker/Interactor 后，先在 `judge.qa` 中登记题目级 fixture，再运行 `probhub judge-qa <ID> --no-cache`。fixture 每次都会执行，只有编译结果可以缓存；`judge-qa-evidence-v1.json` 是本地有界证据，不会进入 ZIP、PDF 或 Manifest。lint/status 中的 evidence 缺失或过期是体检 warning，但 `seal` 和正式 `build` 不允许已配置题目绕过通过的 Judge QA。
 
-标准题需要补充检查数据是否能区分常见边界错误时，可以运行 `probhub mutation <ID> --no-cache`。它使用固定 C++ 语法树，只在首个 accepted 的函数/lambda 复合语句体中生成少量稳定变异，跳过模板、宏、`case` 标签和未求值语法；一次运行捕获一份不可变 baseline，每个变异使用独立临时 worker，并受统一的超时、内存、输出、进程和取消控制。当前仍按计划顺序串行执行，但长时间 Judge 不会一直占用正式构建锁。成功后写入本地有界 evidence，变异体不会进入题目源码、PDF、ZIP 或 Manifest。确认某个变异等价或不适用后，可在 `probhub.yaml` 的 `mutation.exclusions` 中按稳定 ID 记录理由；`report` 会并列显示原始、排除、有效和实际选择数量，并区分本轮未选择对应算子的记录与已经失效的旧 ID。人工排除和 `survived` 都不是正确性证明，也不会替代证明、独立标程、期望矩阵和 stress。完整限制见 [std 变异测试](references/mutation-testing.md)。
+标准题需要补充检查数据是否能区分常见边界错误时，可以运行 `probhub mutation <ID> --no-cache`。它使用固定 C++ 语法树，只在首个 accepted 的函数/lambda 复合语句体中生成少量稳定变异，跳过模板、宏、`case` 标签和未求值语法；一次运行捕获一份不可变 baseline，每个变异使用独立临时 worker，并受统一的超时、内存、输出、进程和取消控制。默认 `--jobs 1` 保持串行，资源足够时可显式使用 `--jobs 2`；实际并行度受问题级资源额度约束，基础设施失败会停止派发并取消其他 worker。成功后写入本地有界 evidence，失败或取消不覆盖旧 evidence，变异体不会进入题目源码、PDF、ZIP 或 Manifest。确认某个变异等价或不适用后，可在 `probhub.yaml` 的 `mutation.exclusions` 中按稳定 ID 记录理由；`report` 会并列显示原始、排除、有效和实际选择数量，并区分本轮未选择对应算子的记录与已经失效的旧 ID。人工排除和 `survived` 都不是正确性证明，也不会替代证明、独立标程、期望矩阵和 stress。完整限制见 [std 变异测试](references/mutation-testing.md)。
 
 ## 并行出题时怎么做
 

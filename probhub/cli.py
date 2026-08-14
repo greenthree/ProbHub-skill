@@ -585,6 +585,7 @@ def command_mutate(args):
             use_cache=not args.no_cache,
             operators=args.operator,
             max_mutants=args.max_mutants,
+            jobs=args.jobs,
             deadline=(time.monotonic() + args.timeout) if args.timeout else None,
         )
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
@@ -881,6 +882,13 @@ def build_parser():
         help="restrict mutation operators; repeat for more than one",
     )
     mutate.add_argument("--max-mutants", type=int, default=256)
+    mutate.add_argument(
+        "--jobs",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="bounded mutation workers; parallel execution is explicit opt-in",
+    )
     mutate.add_argument("--timeout", type=float, help="overall seconds per problem")
     mutate.add_argument("--no-cache", action="store_true", help="ignore temporary Judge caches")
     mutate.set_defaults(handler=command_mutate)
