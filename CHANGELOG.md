@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-08-16
+
 - 第一方 GitHub Actions 升级到 Node.js 24 runtime 对应的 `actions/*@v7`，产品支持范围仍为 Node.js 18+，常规 CI 继续使用 Node.js 20 验证。
 - 新增有界、结构化的发布后身份检查：对账精确 Git tag、本地版本、稳定 GitHub Release、npm 双包身份与 `latest`、兼容包精确依赖、dist integrity/shasum/tarball 和 registry 包清单；兼容 npm `view --json` 的对象与单元素对象数组响应，畸形响应保持 fail closed。
 - clean-install 新增显式 registry 版本模式，只从官方 npm registry 安装 `probhub@<version>` 与 `probhub-skill@<version>`，不回退本地 tarball、全局 link 或未固定版本，并可原子发布结构化结果。
