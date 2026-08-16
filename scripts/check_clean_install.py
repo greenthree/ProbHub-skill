@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install both npm tarballs in isolation and run the full sample delivery flow."""
+"""Install exact npm packages in isolation and run the full sample delivery flow."""
 
 import argparse
 import hashlib
@@ -10,13 +10,34 @@ import sys
 import tempfile
 from pathlib import Path
 
-from check_release import (
-    ROOT,
-    ReleaseCheckError,
-    run_bounded,
-    validate_metadata,
-    validate_pack_inventories,
-)
+if __package__:
+    from scripts.check_release import (
+        ROOT,
+        ReleaseCheckError,
+        run_bounded,
+        validate_metadata,
+        validate_pack_inventories,
+    )
+    from scripts.check_published_release import (
+        DEFAULT_REGISTRY,
+        PublishedReleaseError,
+        atomic_write_json,
+        validate_npm_registry,
+    )
+else:
+    from check_release import (
+        ROOT,
+        ReleaseCheckError,
+        run_bounded,
+        validate_metadata,
+        validate_pack_inventories,
+    )
+    from check_published_release import (
+        DEFAULT_REGISTRY,
+        PublishedReleaseError,
+        atomic_write_json,
+        validate_npm_registry,
+    )
 
 
 WINDOWS_NODE_CHILD_LAUNCHER = (
@@ -147,8 +168,46 @@ def _configure_checker_qa(workspace):
     output.write_bytes(b"3\n")
 
 
-def run_clean_install():
-    metadata = validate_metadata()
+def _installed_package_metadata(package_root):
+    package_path = Path(package_root) / "package.json"
+    if not package_path.is_file():
+        raise CleanInstallError(f"installed npm package has no package.json: {package_root}")
+    try:
+        payload = json.loads(package_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CleanInstallError(f"installed npm package metadata is invalid: {package_root}") from exc
+    if not isinstance(payload, dict):
+        raise CleanInstallError(f"installed npm package metadata is not an object: {package_root}")
+    return payload
+
+
+def _package_install_plan(*, registry_version, registry_url, dist):
+    if registry_version is None:
+        metadata = validate_metadata()
+        source = "local-tarballs"
+        inventories = validate_pack_inventories(dry_run=False, destination=dist)
+        install_targets = [
+            Path(dist) / inventories["main"]["filename"],
+            Path(dist) / inventories["compat"]["filename"],
+        ]
+    else:
+        published = validate_npm_registry(registry_version, registry_url=registry_url)
+        metadata = {"version": registry_version}
+        source = "npm-registry"
+        inventories = published["inventories"]
+        install_targets = [
+            f"probhub@{metadata['version']}",
+            f"probhub-skill@{metadata['version']}",
+        ]
+    return {
+        "metadata": metadata,
+        "source": source,
+        "inventories": inventories,
+        "install_targets": install_targets,
+    }
+
+
+def run_clean_install(*, registry_version=None, registry_url=DEFAULT_REGISTRY):
     npm = shutil.which("npm")
     node = shutil.which("node")
     if not npm or not node:
@@ -177,13 +236,20 @@ def run_clean_install():
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
-        inventories = validate_pack_inventories(dry_run=False, destination=dist)
-        main_tgz = dist / inventories["main"]["filename"]
-        compat_tgz = dist / inventories["compat"]["filename"]
+        plan = _package_install_plan(
+            registry_version=registry_version,
+            registry_url=registry_url,
+            dist=dist,
+        )
+        metadata = plan["metadata"]
+        source = plan["source"]
+        inventories = plan["inventories"]
+        install_targets = plan["install_targets"]
         _run(
             [
                 npm, "install", "--ignore-scripts", "--no-audit", "--no-fund",
-                "--package-lock=false", "--prefix", prefix, main_tgz, compat_tgz,
+                "--package-lock=false", "--prefix", prefix,
+                f"--registry={registry_url}", *install_targets,
             ],
             cwd=root,
             timeout=600,
@@ -192,9 +258,19 @@ def run_clean_install():
         installed_main = prefix / "node_modules/probhub"
         installed_compat = prefix / "node_modules/probhub-skill"
         if not installed_main.is_dir() or not installed_compat.is_dir():
-            raise CleanInstallError("both npm packages were not installed from local tarballs")
+            raise CleanInstallError(f"both npm packages were not installed from {source}")
         if not (installed_main / "bin/python.js").is_file():
-            raise CleanInstallError("installed probhub package was not the locally packed release candidate")
+            raise CleanInstallError("installed probhub package is missing the Python bootstrap")
+        main_package = _installed_package_metadata(installed_main)
+        compat_package = _installed_package_metadata(installed_compat)
+        if main_package.get("name") != "probhub" or main_package.get("version") != metadata["version"]:
+            raise CleanInstallError(f"installed main package identity mismatch: {main_package!r}")
+        if (
+            compat_package.get("name") != "probhub-skill"
+            or compat_package.get("version") != metadata["version"]
+            or compat_package.get("dependencies") != {"probhub": metadata["version"]}
+        ):
+            raise CleanInstallError(f"installed compatibility package identity mismatch: {compat_package!r}")
 
         base_env = os.environ.copy()
         base_env.pop("PYTHONPATH", None)
@@ -428,7 +504,10 @@ def run_clean_install():
             )
         return {
             "ok": True,
+            "code": "clean_install_passed",
             "version": metadata["version"],
+            "source": source,
+            "registry": registry_url if source == "npm-registry" else None,
             "packages": inventories,
             "documented_install": ["skill-install", "doctor", "ui-check"],
             "workflow": [
@@ -441,12 +520,27 @@ def run_clean_install():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--registry-version",
+        help="install both exact package versions from the official npm registry",
+    )
+    parser.add_argument("--registry", default=DEFAULT_REGISTRY)
+    parser.add_argument("--output", help="atomically write the structured result to this path")
     parser.add_argument("--json", action="store_true", dest="json_output")
     args = parser.parse_args(argv)
     try:
-        result = run_clean_install()
+        result = run_clean_install(
+            registry_version=args.registry_version,
+            registry_url=args.registry,
+        )
+    except PublishedReleaseError as exc:
+        result = {"ok": False, "code": exc.code, "error": str(exc)}
+        if exc.details is not None:
+            result["details"] = exc.details
     except (CleanInstallError, ReleaseCheckError, OSError) as exc:
-        result = {"ok": False, "error": str(exc)}
+        result = {"ok": False, "code": "clean_install_failed", "error": str(exc)}
+    if args.output:
+        atomic_write_json(args.output, result)
     if args.json_output:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif result["ok"]:

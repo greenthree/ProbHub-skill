@@ -53,3 +53,17 @@ PROBHUB_ALLOW_SYSTEM_PYTHON=1 npx probhub-skill
 ## 4. Release 安装段落
 
 GitHub Release 使用第 2 节的双平台命令，不另创安装路径。先发布 `probhub` 主包并确认目标版本可安装，再发布精确依赖同版本主包的 `probhub-skill`；两个包均可解析到该版本后再创建 GitHub Release。
+
+## 5. 发布后验证
+
+Git tag、稳定 GitHub Release 和两个 npm 包全部发布后，在仓库的 GitHub Actions 页面手动运行 **Published release verification**。输入不带 `v` 的精确 semver，例如 `0.6.8`。不要在 tag、Release 或第一个 npm 包刚创建时提前运行；该流程有意不自动触发，也不会回退到本地 tarball、全局 link、`latest` 或其他 registry。
+
+流程先核对：
+
+- tag、本地版本和 GitHub Release 是同一精确版本，Release 不是 Draft 或 prerelease；
+- `probhub` 与 `probhub-skill` 的正式 registry 身份、`latest`、integrity、shasum 和包清单；
+- 兼容包只精确依赖同版本的 `probhub`。
+
+身份核对通过后，Windows 与 Ubuntu 会从 `https://registry.npmjs.org/` 安装两个精确版本，在隔离 npm prefix、Python 环境和临时工作区中执行 `doctor -> init -> new -> gen -> judge -> judge-qa -> seal -> build -> status -> verify-package`。三个 job 都会上传结构化 JSON evidence，保留 90 天。
+
+发布后验证证明该版本在当次 GitHub runner 和官方 registry 上可完成交付闭环；它不证明所有镜像已同步，也不替代目标 Linux/DOMjudge 的时间、内存和真实导入校准。registry 短暂未同步时应等待后重跑同一精确版本，不能改用 `latest` 规避失败。

@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+- 第一方 GitHub Actions 升级到 Node.js 24 runtime 对应的 `actions/*@v7`，产品支持范围仍为 Node.js 18+，常规 CI 继续使用 Node.js 20 验证。
+- 新增有界、结构化的发布后身份检查：对账精确 Git tag、本地版本、稳定 GitHub Release、npm 双包身份与 `latest`、兼容包精确依赖、dist integrity/shasum/tarball 和 registry 包清单；兼容 npm `view --json` 的对象与单元素对象数组响应，畸形响应保持 fail closed。
+- clean-install 新增显式 registry 版本模式，只从官方 npm registry 安装 `probhub@<version>` 与 `probhub-skill@<version>`，不回退本地 tarball、全局 link 或未固定版本，并可原子发布结构化结果。
+- 新增仅手动触发的 Published release verification workflow：发布者在 tag、稳定 GitHub Release 和 npm 双包全部可见后输入精确 semver，Windows/Ubuntu 从 registry 执行完整交付闭环并保留 90 天 evidence，避免 npm 同步窗口造成自动触发伪失败。
+
 ## [0.6.7] - 2026-08-16
 
 - 新增 `mutation.schema_version: 1` 题目级人工排除：按稳定 mutation ID 记录有界非空理由，lint 拒绝未知字段、错误版本、无效/重复 ID、超量记录和非 standard Judge 配置；排除在 `--max-mutants` 前应用，失效旧 ID 保留并报告 warning。
