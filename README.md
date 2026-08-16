@@ -373,6 +373,8 @@ npm run pack:check
 
 `npm run check` 会检查 Python、Node.js、WebUI 静态资源并运行测试；`npm run pack:check` 会验证两个 npm 包的内容。可复用的 standard、custom、float、interactive 和 stress 测试工作区位于 `tests/fixtures/`。
 
+维护者完成 Git tag、GitHub Release 和 npm 双包发布后，应在 GitHub Actions 中手动运行 **Published release verification**，输入不带 `v` 的精确版本号。该流程会从正式 npm registry 安装这一版本，在 Windows 与 Ubuntu 上重跑完整干净安装闭环，并保留 90 天结构化证据；它不会在 tag 或 Release 创建时自动触发，以免 npm 尚未同步时产生伪失败。详细顺序见 [安装与发布说明](references/installation.md)。
+
 提交问题或建议请使用 [GitHub Issues](https://github.com/greenthree/ProbHub-skill/issues)。版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 鸣谢

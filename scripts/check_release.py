@@ -154,13 +154,21 @@ def _parse_npm_json(stdout, command):
     raise ReleaseCheckError(f"unexpected npm pack response: {payload!r}")
 
 
-def npm_pack_manifest(target=None, *, dry_run=True, destination=None):
+def npm_pack_manifest(
+    target=None,
+    *,
+    dry_run=True,
+    destination=None,
+    registry_url=None,
+):
     npm = shutil.which("npm")
     if not npm:
         raise ReleaseCheckError("npm was not found")
     command = [npm, "pack"]
     if target:
         command.append(str(target))
+    if registry_url:
+        command.append(f"--registry={registry_url}")
     if dry_run:
         command.append("--dry-run")
     command.append("--json")
@@ -175,12 +183,25 @@ def npm_pack_manifest(target=None, *, dry_run=True, destination=None):
     return _parse_npm_json(result["stdout"], command)
 
 
-def validate_pack_inventories(*, dry_run=True, destination=None):
-    main = npm_pack_manifest(dry_run=dry_run, destination=destination)
-    compat = npm_pack_manifest(
-        ROOT / "compat/probhub-skill",
+def validate_pack_inventories(
+    *,
+    dry_run=True,
+    destination=None,
+    main_target=None,
+    compat_target=None,
+    registry_url=None,
+):
+    main = npm_pack_manifest(
+        main_target,
         dry_run=dry_run,
         destination=destination,
+        registry_url=registry_url,
+    )
+    compat = npm_pack_manifest(
+        compat_target if compat_target is not None else ROOT / "compat/probhub-skill",
+        dry_run=dry_run,
+        destination=destination,
+        registry_url=registry_url,
     )
     main_paths = {entry["path"] for entry in main.get("files", [])}
     compat_paths = {entry["path"] for entry in compat.get("files", [])}

@@ -30,6 +30,9 @@ node_modules/
 # Local npm cache
 .npm-cache/
 
+# Local release verification evidence
+release-results/
+
 # Python cache
 __pycache__/
 *.pyc
