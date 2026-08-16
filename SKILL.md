@@ -165,7 +165,7 @@ probhub mutation L01 --operator comparison-boundary --no-cache
 
 - 用户未指定时使用普通模式；普通模式运行固定 seed stress，并调用一个只能看到冻结公开题面的盲审独立解题者。
 - 仅当题目简单、确定性、证明闭合、Judge 风险低且资源余量充足时，才可自行选择快速模式；该模式使用固定 seed 完成 100 轮 stress 对拍，不调用子 Agent，并且不能绕过 Core 已有门禁。
-- 难题、随机化/启发式、浮点、复杂 Checker/Interactor、紧张资源限制或任何未解决分歧使用完整模式；在普通模式上增加独立证明/参考实现和对抗审查角色。
+- 难题、随机化/启发式、浮点、复杂 Checker/Interactor、紧张资源限制或任何未解决分歧使用完整模式；在普通模式上增加独立证明/参考实现和对抗审查角色。对适用的 standard+C++ 题目，在两类独立审查完成并冻结正式数据后，按 `references/verification-modes.md` 条件性建议执行一次 `mutation --jobs 2 --no-cache`；不适用题型明确记录 `not_applicable`，不把 mutation score 当作硬门禁。
 - 发现证明缺口、实现分歧、反例、幸存错解或高风险 Judge 时只能升级，不能静默降级。所需审查者不可用时必须报告验证未完成，不得伪称已经执行。
 - 子 Agent 默认只读并使用隔离上下文，不得直接修改 live 题目文件；主 Agent 统一审查、落盘和重跑。模型档位不算独立性证据，并且必须遵守用户与工作区的模型限制。
 - 单题任务完成到有效 `seal` 和隔离 generation 后即可结束；整场正式多题 `build` 仍只在所有题目 sealed 后执行一次。
