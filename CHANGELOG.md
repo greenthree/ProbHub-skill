@@ -4,12 +4,16 @@
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-08-16
+
 - 新增 `mutation.schema_version: 1` 题目级人工排除：按稳定 mutation ID 记录有界非空理由，lint 拒绝未知字段、错误版本、无效/重复 ID、超量记录和非 standard Judge 配置；排除在 `--max-mutants` 前应用，失效旧 ID 保留并报告 warning。
 - mutation evidence 升至 v2，并在 JSON、终端和 Markdown report 中并列 raw、excluded、effective、selected、out-of-scope 与 unmatched exclusion 计数；部分算子运行不会把其他算子的有效排除误报为失效。排除理由进入 source/计划哈希并逐项展示，Schema 类型、当前 Core/编译器身份、配置变化和输入变化均参与 current 判定；发布故障保留旧 evidence。人工排除仍不构成正确性证明或 build 硬门禁。
 - mutation 候选定位改为固定 Tree-sitter C++ 语法树，只接受函数/lambda 复合语句体中的真实表达式，排除模板尖括号、运算符声明、`<=>`、宏、concept/requires、`case` 标签、`static_assert` 与未求值上下文；保留仍有效的 `cpp-token-v1` ID，旧 evidence 变 stale，解析失败不回退 Token 扫描且不覆盖最后成功 evidence。新增 UTF-8、CRLF/LF 和复杂 C++ canonical plan Fixture，并把解析器版本纳入 builder fingerprint、Doctor smoke 与依赖审计。
 - mutation 的 Tree-sitter native binding 移入共享进程控制下的独立 worker；父进程只处理有界、版本化 JSON 协议并严格校验版本、源码哈希、位置和数量。解析超时、取消、内存/输出/进程超限、native 崩溃和畸形响应使用稳定错误分类，清理完整后代进程树，并继续保留最后一份成功 evidence；Doctor 复用同一正式 worker 路径。
 - mutation Judge 监督器的超时、输出、内存和进程上限失败优先归类为 `infrastructure-failed`，即使事件流中同时保留历史编译失败或 WA 事件也不再误记为 `compile-invalid` 或 `killed`。新增不进入 npm 包的 `spawn` shadow benchmark 与独立 Windows/Ubuntu observation workflow，用真实隔离 Judge worker 比较 `jobs=1/2/4` 的结果等价、零写入、取消和清理，为生产并行边界提供观测依据。
 - 生产 mutation 新增显式 `--jobs 2` 有界并行，默认 `--jobs 1` 保持串行；问题级 worker token、Judge 内存和进程配置额度会计算 requested/effective jobs，高资源题可自动降为 1。首个基础设施失败后停止派发、协作取消活动 worker并在有界宽限后强制清理后代树，结果按 mutation plan 顺序聚合，失败/取消不计为 killed 且不覆盖上一份成功 evidence；execution profile v2 记录调度与配置额度并兼容旧 profile v1。
+- lint 与 `gen` 新增高置信 testlib 源码预检：在编译或生成前报告 Generator 缺少 `registerGen(...)`，以及 Validator 把同名变量误作 `readToken` / `readWord` 正则的常见错误；诊断包含稳定错误码、路径、行号、修复提示和受影响 recipe case，预检失败保持数据与 Manifest 零写入。
+- Agent 完整模式对适用的 standard+C++ 题目条件性建议在独立证明、对抗审查和正式数据冻结后执行 `mutation --jobs 2 --no-cache`；记录候选与执行计数、requested/effective jobs、幸存变异处置和剩余风险。普通模式、`seal`、`build`、WebUI、Checker/Interactor 与 Legacy 均不自动接入。
 
 ## [0.6.6] - 2026-08-09
 

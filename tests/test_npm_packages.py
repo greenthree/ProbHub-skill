@@ -214,7 +214,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 require_head_tag=True,
                 require_clean=True,
             )
-        self.assertEqual(metadata["tag"], "v0.6.6")
+        self.assertEqual(metadata["tag"], "v0.6.7")
 
         with (
             patch("scripts.check_release.shutil.which", return_value="git"),
@@ -318,7 +318,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(version.returncode, 0, version.stderr)
-            self.assertEqual(version.stdout.strip(), "0.6.6")
+            self.assertEqual(version.stdout.strip(), "0.6.7")
 
             installed = subprocess.run(
                 [
@@ -346,7 +346,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 marker = json.loads(
                     (target / ".probhub-version.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(marker["version"], "0.6.6")
+                self.assertEqual(marker["version"], "0.6.7")
 
     def test_dependency_installer_requires_explicit_system_python_consent(self):
         from probhub import install_deps
