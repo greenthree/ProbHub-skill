@@ -7,13 +7,12 @@ description: 当用户需要创作或维护算法竞赛题目、选择快速/普
 
 作为严谨的 ACM/ICPC 出题人执行任务。熟悉 testlib.h、C++、Python/CYaRon、DOMjudge、Typst 和 ProbHub Core。主动读写文件、编译、运行和修复；不要只给用户命令让其代为执行。
 
-# 1. 判断工作区模式
+# 1. Schema v1 工作区
 
 1. 从当前目录向上查找 `.probhub/workspace.yaml`。
-2. 找到时，必须使用 **Workspace Schema v1** 和 `probhub` CLI。
+2. 必须使用 **Workspace Schema v1** 和 `probhub` CLI；找不到该文件时立即停止并报告 `migration_required`，不要猜测旧目录布局。
 3. 创建、迁移、审查或修改 Schema v1 工作区时，必须先读取 `references/workspace-schema-v1.md`，再修改 `.probhub/workspace.yaml`、`probhub.yaml` 或目录结构。
-4. 未找到时，才读取并执行 `references/legacy-workflow.md`。
-5. 不得混用两种模式：Schema v1 禁止手工维护 Legacy 元数据或构建产物。
+4. 旧的 Legacy workflow 已移除。旧工作区只能由用户先手工迁移到 Schema v1，不能通过 Skill、WebUI 或旧 local judge 回退运行。
 
 # 2. Schema v1 的事实来源
 
@@ -279,11 +278,11 @@ probhub mutation L01 --operator comparison-boundary --no-cache
 - 需要停止排队中或运行中的上传任务时使用页面“取消”按钮，并等待状态从 `CANCELLING` 进入 `CANCELLED`；不要手工删除仍在运行的任务目录。Core 会协作取消并在必要时强杀完整进程树。
 - 本地 WebUI 最多同时处理 8 个 HTTP 请求；完整沙箱与上传评测共用有界任务队列。`429` / `queue_full` 表示本机 worker 已满，应按 `retry_after` 稍后重试，不得把它冒充 Judge 失败或通过。完整沙箱同样支持取消，任务 deadline、日志截断或上传清理失败必须按结构化状态报告；清理失败时不得用 `cancelled` 或成功结果掩盖 `submission_cleanup_failed`。
 - WebUI 启动和接受新提交时会清理超过 24 小时且名称合法的遗留任务目录；陌生目录、符号链接和活动任务不得自动删除。
-- Legacy 工作区仍保留原编辑兼容路径；不得把 Legacy 生成物编辑语义带入 Schema v1。
+- 没有 `.probhub/workspace.yaml` 时，WebUI、Judge 和构建命令必须 fail closed，并返回 `migration_required`；不得读取或写入旧 `meta.json`、`problems.json`、PDF、ZIP 或手工 DOMjudge 配置。
 - 不得手工增量修改旧 ZIP；必须由 Core 完整重建并验证。
 - 不得提交 `.exe`、沙箱缓存、临时输出或 Typst/WebUI 预览缓存。
 - 遇到错误必须自行定位、修复并重跑相应验证。
 
-# 9. Legacy 工作区
+# 9. 旧工作区迁移
 
-仅当 `.probhub/workspace.yaml` 不存在时，读取 `references/legacy-workflow.md` 并按其中阶段执行。Legacy 工作区允许使用 `meta.json`、Typst `problems.json` 和手工 DOMjudge 配置；Schema v1 不允许。
+旧目录布局不再是 ProbHub 的可执行输入。发现旧工作区时，保留原文件不动，提示用户先按 [Workspace Schema v1](references/workspace-schema-v1.md) 手工迁移；不要把 `meta.json`、Typst `problems.json`、PDF、ZIP 或手工 DOMjudge 配置转换为新的事实来源。

@@ -359,7 +359,6 @@ ProbHub 面向本地、单用户、可信的出题环境。它会限制时间、
 - [Checkpoint、Seal 与 Generation](references/generations.md)
 - [C++ 数据生成模板](references/fast.md)
 - [CYaRon 数据生成](references/cyaron.md)
-- [旧工作区兼容说明](references/legacy-workflow.md)
 
 ## 参与开发
 

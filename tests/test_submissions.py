@@ -409,6 +409,8 @@ class SubmissionUiApiTests(unittest.TestCase):
                 path.write_text("int main(){}\n", encoding="utf-8")
                 accepted.append(source)
             config = {
+                "schema_version": 1,
+                "id": "A",
                 "judge": {"type": "standard"},
                 "solutions": {"accepted": accepted},
                 "generators": [accepted[-1]],
@@ -419,8 +421,11 @@ class SubmissionUiApiTests(unittest.TestCase):
                     "_load_problem_by_index",
                     return_value={"problem": {"display_name": "A"}},
                 ),
-                mock.patch.object(self.ui, "_schema_workspace", return_value=None),
-                mock.patch.object(self.ui, "find_problem_dirs", return_value={"A": str(problem)}),
+                mock.patch.object(
+                    self.ui,
+                    "_schema_workspace",
+                    return_value=(Path(temp), {"problems": [{"id": "A", "directory": "A"}]}),
+                ),
                 mock.patch.object(self.ui, "read_probhub_config_from_dir", return_value=config),
                 mock.patch.object(self.ui, "WEBUI_TASK_INFO_FILES_PER_ROLE", 8),
             ):
@@ -521,7 +526,7 @@ class SubmissionUiApiTests(unittest.TestCase):
         def block_compile(_subtitle):
             compile_entered.set()
             release_compile.wait(5)
-            return None
+            raise self.ui.ProbHubError("compile unblocked", code="build_busy")
 
         compile_result = []
 

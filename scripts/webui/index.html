@@ -509,7 +509,7 @@
 
                     <div x-show="!sandboxInfo || !sandboxInfo.matched" class="rounded-xl border border-white/[0.02] bg-ink-input/40 p-5 text-sm text-cream-subtle">
                         <p x-show="selectedIdx === null">选择左侧题目后，这里会显示目录、数据和代码状态。</p>
-                        <p x-show="selectedIdx !== null && sandboxInfo && !sandboxInfo.matched">未找到匹配的题目目录，请检查该题 `meta.json` 的 `display_name`。</p>
+                        <p x-show="selectedIdx !== null && sandboxInfo && !sandboxInfo.matched">未找到 Schema v1 题目目录，请检查 `.probhub/workspace.yaml` 中该题的 `directory` 配置。</p>
                     </div>
 
                     <div x-show="sandboxInfo && sandboxInfo.matched" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">

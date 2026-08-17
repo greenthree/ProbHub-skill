@@ -111,6 +111,44 @@ class UiWriteBoundaryTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/pdf-pages/Contest").status_code, 200)
         self.assertEqual(self.file_state(), before)
 
+    def test_old_workspace_is_rejected_without_legacy_fallback_or_writes(self):
+        original_cwd = Path.cwd()
+        temp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(temp.name)
+            old = root / "typst-statement" / "Contest"
+            old.mkdir(parents=True)
+            (old / "problems.json").write_text("[]\n", encoding="utf-8")
+            (old / "main.typ").write_text("// old workspace\n", encoding="utf-8")
+            before = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+            os.chdir(root)
+            requests = [
+                self.client.get("/api/subtitles"),
+                self.client.get("/api/data?subtitle=Contest"),
+                self.client.post("/api/data", json={"subtitle": "Contest", "problems": []}),
+                self.client.post("/api/compile", json={"subtitle": "Contest"}),
+                self.client.post("/api/distribute", json={"subtitle": "Contest"}),
+                self.client.get("/api/config/Contest"),
+                self.client.get("/api/pdf-pages/Contest"),
+            ]
+            for response in requests:
+                with self.subTest(path=response.request.path):
+                    self.assertEqual(response.status_code, 409)
+                    self.assertEqual(response.get_json()["code"], "migration_required")
+            after = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+        finally:
+            os.chdir(original_cwd)
+            temp.cleanup()
+
     def test_schema_statement_assets_are_served_read_only_with_path_boundaries(self):
         before = self.file_state()
         response = self.client.get("/api/problem-assets/Contest/A/diagram.png")
