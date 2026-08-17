@@ -8,7 +8,7 @@ from scripts import check_clean_install, check_published_release, check_release
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.6.8"
+VERSION = "0.6.9"
 REGISTRY = check_published_release.DEFAULT_REGISTRY
 
 
@@ -41,7 +41,7 @@ class PublishedReleaseTests(unittest.TestCase):
                 parsed = check_published_release._parse_object(
                     json.dumps(payload),
                     code="npm_view_invalid_json",
-                    source="npm view probhub@0.6.8",
+                    source="npm view probhub@0.6.9",
                 )
                 self.assertEqual(parsed, expected)
 
@@ -52,7 +52,7 @@ class PublishedReleaseTests(unittest.TestCase):
                     check_published_release._parse_object(
                         json.dumps(payload),
                         code="npm_view_invalid_json",
-                        source="npm view probhub@0.6.8",
+                        source="npm view probhub@0.6.9",
                     )
                 self.assertEqual(caught.exception.code, "npm_view_invalid_json")
 
@@ -74,9 +74,9 @@ class PublishedReleaseTests(unittest.TestCase):
                 self.assertRaises(check_published_release.PublishedReleaseError) as caught,
             ):
                 check_published_release._run_json(
-                    ["npm", "view", "probhub@0.6.8", "--json"],
+                    ["npm", "view", "probhub@0.6.9", "--json"],
                     code="npm_view_failed",
-                    source="npm view probhub@0.6.8",
+                    source="npm view probhub@0.6.9",
                 )
             self.assertEqual(caught.exception.code, expected_code)
 
@@ -116,8 +116,8 @@ class PublishedReleaseTests(unittest.TestCase):
             _package("probhub-skill", dependencies={"probhub": VERSION}),
         ]
         inventories = {
-            "main": {"filename": "probhub-0.6.8.tgz", "files": 225},
-            "compat": {"filename": "probhub-skill-0.6.8.tgz", "files": 5},
+            "main": {"filename": "probhub-0.6.9.tgz", "files": 222},
+            "compat": {"filename": "probhub-skill-0.6.9.tgz", "files": 5},
         }
         with (
             patch(
@@ -153,7 +153,7 @@ class PublishedReleaseTests(unittest.TestCase):
             "compat dependency": (
                 [
                     _package("probhub"),
-                    _package("probhub-skill", dependencies={"probhub": "^0.6.8"}),
+                    _package("probhub-skill", dependencies={"probhub": "^0.6.9"}),
                 ],
                 "npm_compat_dependency_mismatch",
             ),
@@ -188,7 +188,7 @@ class PublishedReleaseTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, code)
 
     def test_registry_verification_rejects_non_exact_input_and_alternate_registry(self):
-        for version in ("latest", "v0.6.8", "0.6", "0.6.8 || echo bad"):
+        for version in ("latest", "v0.6.9", "0.6", "0.6.9 || echo bad"):
             with self.subTest(version=version):
                 with self.assertRaises(check_published_release.PublishedReleaseError) as caught:
                     check_published_release.validate_npm_registry(version)
@@ -202,13 +202,13 @@ class PublishedReleaseTests(unittest.TestCase):
 
     def test_github_release_requires_published_stable_exact_tag(self):
         release = {
-            "name": "ProbHub 0.6.8",
-            "tagName": "v0.6.8",
+            "name": "ProbHub 0.6.9",
+            "tagName": "v0.6.9",
             "isDraft": False,
             "isPrerelease": False,
             "publishedAt": "2026-08-16T09:46:26Z",
             "targetCommitish": "main",
-            "url": "https://github.com/greenthree/ProbHub-skill/releases/tag/v0.6.8",
+            "url": "https://github.com/greenthree/ProbHub-skill/releases/tag/v0.6.9",
         }
         with (
             patch("scripts.check_published_release.shutil.which", return_value="gh"),
@@ -219,7 +219,7 @@ class PublishedReleaseTests(unittest.TestCase):
                     VERSION,
                     "greenthree/ProbHub-skill",
                 )["tagName"],
-                "v0.6.8",
+                "v0.6.9",
             )
 
         for field, value, code in (
@@ -279,8 +279,8 @@ class PublishedReleaseTests(unittest.TestCase):
     def test_clean_install_registry_plan_never_uses_local_tarballs(self):
         published = {
             "inventories": {
-                "main": {"filename": "probhub-0.6.8.tgz", "files": 225},
-                "compat": {"filename": "probhub-skill-0.6.8.tgz", "files": 5},
+                "main": {"filename": "probhub-0.6.9.tgz", "files": 222},
+                "compat": {"filename": "probhub-skill-0.6.9.tgz", "files": 5},
             }
         }
         with (

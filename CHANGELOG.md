@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-08-17
+
 - 0.6.9 删除 Legacy 工作流及其执行入口：Skill、WebUI 和直接调用的 local judge 只接受 Workspace Schema v1；旧目录统一以 `migration_required` 或 `unsupported_schema` fail closed，不再扫描旧目录源码、读取旧 `meta.json`/`problem.yaml`/`domjudge-problem.ini` 限制或改写旧 PDF/ZIP。移除手工 `add_problem.py`、`extract_new_problem.py` 及旧工作流参考文档；历史 PDF/evidence 格式解析兼容仍作为独立内部能力保留。
 
 ## [0.6.8] - 2026-08-16
