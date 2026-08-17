@@ -1,5 +1,6 @@
 """Cross-platform process-tree control for ProbHub sandboxes."""
 
+import errno
 import os
 import platform
 import selectors
@@ -9,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -24,6 +25,10 @@ PYTHON_OPTIONS_WITH_ARGUMENT = frozenset(("-W", "-X", "--check-hash-based-pycs")
 UNIX_EXEC_START_TIMEOUT_SECONDS = 10.0
 UNIX_EXEC_READY = b"PROBHUB_UNIX_EXEC_READY_V1\n"
 UNIX_EXEC_STATUS_LIMIT = 64 * 1024
+MAX_TRACKED_POSIX_DESCENDANTS = 4096
+POSIX_CLEANUP_TIMEOUT_SECONDS = 2.0
+PROCESS_CLEANUP_DIAGNOSTIC_LIMIT = 32
+PROCESS_CLEANUP_FAILED = "process_cleanup_failed"
 UNIX_EXEC_HELPER_CODE = r'''
 import os
 import signal
@@ -82,6 +87,26 @@ class ProcessCancelled(Exception):
 
 class OutputBudgetError(OSError):
     """Raised when captured output cannot be measured or bounded safely."""
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """A PID plus its Linux kernel start-time identity.
+
+    ``start_time_ticks`` is unavailable on Windows, where Job Object or
+    ``taskkill /T`` containment remains responsible for tree cleanup.
+    """
+
+    pid: int
+    start_time_ticks: int | None = None
+
+
+@dataclass(frozen=True)
+class _LinuxProcessInfo:
+    ppid: int
+    rss_pages: int
+    start_time_ticks: int
+    state: str
 
 
 def cancellation_requested():
@@ -569,20 +594,51 @@ def process_alive(pid):
         return False
 
 
+def _parse_linux_process_stat(pid, payload):
+    close = payload.rfind(")")
+    if close < 0:
+        raise ValueError("malformed /proc stat")
+    fields = payload[close + 2 :].split()
+    return _LinuxProcessInfo(
+        ppid=int(fields[1]),
+        rss_pages=int(fields[21]),
+        start_time_ticks=int(fields[19]),
+        state=str(fields[0]),
+    )
+
+
+def _read_linux_process_info(pid):
+    if platform.system() == "Windows" or not Path("/proc").is_dir():
+        return "unavailable", None
+    try:
+        payload = (Path("/proc") / str(int(pid)) / "stat").read_text(encoding="utf-8")
+        return "present", _parse_linux_process_stat(pid, payload)
+    except FileNotFoundError:
+        return "missing", None
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ESRCH}:
+            return "missing", None
+        return "unavailable", None
+    except (ValueError, IndexError):
+        return "unavailable", None
+
+
 def _linux_process_table():
     if platform.system() == "Windows" or not Path("/proc").is_dir():
         return {}
     table = {}
-    for entry in Path("/proc").iterdir():
+    try:
+        entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        return {}
+    for entry in entries:
         if not entry.name.isdigit():
             continue
         try:
-            stat = (entry / "stat").read_text(encoding="utf-8")
-            close = stat.rfind(")")
-            fields = stat[close + 2 :].split()
-            ppid = int(fields[1])
-            rss_pages = int(fields[21])
-            table[int(entry.name)] = (ppid, rss_pages)
+            info = _parse_linux_process_stat(
+                int(entry.name), (entry / "stat").read_text(encoding="utf-8")
+            )
+            table[int(entry.name)] = info
         except (OSError, ValueError, IndexError):
             continue
     return table
@@ -591,8 +647,8 @@ def _linux_process_table():
 def _process_tree_pids_from_table(root_pid, table):
     root_pid = int(root_pid)
     children = {}
-    for pid, (ppid, _) in table.items():
-        children.setdefault(ppid, []).append(pid)
+    for pid, info in table.items():
+        children.setdefault(info.ppid, []).append(pid)
     pending = [root_pid]
     seen = set()
     while pending:
@@ -615,13 +671,233 @@ def snapshot_process_tree(root_pid):
     return _process_tree_pids_from_table(root_pid, table)
 
 
-def terminate_external_process_tree(proc, known_pids=()):
+def snapshot_process_tree_identities(root_pid):
+    """Return current root/descendant identities where the platform permits it."""
+    root_pid = int(root_pid)
+    if platform.system() == "Windows":
+        return {ProcessIdentity(root_pid)}
+    table = _linux_process_table()
+    if not table:
+        state, info = _read_linux_process_info(root_pid)
+        if state != "present":
+            return set()
+        return {ProcessIdentity(root_pid, info.start_time_ticks)}
+    return {
+        ProcessIdentity(pid, table[pid].start_time_ticks)
+        for pid in _process_tree_pids_from_table(root_pid, table)
+        if pid in table
+    }
+
+
+def _identity_status(identity):
+    if identity.start_time_ticks is None:
+        return "unavailable"
+    state, info = _read_linux_process_info(identity.pid)
+    if state != "present":
+        return "gone" if state == "missing" else "unavailable"
+    if info.start_time_ticks != identity.start_time_ticks:
+        return "reused"
+    if info.state in {"Z", "X", "x"}:
+        return "gone"
+    return "matching"
+
+
+def _bounded_identity_map(identities, limit=MAX_TRACKED_POSIX_DESCENDANTS):
+    result = {}
+    overflow = False
+    for identity in sorted(
+        identities,
+        key=lambda item: (int(item.pid), item.start_time_ticks or -1),
+    ):
+        if identity.start_time_ticks is None:
+            continue
+        if identity.pid in result:
+            if result[identity.pid] != identity:
+                # Keep the first observed identity. Replacing it with a later
+                # start-time value could authorize signalling an unrelated
+                # process after PID reuse.
+                overflow = True
+        elif len(result) < int(limit):
+            result[identity.pid] = identity
+        else:
+            overflow = True
+    return result, overflow
+
+
+def _cleanup_identity_snapshot(proc, root_identity, known_identities):
+    known, overflow = _bounded_identity_map(known_identities)
+    table = _linux_process_table()
+    if not table:
+        return known, overflow
+
+    roots = []
+    root_info = table.get(int(proc.pid))
+    root_is_current = (
+        root_identity is not None
+        and root_info is not None
+        and root_identity.start_time_ticks == root_info.start_time_ticks
+    )
+    # Without an identity captured while the root was alive, a dead Popen PID
+    # must not be used to discover a newly-created, unrelated process tree.
+    if root_is_current or (root_identity is None and proc.poll() is None):
+        roots.append(int(proc.pid))
+    for identity in tuple(known.values()):
+        info = table.get(identity.pid)
+        if info is not None and info.start_time_ticks == identity.start_time_ticks:
+            roots.append(identity.pid)
+
+    discovered = []
+    for root_pid in roots:
+        for pid in _process_tree_pids_from_table(root_pid, table):
+            info = table.get(pid)
+            if info is not None and pid != int(proc.pid):
+                discovered.append(ProcessIdentity(pid, info.start_time_ticks))
+    merged, extra_overflow = _bounded_identity_map((*known.values(), *discovered))
+    return merged, overflow or extra_overflow
+
+
+def _signal_matching_identity(identity):
+    status = _identity_status(identity)
+    if status != "matching":
+        return status, None
+    if identity.pid == os.getpid():
+        return "unsafe", "refused to signal the ProbHub supervisor process"
+    try:
+        if os.getpgid(identity.pid) == os.getpgrp():
+            return "unsafe", "refused to signal the ProbHub supervisor process group"
+    except ProcessLookupError:
+        return "gone", None
+    except OSError as exc:
+        return "unavailable", f"cannot inspect process group for pid {identity.pid}: {exc}"
+
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_signal = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is not None and pidfd_signal is not None:
+        descriptor = None
+        try:
+            descriptor = pidfd_open(identity.pid, 0)
+            status = _identity_status(identity)
+            if status != "matching":
+                return status, None
+            pidfd_signal(descriptor, signal.SIGKILL, None, 0)
+            return "signalled", None
+        except ProcessLookupError:
+            return "gone", None
+        except OSError as exc:
+            return "error", f"cannot terminate pid {identity.pid}: {exc}"
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    # Python/Linux combinations without pidfd support still revalidate the
+    # kernel start-time immediately before signalling. Supported CI targets
+    # use pidfds, which close the residual check-to-signal PID reuse race.
+    if _identity_status(identity) != "matching":
+        return "gone", None
+    try:
+        os.kill(identity.pid, signal.SIGKILL)
+        return "signalled", None
+    except ProcessLookupError:
+        return "gone", None
+    except OSError as exc:
+        return "error", f"cannot terminate pid {identity.pid}: {exc}"
+
+
+def _terminate_posix_process_tree(
+    proc,
+    *,
+    root_identity=None,
+    known_identities=(),
+    tracking_overflow=False,
+):
+    identities, snapshot_overflow = _cleanup_identity_snapshot(
+        proc, root_identity, known_identities
+    )
+    errors = []
+    root_status = _identity_status(root_identity) if root_identity is not None else None
+    root_alive = proc.poll() is None
+    # A PID whose Popen has already reaped may have been reused. Only an
+    # identity still matching the original root can authorize a late group
+    # kill; otherwise cleanup is limited to descendants observed earlier.
+    should_kill_group = root_alive or root_status == "matching"
+    if should_kill_group:
+        try:
+            root_group = os.getpgid(int(proc.pid))
+            if root_group == os.getpgrp():
+                raise OSError("refused to signal the ProbHub supervisor process group")
+            os.killpg(root_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            errors.append(f"cannot terminate original process group {proc.pid}: {exc}")
+
+    try:
+        proc.wait(timeout=POSIX_CLEANUP_TIMEOUT_SECONDS)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        errors.append(f"cannot reap managed process {proc.pid}: {exc}")
+
+    for identity in tuple(identities.values()):
+        status, detail = _signal_matching_identity(identity)
+        if status in {"error", "unsafe", "unavailable"}:
+            errors.append(detail or f"cannot confirm pid {identity.pid} identity")
+
+    deadline = time.perf_counter() + POSIX_CLEANUP_TIMEOUT_SECONDS
+    remaining = []
+    unavailable = []
+    while True:
+        remaining = []
+        unavailable = []
+        for identity in identities.values():
+            status = _identity_status(identity)
+            if status == "matching":
+                remaining.append(identity.pid)
+            elif status == "unavailable":
+                unavailable.append(identity.pid)
+        if (not remaining and not unavailable) or time.perf_counter() >= deadline:
+            break
+        time.sleep(0.01)
+
+    if tracking_overflow or snapshot_overflow:
+        errors.append(
+            f"observed descendant identity limit exceeded ({MAX_TRACKED_POSIX_DESCENDANTS})"
+        )
+    if unavailable:
+        errors.append(
+            "cannot verify descendant identity for pid(s): "
+            + ", ".join(str(pid) for pid in unavailable[:PROCESS_CLEANUP_DIAGNOSTIC_LIMIT])
+        )
+    if remaining:
+        errors.append(
+            "descendant process(es) survived cleanup: "
+            + ", ".join(str(pid) for pid in remaining[:PROCESS_CLEANUP_DIAGNOSTIC_LIMIT])
+        )
+    bounded_errors = errors[:PROCESS_CLEANUP_DIAGNOSTIC_LIMIT]
+    return {
+        "ok": not bounded_errors,
+        "tracked": len(identities),
+        "remaining_pids": remaining[:PROCESS_CLEANUP_DIAGNOSTIC_LIMIT],
+        "errors": bounded_errors,
+    }
+
+
+def terminate_external_process_tree(proc, known_identities=(), *, known_pids=None):
     """Force-stop a supervisor process and detached descendant groups."""
     if proc is None:
-        return
+        return {"ok": True, "tracked": 0, "remaining_pids": [], "errors": []}
     root_pid = int(proc.pid)
-    pids = set(int(pid) for pid in (known_pids or ())) | snapshot_process_tree(root_pid)
+    if known_pids is not None and not known_identities:
+        # Compatibility for older callers. POSIX treats raw PIDs as stale
+        # hints and will only act on identities observed again at termination.
+        known_identities = known_pids
+    values = tuple(known_identities or ())
     if platform.system() == "Windows":
+        pids = {
+            int(item.pid) if isinstance(item, ProcessIdentity) else int(item)
+            for item in values
+        } | snapshot_process_tree(root_pid)
         targets = [root_pid] + sorted((pid for pid in pids if pid != root_pid), reverse=True)
         for pid in targets:
             try:
@@ -634,48 +910,56 @@ def terminate_external_process_tree(proc, known_pids=()):
                 )
             except (OSError, subprocess.TimeoutExpired):
                 pass
-    else:
-        current_group = os.getpgrp()
-        groups = set()
-        for pid in pids:
-            try:
-                group = os.getpgid(pid)
-                if group != current_group:
-                    groups.add(group)
-            except OSError:
-                pass
-        for group in groups:
-            try:
-                os.killpg(group, signal.SIGKILL)
-            except OSError:
-                pass
-        for pid in sorted(pids, reverse=True):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-    try:
-        proc.wait(timeout=2)
-    except (OSError, subprocess.TimeoutExpired):
         try:
-            proc.kill()
-            proc.wait(timeout=1)
+            proc.wait(timeout=2)
         except (OSError, subprocess.TimeoutExpired):
-            pass
+            try:
+                proc.kill()
+                proc.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return {"ok": True, "tracked": len(pids), "remaining_pids": [], "errors": []}
+
+    identities = [item for item in values if isinstance(item, ProcessIdentity)]
+    root_identity = next((item for item in identities if item.pid == root_pid), None)
+    # A late snapshot is safe only while the original root is alive, or when a
+    # previously captured start-time identity still proves the PID is the same
+    # process. Never adopt a reused PID as a new cleanup root.
+    root_alive = proc.poll() is None
+    if root_alive or (
+        root_identity is not None and _identity_status(root_identity) == "matching"
+    ):
+        identities.extend(snapshot_process_tree_identities(root_pid))
+        root_identity = next((item for item in identities if item.pid == root_pid), root_identity)
+    return _terminate_posix_process_tree(
+        proc,
+        root_identity=root_identity,
+        known_identities=(item for item in identities if item.pid != root_pid),
+    )
 
 
-def process_tree_metrics(root_pid):
-    """Return descendant count and aggregate RSS in MB where /proc is available."""
+def _process_tree_observation(root_pid):
     table = _linux_process_table()
     if not table:
-        return None, None
+        return None, None, set()
     seen = _process_tree_pids_from_table(root_pid, table)
-    rss_pages = sum(table.get(pid, (0, 0))[1] for pid in seen)
+    rss_pages = sum(table[pid].rss_pages for pid in seen if pid in table)
+    identities = {
+        ProcessIdentity(pid, table[pid].start_time_ticks)
+        for pid in seen
+        if pid in table and pid != int(root_pid)
+    }
     try:
         page_size = os.sysconf("SC_PAGE_SIZE")
     except (AttributeError, ValueError):
         page_size = 4096
-    return len(seen), rss_pages * page_size / (1024 * 1024)
+    return len(seen), rss_pages * page_size / (1024 * 1024), identities
+
+
+def process_tree_metrics(root_pid):
+    """Return descendant count and aggregate RSS in MB where /proc is available."""
+    count, rss_mb, _ = _process_tree_observation(root_pid)
+    return count, rss_mb
 
 
 @dataclass
@@ -687,20 +971,51 @@ class ManagedProcess:
     memory_enforced: bool = False
     process_limit_enforced: bool = False
     peak_memory_mb: float | None = None
+    root_identity: ProcessIdentity | None = field(default=None, init=False, repr=False)
+    known_descendants: dict = field(default_factory=dict, init=False, repr=False)
+    identity_tracking_overflow: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self):
+        if platform.system() == "Windows":
+            return
+        state, info = _read_linux_process_info(self.proc.pid)
+        if state == "present":
+            self.root_identity = ProcessIdentity(self.proc.pid, info.start_time_ticks)
+
+    def _remember_descendants(self, identities):
+        for identity in sorted(identities, key=lambda item: item.pid):
+            if identity.pid in self.known_descendants:
+                if self.known_descendants[identity.pid] != identity:
+                    self.identity_tracking_overflow = True
+            elif len(self.known_descendants) < MAX_TRACKED_POSIX_DESCENDANTS:
+                self.known_descendants[identity.pid] = identity
+            else:
+                self.identity_tracking_overflow = True
 
     def sample(self):
         if platform.system() == "Windows":
             current = windows_query_job_peak_memory(self.job_handle)
             count = None
         else:
-            count, current = process_tree_metrics(self.proc.pid)
+            count, current, identities = _process_tree_observation(self.proc.pid)
+            self._remember_descendants(identities)
         if current is not None:
             self.peak_memory_mb = max(self.peak_memory_mb or 0.0, current)
         return count, current
 
     def terminate(self):
-        terminate_process(self.proc, self.job_handle)
+        if platform.system() == "Windows":
+            terminate_process(self.proc, self.job_handle)
+            result = {"ok": True, "tracked": 0, "remaining_pids": [], "errors": []}
+        else:
+            result = _terminate_posix_process_tree(
+                self.proc,
+                root_identity=self.root_identity,
+                known_identities=self.known_descendants.values(),
+                tracking_overflow=self.identity_tracking_overflow,
+            )
         self.job_handle = None
+        return result
 
     def close(self):
         close_windows_handle(self.job_handle)
@@ -920,6 +1235,8 @@ def wait_managed(
     output_bytes = 0
     retained_output_bytes = 0
     retained_paths = []
+    cleanup = {"ok": True, "tracked": 0, "remaining_pids": [], "errors": []}
+    pre_cleanup_reason = None
     output_paths = tuple(output_paths or ())
     optional_output_paths = tuple(optional_output_paths or ())
     all_output_paths = (*output_paths, *optional_output_paths)
@@ -969,7 +1286,24 @@ def wait_managed(
             reason, message = "time_limit", "time limit exceeded"
         returncode = managed.proc.poll()
     finally:
-        managed.terminate()
+        try:
+            observed_cleanup = managed.terminate()
+            if isinstance(observed_cleanup, dict):
+                cleanup = observed_cleanup
+        except Exception as exc:
+            cleanup = {
+                "ok": False,
+                "tracked": 0,
+                "remaining_pids": [],
+                "errors": [f"process tree cleanup raised an exception: {exc}"],
+            }
+        if not cleanup.get("ok", False):
+            pre_cleanup_reason = reason
+            reason = PROCESS_CLEANUP_FAILED
+            errors = tuple(str(item) for item in (cleanup.get("errors") or ()))
+            message = (errors[0] if errors else "process tree cleanup could not be confirmed")[
+                :4096
+            ]
         if returncode is None:
             returncode = managed.proc.returncode
         output_bytes = _files_size(output_paths, optional_output_paths)
@@ -1000,6 +1334,8 @@ def wait_managed(
         "stdout_retained_bytes": retained_paths[0] if retained_paths else 0,
         "stderr_retained_bytes": retained_paths[1] if len(retained_paths) > 1 else 0,
         "output_truncated": retained_output_bytes < output_bytes,
+        "cleanup": cleanup,
+        "pre_cleanup_reason": pre_cleanup_reason,
     }
 
 

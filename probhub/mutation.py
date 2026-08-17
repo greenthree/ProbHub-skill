@@ -50,7 +50,7 @@ from .problem_snapshot import copy_problem_consistently
 from .process_control import (
     ProcessCancelled,
     cancellation_requested,
-    snapshot_process_tree,
+    snapshot_process_tree_identities,
     terminate_external_process_tree,
     run_managed_to_files,
 )
@@ -857,13 +857,17 @@ class _MultiprocessingProcessAdapter:
     def kill(self):
         self._process.kill()
 
+    def poll(self):
+        return None if self._process.is_alive() else self._process.exitcode
 
-def _force_stop_mutation_worker(process, known_pids):
+
+def _force_stop_mutation_worker(process, known_identities):
     if process.pid and process.is_alive():
-        known_pids.update(snapshot_process_tree(process.pid))
-    if process.is_alive():
-        terminate_external_process_tree(
-            _MultiprocessingProcessAdapter(process), known_pids
+        known_identities.update(snapshot_process_tree_identities(process.pid))
+    cleanup = {"ok": True}
+    if process.pid:
+        cleanup = terminate_external_process_tree(
+            _MultiprocessingProcessAdapter(process), known_identities
         )
     process.join(timeout=1.0)
     if process.is_alive():
@@ -875,7 +879,7 @@ def _force_stop_mutation_worker(process, known_pids):
             process.close()
         except (OSError, ValueError):
             pass
-    return stopped
+    return stopped and bool(cleanup.get("ok", False))
 
 
 def _run_serial_mutations(tasks, *, cancel_check, deadline):
@@ -956,7 +960,12 @@ def _run_parallel_mutations(
                 pass
             raise
         child.close()
-        active[task.index] = (process, parent, task, {process.pid})
+        active[task.index] = (
+            process,
+            parent,
+            task,
+            snapshot_process_tree_identities(process.pid),
+        )
 
     try:
         while active or (next_task < len(tasks) and stop_code is None):
@@ -970,9 +979,9 @@ def _run_parallel_mutations(
 
             made_progress = False
             for index in sorted(tuple(active)):
-                process, connection, task, known_pids = active[index]
+                process, connection, task, known_identities = active[index]
                 if process.pid and process.is_alive():
-                    known_pids.update(snapshot_process_tree(process.pid))
+                    known_identities.update(snapshot_process_tree_identities(process.pid))
                 if connection.poll():
                     try:
                         result = connection.recv()
@@ -990,18 +999,22 @@ def _run_parallel_mutations(
                         )
                     connection.close()
                     process.join(timeout=1.0)
-                    if process.is_alive():
-                        _force_stop_mutation_worker(process, known_pids)
+                    was_alive = process.is_alive()
+                    cleanup_ok = _force_stop_mutation_worker(
+                        process, known_identities
+                    )
+                    if not cleanup_ok:
+                        result = _mutation_result_record(
+                            task.mutation,
+                            "infrastructure-failed",
+                            diagnostic="mutation_worker_cleanup_failed",
+                        )
+                    elif was_alive:
                         result = _mutation_result_record(
                             task.mutation,
                             "infrastructure-failed",
                             diagnostic="mutation_worker_did_not_exit",
                         )
-                    else:
-                        try:
-                            process.close()
-                        except (OSError, ValueError):
-                            pass
                     if not _cleanup_mutation_worker(task.worker_root):
                         result = _mutation_result_record(
                             task.mutation,
@@ -1023,15 +1036,18 @@ def _run_parallel_mutations(
                 elif not process.is_alive():
                     connection.close()
                     process.join(timeout=0.5)
-                    try:
-                        process.close()
-                    except (OSError, ValueError):
-                        pass
+                    cleanup_ok = _force_stop_mutation_worker(
+                        process, known_identities
+                    )
                     _cleanup_mutation_worker(task.worker_root)
                     results[index] = _mutation_result_record(
                         task.mutation,
                         "infrastructure-failed",
-                        diagnostic="mutation_worker_exited",
+                        diagnostic=(
+                            "mutation_worker_exited"
+                            if cleanup_ok
+                            else "mutation_worker_cleanup_failed"
+                        ),
                     )
                     del active[index]
                     made_progress = True
@@ -1045,14 +1061,24 @@ def _run_parallel_mutations(
                 and now - cancellation_started >= cancel_grace
             ):
                 for index in sorted(tuple(active)):
-                    process, connection, task, known_pids = active.pop(index)
+                    process, connection, task, known_identities = active.pop(index)
                     connection.close()
-                    _force_stop_mutation_worker(process, known_pids)
+                    cleanup_ok = _force_stop_mutation_worker(
+                        process, known_identities
+                    )
                     _cleanup_mutation_worker(task.worker_root)
-                    results[index] = _cancelled_mutation_record(
-                        task,
-                        stop_code,
-                        "worker terminated after scheduler cancellation",
+                    results[index] = (
+                        _cancelled_mutation_record(
+                            task,
+                            stop_code,
+                            "worker terminated after scheduler cancellation",
+                        )
+                        if cleanup_ok
+                        else _mutation_result_record(
+                            task.mutation,
+                            "infrastructure-failed",
+                            diagnostic="mutation_worker_cleanup_failed",
+                        )
                     )
                     made_progress = True
 
@@ -1082,9 +1108,9 @@ def _run_parallel_mutations(
                 time.sleep(0.01)
     finally:
         cancel_event.set()
-        for process, connection, task, known_pids in active.values():
+        for process, connection, task, known_identities in active.values():
             connection.close()
-            _force_stop_mutation_worker(process, known_pids)
+            _force_stop_mutation_worker(process, known_identities)
             _cleanup_mutation_worker(task.worker_root)
 
     for task in tasks[next_task:]:

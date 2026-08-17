@@ -34,6 +34,31 @@ class StressTests(unittest.TestCase):
         self.assertEqual(result["reason"], "output_control_error")
         self.assertIn("cannot enforce", result["message"])
 
+    def test_process_cleanup_failure_is_infrastructure(self):
+        execution = {
+            "reason": "process_cleanup_failed",
+            "returncode": 0,
+            "time": 0.01,
+            "memory": 1,
+            "memory_enforced": True,
+            "process_limit_enforced": True,
+            "output_bytes": 0,
+            "retained_output_bytes": 0,
+            "stdout_retained_bytes": 0,
+            "stderr_retained_bytes": 0,
+            "output_truncated": False,
+            "message": "descendant survived cleanup",
+        }
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            stressing,
+            "run_managed_to_files",
+            return_value=execution,
+        ):
+            result = stressing._run(["unused"], None, 1, temp)
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["reason"], "process_cleanup_failed")
+        self.assertIn("survived cleanup", result["message"])
+
     def test_checker_core_separates_protocol_verdict_and_execution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

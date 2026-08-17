@@ -13,6 +13,7 @@ from .io import read_bounded_text
 from .process_control import (
     DEFAULT_PROCESS_LIMIT,
     OutputBudgetError,
+    PROCESS_CLEANUP_FAILED,
     ProcessCancelled,
     cancellation_requested,
     output_path_size,
@@ -27,6 +28,7 @@ _FEEDBACK_NAMES = ("judgemessage.txt", "teammessage.txt")
 _RESOURCE_LIMIT_REASONS = frozenset(
     ("time_limit", "memory_limit", "output_limit", "process_limit")
 )
+_CONTROL_FAILURE_REASONS = frozenset(("output_control_error", PROCESS_CLEANUP_FAILED))
 _CLEANUP_ERROR_BYTES = 4096
 
 
@@ -70,12 +72,17 @@ def _apply_cleanup_failure(result, cleanup):
             "termination_reason",
         )
     }
+    tree_cleanup_failed = any(
+        item.get("stage") == "tree_termination"
+        for item in cleanup.get("errors", ())
+    )
+    cleanup_reason = PROCESS_CLEANUP_FAILED if tree_cleanup_failed else "cleanup_error"
     result.update({
         "verdict": None,
-        "execution_status": "cleanup_error",
+        "execution_status": cleanup_reason,
         "failure_kind": "cleanup_failure",
         "actor": "supervisor",
-        "termination_reason": "cleanup_error",
+        "termination_reason": cleanup_reason,
         "message": cleanup["errors"][0]["message"] if cleanup["errors"] else "cleanup failed",
     })
     if "status" in result:
@@ -132,9 +139,9 @@ def _failed_checker_result(reason, message, diagnostic_limit_bytes):
         "verdict": None,
         "execution_status": reason,
         "failure_kind": (
-            "control_failure" if reason == "output_control_error" else "startup_failure"
+            "control_failure" if reason in _CONTROL_FAILURE_REASONS else "startup_failure"
         ),
-        "actor": "supervisor" if reason == "output_control_error" else "checker",
+        "actor": "supervisor" if reason in _CONTROL_FAILURE_REASONS else "checker",
         "termination_reason": reason,
         "message": bounded_message,
         "feedback_message": bounded_message,
@@ -267,6 +274,11 @@ def run_checker_to_files(
             execution_status = "completed"
             failure_kind = "judge_failure"
             message = message or f"checker exited with code {returncode}"
+        elif termination_reason in _CONTROL_FAILURE_REASONS:
+            execution_status = termination_reason
+            failure_kind = "control_failure"
+            actor = "supervisor"
+            message = execution.get("message") or termination_reason.replace("_", " ")
         elif termination_reason in _RESOURCE_LIMIT_REASONS:
             execution_status = termination_reason
             failure_kind = "resource_limit"
@@ -545,7 +557,15 @@ def _terminate_interactive_actor(managed, actor, cleanup):
         return
     key = f"{actor}_tree_termination"
     try:
-        managed.terminate()
+        result = managed.terminate()
+        if isinstance(result, dict) and not result.get("ok", False):
+            cleanup[key] = "failed"
+            errors = result.get("errors") or ("process tree cleanup could not be confirmed",)
+            for message in tuple(errors)[:8]:
+                cleanup["errors"].append(
+                    _cleanup_error("tree_termination", actor, OSError(str(message)))
+                )
+            return
         cleanup[key] = "completed"
     except BaseException as exc:
         cleanup[key] = "failed"

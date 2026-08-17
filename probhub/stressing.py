@@ -20,6 +20,7 @@ from .output_compare import compare_standard_output
 from .process_control import (
     DEFAULT_PROCESS_LIMIT,
     OutputBudgetError,
+    PROCESS_CLEANUP_FAILED,
     allocate_shared_prefix_bytes,
     run_managed_to_files,
 )
@@ -277,6 +278,7 @@ def _run(
             "output_limit": "OLE",
             "memory_limit": "MLE",
             "process_limit": "RE",
+            PROCESS_CLEANUP_FAILED: "FAIL",
         }
         status = status_by_reason.get(reason)
         if status is None:
@@ -411,6 +413,7 @@ def _compare_custom(
                 "process_limit": "RE",
                 "start_error": "RE",
                 "output_control_error": "FAIL",
+                PROCESS_CLEANUP_FAILED: "FAIL",
             }.get(result.get("execution_status"), "RE")
         return comparison
     finally:
@@ -498,7 +501,9 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
             "ok": False,
             "kind": "infrastructure" if accepted["status"] == "FAIL" else "counterexample",
             "reason": (
-                "accepted_output_control_failed"
+                "accepted_process_cleanup_failed"
+                if accepted.get("reason") == PROCESS_CLEANUP_FAILED
+                else "accepted_output_control_failed"
                 if accepted["status"] == "FAIL"
                 else f"accepted_{accepted['status'].lower()}"
             ),
@@ -519,7 +524,9 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
             "ok": False,
             "kind": "infrastructure" if brute["status"] == "FAIL" else "counterexample",
             "reason": (
-                "brute_output_control_failed"
+                "brute_process_cleanup_failed"
+                if brute.get("reason") == PROCESS_CLEANUP_FAILED
+                else "brute_output_control_failed"
                 if brute["status"] == "FAIL"
                 else f"brute_{brute['status'].lower()}"
             ),

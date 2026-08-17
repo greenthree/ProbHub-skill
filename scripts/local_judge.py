@@ -31,6 +31,7 @@ from probhub.special_judges import execute_interactive_session, run_checker_to_f
 from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
     OutputBudgetError,
+    PROCESS_CLEANUP_FAILED,
     ProcessCancelled,
     VALIDATOR_MEMORY_LIMIT_MB,
     VALIDATOR_OUTPUT_LIMIT_BYTES,
@@ -725,6 +726,8 @@ def run_program_to_file(
             return "MLE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
         if reason == "process_limit":
             return "RE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
+        if reason == PROCESS_CLEANUP_FAILED:
+            return "FAIL", result["time"], result["memory"], result["memory_enforced"], result["message"], details
         if result["returncode"] != 0:
             status = _failed_status(
                 result["returncode"], stderr, result["memory_enforced"], result["memory"], memory_limit
@@ -762,6 +765,8 @@ def _probe_status(result, memory_limit):
         return "MLE"
     if reason == "process_limit":
         return "RE"
+    if reason == PROCESS_CLEANUP_FAILED:
+        return "FAIL"
     if result.get("returncode") != 0:
         return _failed_status(
             result.get("returncode"),
@@ -955,7 +960,7 @@ def run_custom_testcase(
                     else termination_reason
                     if termination_reason in {
                         "time_limit", "memory_limit", "output_limit", "process_limit",
-                        "output_control_error", "start_error",
+                        "output_control_error", PROCESS_CLEANUP_FAILED, "start_error",
                     }
                     else "completed"
                 ),

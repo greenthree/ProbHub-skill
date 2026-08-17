@@ -16,11 +16,13 @@ from unittest import mock
 import probhub.process_control as process_control
 from probhub.process_control import (
     CANCEL_FILE_ENV,
+    PROCESS_CLEANUP_FAILED,
+    ProcessIdentity,
     ProcessCancelled,
     allocate_shared_prefix_bytes,
     process_alive,
     run_managed_to_files,
-    snapshot_process_tree,
+    snapshot_process_tree_identities,
     terminate_external_process_tree,
     wait_managed,
 )
@@ -90,6 +92,132 @@ class ProcessControlTests(unittest.TestCase):
                     output_limit_bytes=1024,
                 )
             self.assertTrue(managed.terminated)
+
+    def test_cleanup_failure_overrides_completed_result(self):
+        class FakeProcess:
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+        class FakeManaged:
+            memory_limit_mb = None
+            process_limit = None
+            memory_enforced = False
+            process_limit_enforced = False
+            peak_memory_mb = None
+
+            def __init__(self):
+                self.proc = FakeProcess()
+
+            def sample(self):
+                return None, None
+
+            def terminate(self):
+                return {
+                    "ok": False,
+                    "tracked": 1,
+                    "remaining_pids": [123],
+                    "errors": ["descendant process survived cleanup"],
+                }
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stdout = root / "stdout"
+            stderr = root / "stderr"
+            stdout.write_bytes(b"")
+            stderr.write_bytes(b"")
+            result = wait_managed(
+                FakeManaged(),
+                5,
+                output_paths=(stdout, stderr),
+                output_limit_bytes=1024,
+            )
+        self.assertEqual(result["reason"], PROCESS_CLEANUP_FAILED, result)
+        self.assertEqual(result["pre_cleanup_reason"], "completed", result)
+        self.assertFalse(result["cleanup"]["ok"], result)
+        self.assertIn("survived cleanup", result["message"])
+
+    def test_process_identity_mismatch_is_not_signalled(self):
+        identity = ProcessIdentity(12345, 100)
+        current = process_control._LinuxProcessInfo(
+            ppid=1,
+            rss_pages=1,
+            start_time_ticks=200,
+            state="S",
+        )
+        with mock.patch.object(
+            process_control,
+            "_read_linux_process_info",
+            return_value=("present", current),
+        ), mock.patch.object(process_control.os, "kill") as kill:
+            status, detail = process_control._signal_matching_identity(identity)
+        self.assertEqual(status, "reused")
+        self.assertIsNone(detail)
+        kill.assert_not_called()
+
+    def test_disappeared_process_identity_is_already_clean(self):
+        identity = ProcessIdentity(12345, 100)
+        with mock.patch.object(
+            process_control,
+            "_read_linux_process_info",
+            return_value=("missing", None),
+        ), mock.patch.object(process_control.os, "kill") as kill:
+            status, detail = process_control._signal_matching_identity(identity)
+        self.assertEqual(status, "gone")
+        self.assertIsNone(detail)
+        kill.assert_not_called()
+
+    @unittest.skipUnless(Path("/proc/self/stat").is_file(), "POSIX process cleanup only")
+    def test_reaped_root_pid_is_not_used_for_reused_process_group(self):
+        class ReapedProcess:
+            pid = 12345
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        with mock.patch.object(
+            process_control, "_linux_process_table", return_value={}
+        ), mock.patch.object(
+            process_control, "snapshot_process_tree_identities", return_value=set()
+        ), mock.patch.object(process_control.os, "killpg") as killpg:
+            result = terminate_external_process_tree(ReapedProcess())
+        self.assertTrue(result["ok"], result)
+        killpg.assert_not_called()
+
+    @unittest.skipUnless(Path("/proc/self/stat").is_file(), "POSIX process cleanup only")
+    def test_cleanup_uses_actual_root_process_group(self):
+        class LiveProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+        with mock.patch.object(
+            process_control, "_linux_process_table", return_value={}
+        ), mock.patch.object(
+            process_control, "snapshot_process_tree_identities", return_value=set()
+        ), mock.patch.object(
+            process_control.os, "getpgid", return_value=54321
+        ), mock.patch.object(
+            process_control.os, "getpgrp", return_value=1
+        ), mock.patch.object(process_control.os, "killpg") as killpg:
+            result = terminate_external_process_tree(LiveProcess())
+        self.assertTrue(result["ok"], result)
+        killpg.assert_called_once_with(54321, signal.SIGKILL)
+
+    def test_pid_reuse_keeps_first_identity_and_marks_overflow(self):
+        first = ProcessIdentity(12345, 100)
+        reused = ProcessIdentity(12345, 200)
+        identities, overflow = process_control._bounded_identity_map((first, reused))
+        self.assertEqual(identities, {12345: first})
+        self.assertTrue(overflow)
 
     def test_output_budget_truncation_failure_is_fail_closed(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -923,6 +1051,128 @@ class ProcessControlTests(unittest.TestCase):
             self.assertTrue(pid_file.is_file(), "child did not start")
             self.wait_until_dead(int(pid_file.read_text(encoding="utf-8")))
 
+    @unittest.skipUnless(Path("/proc/self/stat").is_file(), "Linux proc identity only")
+    def test_timeout_cleans_observed_setsid_descendant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pid_file = root / "detached.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            parent = (
+                "import subprocess,sys,time;"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True);"
+                "time.sleep(30)"
+            )
+            result = self.run_command(root, parent, timeout=0.8)
+            self.assertEqual(result["reason"], "time_limit", result)
+            self.assertTrue(result["cleanup"]["ok"], result)
+            self.assertGreaterEqual(result["cleanup"]["tracked"], 1, result)
+            self.assertTrue(pid_file.is_file(), "detached child did not start")
+            self.wait_until_dead(int(pid_file.read_text(encoding="utf-8")))
+
+    @unittest.skipUnless(Path("/proc/self/stat").is_file(), "Linux proc identity only")
+    def test_normal_parent_exit_cleans_observed_setsid_descendant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pid_file = root / "detached.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            parent = (
+                "import subprocess,sys,time;"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True);"
+                "time.sleep(0.35)"
+            )
+            result = self.run_command(root, parent, timeout=5)
+            self.assertEqual(result["reason"], "completed", result)
+            self.assertEqual(result["returncode"], 0, result)
+            self.assertTrue(result["cleanup"]["ok"], result)
+            self.assertTrue(pid_file.is_file(), "detached child did not start")
+            self.wait_until_dead(int(pid_file.read_text(encoding="utf-8")))
+
+    @unittest.skipUnless(Path("/proc/self/stat").is_file(), "Linux proc identity only")
+    def test_cancel_cleans_observed_setsid_descendant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pid_file = root / "detached.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            parent = (
+                "import subprocess,sys,time;"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True);"
+                "time.sleep(30)"
+            )
+            cancel_started = time.monotonic()
+            with self.assertRaises(ProcessCancelled):
+                run_managed_to_files(
+                    [sys.executable, "-c", parent],
+                    stdout_path=root / "stdout.txt",
+                    stderr_path=root / "stderr.txt",
+                    timeout=5,
+                    memory_limit_mb=256,
+                    output_limit_bytes=1024 * 1024,
+                    process_limit=8,
+                    cwd=root,
+                    cancel_check=lambda: (
+                        pid_file.is_file()
+                        and time.monotonic() - cancel_started >= 0.25
+                    ),
+                )
+            self.assertTrue(pid_file.is_file(), "detached child did not start")
+            self.wait_until_dead(int(pid_file.read_text(encoding="utf-8")))
+
+    @unittest.skipUnless(Path("/proc/self/stat").is_file(), "Linux proc identity only")
+    def test_process_limit_cleans_observed_setsid_descendant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pid_file = root / "detached.pid"
+            child = (
+                "import os,time,pathlib;"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8');"
+                "time.sleep(30)"
+            )
+            parent = (
+                "import subprocess,sys,time;"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True);"
+                "time.sleep(30)"
+            )
+            result = self.run_command(root, parent, timeout=5, process_limit=1)
+            self.assertEqual(result["reason"], "process_limit", result)
+            self.assertTrue(result["cleanup"]["ok"], result)
+            self.assertTrue(pid_file.is_file(), "detached child did not start")
+            self.wait_until_dead(int(pid_file.read_text(encoding="utf-8")))
+
+    @unittest.skipUnless(Path("/proc/self/stat").is_file(), "Linux proc identity only")
+    def test_detached_cleanup_does_not_kill_unrelated_process_group(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            unrelated = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                result = self.run_command(
+                    root,
+                    "import time; time.sleep(30)",
+                    timeout=0.2,
+                )
+                self.assertEqual(result["reason"], "time_limit", result)
+                self.assertIsNone(unrelated.poll(), "unrelated process group was terminated")
+            finally:
+                unrelated.kill()
+                unrelated.wait(timeout=5)
+
 
     def test_cancel_file_stops_managed_process(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1058,8 +1308,8 @@ class ProcessControlTests(unittest.TestCase):
                     time.sleep(0.05)
                 self.assertTrue(pid_file.is_file(), "detached child did not start")
                 child_pid = int(pid_file.read_text(encoding="utf-8"))
-                known_pids = snapshot_process_tree(proc.pid)
-                terminate_external_process_tree(proc, known_pids)
+                known_identities = snapshot_process_tree_identities(proc.pid)
+                terminate_external_process_tree(proc, known_identities)
                 # Under full-suite load taskkill may return before Windows has
                 # finished tearing down the detached process object.
                 self.wait_until_dead(child_pid, timeout=10)
