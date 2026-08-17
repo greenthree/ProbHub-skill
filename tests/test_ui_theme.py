@@ -35,6 +35,8 @@ class UiThemeTests(unittest.TestCase):
         self.assertIn('<template x-if="currentSubtitle && pdfPages.length > 0">', html)
         self.assertNotIn('x-show="pdfPages.length > 0"', html)
         self.assertIn('data-testid="cover-preview"', html)
+        self.assertIn("`.probhub/workspace.yaml` 中该题的 `directory` 配置", html)
+        self.assertNotIn("`meta.json` 的 `display_name`", html)
 
     def test_initial_load_fetches_page_count_before_rendering_preview_image(self):
         html = self.javascript
@@ -77,7 +79,6 @@ class UiThemeTests(unittest.TestCase):
 
     def test_pdf_preview_renders_into_process_temp_cache(self):
         original_cwd = Path.cwd()
-        original_base_dir = self.ui.BASE_DIR
         temp = tempfile.TemporaryDirectory()
         try:
             root = Path(temp.name)
@@ -85,8 +86,17 @@ class UiThemeTests(unittest.TestCase):
             statement.mkdir(parents=True)
             pdf = statement / "main.pdf"
             pdf.write_bytes(b"fixture pdf")
+            (root / ".probhub").mkdir()
+            (root / ".probhub" / "workspace.yaml").write_text(
+                "schema_version: 1\n"
+                "typst:\n"
+                "  directory: typst-statement/QA\n"
+                "problems:\n"
+                "  - id: A\n"
+                "    directory: A\n",
+                encoding="utf-8",
+            )
             os.chdir(root)
-            self.ui.BASE_DIR = "typst-statement"
             def fake_render(command, **kwargs):
                 Path(command[-1] + ".png").write_bytes(b"fixture png")
                 return {"reason": "completed", "returncode": 0}
@@ -102,21 +112,28 @@ class UiThemeTests(unittest.TestCase):
             self.assertEqual(payload, b"fixture png")
             self.assertFalse((statement / ".preview").exists())
         finally:
-            self.ui.BASE_DIR = original_base_dir
             os.chdir(original_cwd)
             temp.cleanup()
 
     def test_invalid_pdf_is_bounded_and_preserves_api_shape(self):
         original_cwd = Path.cwd()
-        original_base_dir = self.ui.BASE_DIR
         temp = tempfile.TemporaryDirectory()
         try:
             root = Path(temp.name)
             statement = root / "typst-statement" / "QA"
             statement.mkdir(parents=True)
             (statement / "main.pdf").write_bytes(b"malformed pdf")
+            (root / ".probhub").mkdir()
+            (root / ".probhub" / "workspace.yaml").write_text(
+                "schema_version: 1\n"
+                "typst:\n"
+                "  directory: typst-statement/QA\n"
+                "problems:\n"
+                "  - id: A\n"
+                "    directory: A\n",
+                encoding="utf-8",
+            )
             os.chdir(root)
-            self.ui.BASE_DIR = "typst-statement"
             error = self.ui.ProbHubError(
                 "PDF processing timed out",
                 code="pdf_processing_failed",
@@ -133,7 +150,6 @@ class UiThemeTests(unittest.TestCase):
             self.assertEqual(page.status_code, 500)
             self.assertEqual(page.get_data(as_text=True), "Invalid PDF")
         finally:
-            self.ui.BASE_DIR = original_base_dir
             os.chdir(original_cwd)
             temp.cleanup()
 

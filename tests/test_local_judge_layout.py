@@ -1,5 +1,8 @@
 import importlib.util
+import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -63,6 +66,8 @@ class LocalJudgeLayoutTests(unittest.TestCase):
             (problem / "data/sample/1.in").write_text("1\n", encoding="utf-8")
             (problem / "data/sample/1.ans").write_text("1\n", encoding="utf-8")
             write_yaml(problem / "probhub.yaml", {
+                "schema_version": 1,
+                "id": "A",
                 "limits": {"time": 2, "memory": 512},
                 "judge": {"validator": "code/validator.cpp"},
                 "solutions": {
@@ -113,27 +118,45 @@ class LocalJudgeLayoutTests(unittest.TestCase):
             self.assertIsNone(MODULE.resolve_problem_path(problem, "code/linked-checker.cpp"))
 
 
-    def test_legacy_workspace_prefers_code_directory_when_present(self):
+    def test_legacy_workspace_is_rejected_by_cli(self):
         with tempfile.TemporaryDirectory() as temp:
             problem = Path(temp) / "A"
             code = problem / "code"
             code.mkdir(parents=True)
-            for name in ("validator.cpp", "std.cpp", "brute.cpp", "wrong_case.cpp"):
-                (code / name).write_text("int main(){}\n", encoding="utf-8")
+            (code / "std.cpp").write_text("int main(){}\n", encoding="utf-8")
+            run = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "local_judge.py"), str(problem), "--jsonl"],
+                text=True,
+                encoding="utf-8",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(run.returncode, 0)
+            events = [json.loads(line) for line in run.stdout.splitlines() if line.strip().startswith("{")]
+            final = next(event for event in events if event.get("type") == "final")
+            self.assertEqual(final["code"], "migration_required")
 
-            sources = MODULE.discover_solution_sources(problem)
-            self.assertEqual(
-                {kind: [Path(path).relative_to(problem).as_posix() for path in paths] for kind, paths in sources.items()},
-                {
-                    "std": ["code/std.cpp"],
-                    "brute": ["code/brute.cpp"],
-                    "wrong": ["code/wrong_case.cpp"],
-                },
+    def test_unsupported_problem_schema_is_rejected_by_cli(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "A"
+            problem.mkdir(parents=True)
+            write_yaml(problem / "probhub.yaml", {
+                "schema_version": 2,
+                "id": "A",
+            })
+            run = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "local_judge.py"), str(problem), "--jsonl"],
+                text=True,
+                encoding="utf-8",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
             )
-            self.assertEqual(
-                Path(MODULE.discover_validator_source(problem)).relative_to(problem).as_posix(),
-                "code/validator.cpp",
-            )
+            self.assertNotEqual(run.returncode, 0)
+            events = [json.loads(line) for line in run.stdout.splitlines() if line.strip().startswith("{")]
+            final = next(event for event in events if event.get("type") == "final")
+            self.assertEqual(final["code"], "unsupported_schema")
 
     def test_failed_status_requires_peak_memory_evidence_for_mle(self):
         self.assertEqual(MODULE._failed_status(-11, b"", True, 10.0, 256), "RE")

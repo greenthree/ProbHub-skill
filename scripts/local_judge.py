@@ -590,45 +590,32 @@ def _normalize_expected(kind, entry):
     return normalize_expected(kind, entry)
 
 
-def discover_solution_entries(prob_dir, config=None):
-    solutions = {"std": [], "brute": [], "wrong": []}
-    if config is not None:
-        for kind, entries in normalize_solution_entries(config).items():
-            for entry in entries:
-                source_path = resolve_problem_path(prob_dir, entry.get("file"))
-                if source_path:
-                    solutions[kind].append({
-                        "path": source_path,
-                        "file": entry.get("file"),
-                        "expected": entry.get("expected"),
-                        "run_on": entry.get("run_on"),
-                        "run_on_error": entry.get("run_on_error"),
-                        "expected_groups_configured": entry.get("expected_groups_configured", False),
-                        "run_on_configured": isinstance(entry.get("raw"), dict)
-                        and "run_on" in entry["raw"],
-                        "index": entry.get("index"),
-                    })
-        return solutions
+def _require_schema_config(config):
+    if not isinstance(config, dict):
+        raise ValueError("Workspace Schema v1 problem config is required")
+    if config.get("schema_version") != 1:
+        raise ValueError("unsupported problem schema_version; migrate to Workspace Schema v1")
+    return config
 
-    search_dir = os.path.join(prob_dir, "code")
-    if not os.path.isdir(search_dir):
-        search_dir = prob_dir
-    for file_name in os.listdir(search_dir):
-        if not file_name.endswith(".cpp") or file_name == "validator.cpp":
-            continue
-        for kind in solutions:
-            if file_name.startswith(kind):
+
+def discover_solution_entries(prob_dir, config=None):
+    config = _require_schema_config(config)
+    solutions = {"std": [], "brute": [], "wrong": []}
+    for kind, entries in normalize_solution_entries(config).items():
+        for entry in entries:
+            source_path = resolve_problem_path(prob_dir, entry.get("file"))
+            if source_path:
                 solutions[kind].append({
-                    "path": os.path.join(search_dir, file_name),
-                    "file": f"code/{file_name}" if os.path.basename(search_dir) == "code" else file_name,
-                    "expected": _normalize_expected(kind, None),
-                    "run_on": None,
-                    "run_on_error": None,
-                    "expected_groups_configured": False,
-                    "run_on_configured": False,
-                    "index": len(solutions[kind]),
+                    "path": source_path,
+                    "file": entry.get("file"),
+                    "expected": entry.get("expected"),
+                    "run_on": entry.get("run_on"),
+                    "run_on_error": entry.get("run_on_error"),
+                    "expected_groups_configured": entry.get("expected_groups_configured", False),
+                    "run_on_configured": isinstance(entry.get("raw"), dict)
+                    and "run_on" in entry["raw"],
+                    "index": entry.get("index"),
                 })
-                break
     return solutions
 
 
@@ -640,87 +627,37 @@ def discover_solution_sources(prob_dir, config=None):
     }
 
 def discover_validator_source(prob_dir, config=None):
-    if config is not None:
-        return resolve_problem_path(prob_dir, ((config.get("judge") or {}).get("validator")))
-    code_validator = os.path.join(prob_dir, "code", "validator.cpp")
-    if os.path.isfile(code_validator):
-        return code_validator
-    return os.path.join(prob_dir, "validator.cpp")
+    config = _require_schema_config(config)
+    return resolve_problem_path(prob_dir, ((config.get("judge") or {}).get("validator")))
 
 
 def configured_judge_type(config=None):
-    if config is None:
-        return "standard"
+    config = _require_schema_config(config)
     value = str(((config.get("judge") or {}).get("type", "standard"))).strip().lower()
     return "custom" if value == "checker" else value
 
 
 def discover_judge_source(prob_dir, config, key):
-    if config is not None:
-        return resolve_problem_path(prob_dir, ((config.get("judge") or {}).get(key)))
-    candidate = os.path.join(prob_dir, "code", f"{key}.cpp")
-    if os.path.isfile(candidate):
-        return candidate
-    return os.path.join(prob_dir, f"{key}.cpp")
+    config = _require_schema_config(config)
+    return resolve_problem_path(prob_dir, ((config.get("judge") or {}).get(key)))
 
 
 def read_problem_limits(prob_dir, config=None):
+    config = _require_schema_config(config)
     time_limit = DEFAULT_TIME_LIMIT
     memory_limit = DEFAULT_MEMORY_LIMIT
-    has_meta_time_limit = False
-    has_meta_memory_limit = False
-
-    if config is not None:
-        limits = config.get("limits") or {}
-        if "time" in limits:
-            time_limit = _safe_float(limits.get("time"), time_limit)
-            has_meta_time_limit = True
-        if "memory" in limits:
-            memory_limit = _safe_int(limits.get("memory"), memory_limit)
-            has_meta_memory_limit = True
-
-    meta_path = os.path.join(prob_dir, "meta.json")
-    if (not has_meta_time_limit or not has_meta_memory_limit) and os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            problem = meta.get("problem", {})
-            if not has_meta_time_limit and "time_limit" in problem:
-                time_limit = _safe_float(problem.get("time_limit"), time_limit)
-                has_meta_time_limit = True
-            if not has_meta_memory_limit and "memory_limit" in problem:
-                memory_limit = _safe_int(problem.get("memory_limit"), memory_limit)
-                has_meta_memory_limit = True
-        except Exception:
-            pass
-
-    ini_path = os.path.join(prob_dir, "domjudge-problem.ini")
-    if not has_meta_time_limit and os.path.exists(ini_path):
-        try:
-            with open(ini_path, "r", encoding="utf-8") as f:
-                text = f.read()
-            m = re.search(r"timelimit\s*=\s*['\"]?([0-9.]+)", text)
-            if m:
-                time_limit = _safe_float(m.group(1), time_limit)
-        except Exception:
-            pass
-
-    yaml_path = os.path.join(prob_dir, "problem.yaml")
-    if not has_meta_memory_limit and os.path.exists(yaml_path):
-        try:
-            with open(yaml_path, "r", encoding="utf-8") as f:
-                text = f.read()
-            m = re.search(r"(?m)^\s*memory\s*:\s*([0-9]+)", text)
-            if m:
-                memory_limit = _safe_int(m.group(1), memory_limit)
-        except Exception:
-            pass
+    limits = config.get("limits") or {}
+    if "time" in limits:
+        time_limit = _safe_float(limits.get("time"), time_limit)
+    if "memory" in limits:
+        memory_limit = _safe_int(limits.get("memory"), memory_limit)
 
     return max(time_limit, 0.1), max(memory_limit, 1)
 
 
 def read_problem_output_limit(prob_dir, config=None):
-    limits = (config or {}).get("limits") or {}
+    config = _require_schema_config(config)
+    limits = config.get("limits") or {}
     output_limit = _safe_int(limits.get("output"), DEFAULT_OUTPUT_LIMIT)
     process_limit = _safe_int(limits.get("processes"), DEFAULT_PROCESS_LIMIT)
     return max(output_limit, 1), max(process_limit, 1)
@@ -998,7 +935,7 @@ def run_custom_testcase(
     process_limit=DEFAULT_PROCESS_LIMIT,
     capture_sample_answer=False,
 ):
-    """Run a contestant and adapt the shared Checker result to the legacy tuple."""
+    """Run a contestant and adapt the shared Checker result to the tuple API."""
     output_file = _temporary_output_path(bin_path)
     try:
         status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
@@ -1245,9 +1182,9 @@ def collect_testcases(prob_dir, config=None):
 
 
 def _select_expectation_cases(kind, entry, testcases, group_definitions):
-    # A full-range accepted remains the correctness baseline even if a legacy
-    # configuration accidentally carries expected.groups. Partial accepted
-    # entries are distinguishable by their explicit run_on domain.
+    # A full-range accepted remains the correctness baseline even if a
+    # configuration carries expected.groups. Partial accepted entries are
+    # distinguishable by their explicit run_on domain.
     if kind == "std" and entry.get("run_on") is None:
         return list(testcases), []
     return select_expectation_cases(kind, entry, testcases, group_definitions)
@@ -1915,6 +1852,22 @@ def _main_unlocked():
         config = read_probhub_config(prob_dir)
     except ValueError as exc:
         finish(reporter, False, str(exc), 1)
+    if config is None:
+        finish(
+            reporter,
+            False,
+            "Workspace Schema v1 problem config is required; Legacy workflow is no longer supported",
+            1,
+            "migration_required",
+        )
+    if config.get("schema_version") != 1:
+        finish(
+            reporter,
+            False,
+            "unsupported problem schema_version; migrate to Workspace Schema v1",
+            1,
+            "unsupported_schema",
+        )
 
     judge_type = configured_judge_type(config)
     data_config = (config or {}).get("data") or {}

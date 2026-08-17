@@ -71,7 +71,6 @@ WEBUI_CSRF_TOKEN = secrets.token_urlsafe(32)
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
-BASE_DIR = "typst-statement"
 SANDBOX_JOBS = {}
 SANDBOX_LOCK = Lock()
 SANDBOX_PROCESSES = {}
@@ -235,15 +234,34 @@ def add_webui_security_headers(response):
     return response
 
 
-def secure_path(subtitle, filename):
-    """安全路径拼接，防止路径穿越攻击"""
-    if not subtitle or '..' in subtitle or '/' in subtitle or '\\' in subtitle:
-        raise ValueError("Invalid subtitle")
-    return os.path.join(BASE_DIR, subtitle, filename)
-
-
 def _schema_workspace(subtitle):
-    return schema_workspace_for_subtitle(Path.cwd(), subtitle)
+    workspace_path = Path.cwd() / ".probhub" / "workspace.yaml"
+    if not workspace_path.is_file():
+        raise ProbHubError(
+            "Workspace Schema v1 is required; migrate this old workspace first",
+            code="migration_required",
+        )
+    schema = schema_workspace_for_subtitle(Path.cwd(), subtitle)
+    if schema is None:
+        raise ProbHubError(
+            f"unknown Schema v1 subtitle: {subtitle}",
+            code="unknown_subtitle",
+        )
+    return schema
+
+
+def _schema_typst_dir(subtitle):
+    root, workspace = _schema_workspace(subtitle)
+    relative = Path((workspace.get("typst") or {}).get("directory", "typst-statement/正式赛"))
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ProbHubError(
+            "workspace Typst directory must stay inside the workspace",
+            code="invalid_workspace_path",
+        ) from exc
+    return root, workspace, candidate
 
 
 def _preview_pdf_path(subtitle):
@@ -296,87 +314,6 @@ def _normalized_config_path(entry):
     return str(path).replace("\\", "/") if path else None
 
 
-def read_problem_limits_from_dir(prob_dir):
-    time_limit = 1.0
-    memory_limit = 256
-    has_meta_time_limit = False
-    has_meta_memory_limit = False
-
-    config = read_probhub_config_from_dir(prob_dir)
-    if config is not None:
-        limits = config.get("limits") or {}
-        try:
-            if "time" in limits:
-                time_limit = float(limits.get("time"))
-                has_meta_time_limit = True
-            if "memory" in limits:
-                memory_limit = int(float(limits.get("memory")))
-                has_meta_memory_limit = True
-        except (TypeError, ValueError):
-            pass
-
-    meta_path = os.path.join(prob_dir, "meta.json")
-    if (not has_meta_time_limit or not has_meta_memory_limit) and os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            problem = meta.get("problem", {})
-            if not has_meta_time_limit and "time_limit" in problem:
-                time_limit = float(problem.get("time_limit"))
-                has_meta_time_limit = True
-            if not has_meta_memory_limit and "memory_limit" in problem:
-                memory_limit = int(float(problem.get("memory_limit")))
-                has_meta_memory_limit = True
-        except (TypeError, ValueError, OSError, json.JSONDecodeError):
-            pass
-
-    ini_path = os.path.join(prob_dir, "domjudge-problem.ini")
-    if not has_meta_time_limit and os.path.exists(ini_path):
-        try:
-            with open(ini_path, "r", encoding="utf-8") as f:
-                text = f.read()
-            m = re.search(r"timelimit\s*=\s*['\"]?([0-9.]+)", text)
-            if m:
-                time_limit = float(m.group(1))
-        except (TypeError, ValueError, OSError):
-            pass
-
-    yaml_path = os.path.join(prob_dir, "problem.yaml")
-    if not has_meta_memory_limit and os.path.exists(yaml_path):
-        try:
-            with open(yaml_path, "r", encoding="utf-8") as f:
-                text = f.read()
-            m = re.search(r"(?m)^\s*memory\s*:\s*([0-9]+)", text)
-            if m:
-                memory_limit = int(m.group(1))
-        except (TypeError, ValueError, OSError):
-            pass
-
-    time_limit = max(time_limit, 0.1)
-    memory_limit = max(memory_limit, 1)
-    if float(time_limit).is_integer():
-        time_limit = int(time_limit)
-    return time_limit, memory_limit
-
-
-def enrich_problem_limits(problem_entries):
-    name_to_dir = find_problem_dirs()
-    for entry in problem_entries:
-        problem = entry.setdefault("problem", {})
-        if "time_limit" in problem and "memory_limit" in problem:
-            continue
-        display_name = problem.get("display_name", "")
-        prob_dir = name_to_dir.get(display_name)
-        if prob_dir:
-            time_limit, memory_limit = read_problem_limits_from_dir(prob_dir)
-        else:
-            time_limit, memory_limit = problem_limits(entry)
-        if "time_limit" not in problem:
-            problem["time_limit"] = time_limit
-        if "memory_limit" not in problem:
-            problem["memory_limit"] = memory_limit
-    return problem_entries
-
 # ==========================================
 # 前端 UI 模板 (TailwindCSS + Alpine.js + SortableJS + Marked + MathJax)
 # ==========================================
@@ -424,12 +361,13 @@ def webui_asset(filename):
 
 @app.route('/api/subtitles', methods=['GET'])
 def get_subtitles():
-    """动态扫描 typst-statement 目录下所有的子文件夹（即排版集）"""
-    if not os.path.exists(BASE_DIR):
-        return jsonify([])
-    # 仅返回是目录的名称
-    subs = [d for d in os.listdir(BASE_DIR) if os.path.isdir(os.path.join(BASE_DIR, d))]
-    return jsonify(sorted(subs))
+    """Return the Schema v1 Typst collection configured by the workspace."""
+    try:
+        _, workspace = load_workspace(Path.cwd(), allow_empty=True)
+        typst_dir = Path((workspace.get("typst") or {}).get("directory", "typst-statement/正式赛"))
+        return jsonify([typst_dir.name])
+    except ProbHubError as exc:
+        return jsonify({"success": False, "error": str(exc), "code": "migration_required"}), 409
 
 @app.route('/api/data', methods=['GET'])
 def get_data():
@@ -437,27 +375,19 @@ def get_data():
     if not subtitle:
         return jsonify([])
     try:
-        schema = _schema_workspace(subtitle)
-        if schema is not None:
-            root, workspace = schema
-            return jsonify(load_editor_data(root, workspace))
-        json_path = secure_path(subtitle, "problems.json")
-        if not os.path.exists(json_path):
-            return jsonify([])
-        with open(json_path, 'r', encoding='utf-8') as f:
-            return jsonify(enrich_problem_limits(json.load(f)))
+        root, workspace = _schema_workspace(subtitle)
+        return jsonify(load_editor_data(root, workspace))
+    except ProbHubError as exc:
+        return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
     except Exception as e:
         print(f"[-] Data Load Error: {e}")
-        return jsonify([])
+        return jsonify({"success": False, "error": str(e), "code": "data_load_failed"}), 500
 
 
 @app.route('/api/problem-assets/<subtitle>/<problem_id>/<path:asset_path>', methods=['GET'])
 def get_problem_asset(subtitle, problem_id, asset_path):
     try:
-        schema = _schema_workspace(subtitle)
-        if schema is None:
-            return "Not found", 404
-        root, workspace = schema
+        root, workspace = _schema_workspace(subtitle)
         return send_file(statement_asset_path(root, workspace, problem_id, asset_path))
     except (ProbHubError, OSError, ValueError):
         return "Not found", 404
@@ -472,28 +402,13 @@ def save_data():
         return jsonify({"success": False, "error": "Missing subtitle"})
         
     try:
-        schema = _schema_workspace(subtitle)
-        if schema is not None:
-            root, _ = schema
-            with workspace_build_lock(root):
-                _, live_workspace = load_workspace(root)
-                problems = save_editor_data(root, live_workspace, new_data)
-            return jsonify({"success": True, "problems": problems})
-        json_path = secure_path(subtitle, "problems.json")
-        for entry in new_data:
-            entry.setdefault("problem", {})
-            time_limit, memory_limit = problem_limits(entry)
-            entry["problem"]["time_limit"] = time_limit
-            entry["problem"]["memory_limit"] = memory_limit
-        os.makedirs(os.path.dirname(json_path), exist_ok=True)
-        tmp_path = json_path + '.tmp'
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(new_data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, json_path)  # atomic replace
-        sync_problem_limits_to_files(new_data)
-        return jsonify({"success": True})
+        root, _ = _schema_workspace(subtitle)
+        with workspace_build_lock(root):
+            _, live_workspace = load_workspace(root)
+            problems = save_editor_data(root, live_workspace, new_data)
+        return jsonify({"success": True, "problems": problems})
     except ProbHubError as e:
-        status = 409 if e.code in {"source_conflict", "build_busy"} else 400
+        status = 409 if e.code in {"source_conflict", "build_busy", "migration_required", "unknown_subtitle"} else 400
         return jsonify({"success": False, "error": str(e), "code": e.code}), status
     except Exception as e:
         print(f"[-] Save Data Error: {e}")
@@ -549,38 +464,26 @@ def compile_pdf():
     if not subtitle:
         return jsonify({"success": False, "error": "Missing subtitle"})
     try:
-        schema = _schema_workspace(subtitle)
-        if schema is not None:
-            root, _ = schema
-            with workspace_build_lock(root):
-                _, live_workspace = load_workspace(root)
-                entries = problem_entries(live_workspace)
-                plan = create_build_plan(root, live_workspace, entries)
-                with create_build_snapshot(plan) as snapshot:
-                    _, staged_pdf, _ = compile_collection(
-                        snapshot.root,
-                        snapshot.workspace,
-                        snapshot.loaded_problems,
-                    )
-                    preview_pdf = _preview_pdf_path(subtitle)
-                    preview_pdf.parent.mkdir(parents=True, exist_ok=True)
-                    temporary = preview_pdf.with_suffix(".pdf.tmp")
-                    shutil.copyfile(staged_pdf, temporary)
-                    os.replace(temporary, preview_pdf)
-            return jsonify({"success": True, "preview": True})
-        typst_main = secure_path(subtitle, "main.typ")
-        ret = subprocess.run(
-            ["typst", "compile", "--root", ".", typst_main],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-        )
-        return jsonify({"success": True, "stdout": ret.stdout, "stderr": ret.stderr})
+        root, _ = _schema_workspace(subtitle)
+        with workspace_build_lock(root):
+            _, live_workspace = load_workspace(root)
+            entries = problem_entries(live_workspace)
+            plan = create_build_plan(root, live_workspace, entries)
+            with create_build_snapshot(plan) as snapshot:
+                _, staged_pdf, _ = compile_collection(
+                    snapshot.root,
+                    snapshot.workspace,
+                    snapshot.loaded_problems,
+                )
+                preview_pdf = _preview_pdf_path(subtitle)
+                preview_pdf.parent.mkdir(parents=True, exist_ok=True)
+                temporary = preview_pdf.with_suffix(".pdf.tmp")
+                shutil.copyfile(staged_pdf, temporary)
+                os.replace(temporary, preview_pdf)
+        return jsonify({"success": True, "preview": True})
     except ProbHubError as e:
         detail = analyze_compile_error(str(e))
-        status = 409 if e.code in {"artifact_busy", "build_busy", "inputs_changed"} else 400
+        status = 409 if e.code in {"artifact_busy", "build_busy", "inputs_changed", "migration_required", "unknown_subtitle"} else 400
         return jsonify({"success": False, "error": str(e), "code": e.code, **detail}), status
     except FileNotFoundError as e:
         detail = analyze_compile_error("typst not found")
@@ -593,198 +496,50 @@ def compile_pdf():
 
 @app.route('/api/distribute', methods=['POST'])
 def distribute_pdfs():
-    """仅分发单题 PDF + 注入同名 zip，不编译。"""
+    """Use the Schema v1 Core to build and publish the configured collection."""
     payload = request.json
     subtitle = payload.get('subtitle')
     if not subtitle:
         return jsonify({"success": False, "error": "Missing subtitle"})
     try:
-        schema = _schema_workspace(subtitle)
-        if schema is not None:
-            root, workspace = schema
-            result = build_workspace(root, workspace, problem_entries(workspace))
-            distributed = [
-                {
-                    "name": problem_id,
-                    "status": "ok",
-                    "dir": str(Path(details["path"]).parent),
-                    "zip": "verified",
-                }
-                for problem_id, details in result["pdfs"].items()
-            ]
-            return jsonify({
-                "success": True,
-                "distributed": distributed,
-                "batch_id": result["batch_id"],
-            })
-        dist_results = distribute_problems(subtitle)
-        return jsonify({"success": True, "distributed": dist_results})
+        root, workspace = _schema_workspace(subtitle)
+        result = build_workspace(root, workspace, problem_entries(workspace))
+        distributed = [
+            {
+                "name": problem_id,
+                "status": "ok",
+                "dir": str(Path(details["path"]).parent),
+                "zip": "verified",
+            }
+            for problem_id, details in result["pdfs"].items()
+        ]
+        return jsonify({
+            "success": True,
+            "distributed": distributed,
+            "batch_id": result["batch_id"],
+        })
     except ProbHubError as e:
-        status = 409 if e.code in {"artifact_busy", "build_busy", "inputs_changed"} else 400
+        status = 409 if e.code in {"artifact_busy", "build_busy", "inputs_changed", "migration_required", "unknown_subtitle"} else 400
         return jsonify({"success": False, "error": str(e), "code": e.code}), status
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
 
-def find_problem_dirs():
-    """Scan workspace root for problem directories (must contain meta.json and data/)."""
-    problem_dirs = {}
-    for entry in os.listdir("."):
-        if not os.path.isdir(entry):
-            continue
-        meta = os.path.join(entry, "meta.json")
-        data_dir = os.path.join(entry, "data")
-        if os.path.isfile(meta) and os.path.isdir(data_dir):
-            try:
-                with open(meta, "r", encoding="utf-8") as f:
-                    info = json.load(f)
-                name = info.get("problem", {}).get("display_name", "")
-                if name:
-                    problem_dirs[name] = entry
-            except Exception:
-                pass
-    return problem_dirs
-
-
-def _zip_candidate_names(base, filename):
-    return {filename, f"{base}/{filename}"}
-
-
-def _zip_preferred_arcname(infos, base, filename):
-    names = {item.filename for item in infos}
-    if filename in names:
-        return filename
-    based = f"{base}/{filename}"
-    if based in names:
-        return based
-    root_style_markers = {"problem.yaml", "domjudge-problem.ini", "problem.pdf", "data/"}
-    if any(name in root_style_markers or name.startswith("data/") for name in names):
-        return filename
-    if any(name.startswith(f"{base}/") for name in names):
-        return based
-    return filename
-
-
-def sync_problem_limits_to_files(problem_entries):
-    """Best-effort sync of per-problem limits to meta.json and DOMjudge config files."""
-    name_to_dir = find_problem_dirs()
-    for entry in problem_entries:
-        display_name = entry.get("problem", {}).get("display_name", "")
-        prob_dir = name_to_dir.get(display_name)
-        if not prob_dir:
-            continue
-        time_limit, memory_limit = problem_limits(entry)
-
-        meta_path = os.path.join(prob_dir, "meta.json")
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                meta.setdefault("problem", {})
-                meta["problem"]["time_limit"] = time_limit
-                meta["problem"]["memory_limit"] = memory_limit
-                tmp = meta_path + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(meta, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, meta_path)
-            except Exception as e:
-                print(f"[-] Limit sync meta failed for {prob_dir}: {e}")
-
-        ini_path = os.path.join(prob_dir, "domjudge-problem.ini")
-        try:
-            if os.path.exists(ini_path):
-                with open(ini_path, "r", encoding="utf-8") as f:
-                    text = f.read()
-                if re.search(r"(?m)^timelimit\s*=", text):
-                    text = re.sub(r"(?m)^timelimit\s*=.*$", f"timelimit='{time_limit:g}'", text)
-                else:
-                    text = (text.rstrip() + f"\ntimelimit='{time_limit:g}'\n").lstrip()
-            else:
-                text = f"timelimit='{time_limit:g}'\n"
-            with open(ini_path, "w", encoding="utf-8") as f:
-                f.write(text)
-        except Exception as e:
-            print(f"[-] Limit sync ini failed for {prob_dir}: {e}")
-
-        yaml_path = os.path.join(prob_dir, "problem.yaml")
-        try:
-            if os.path.exists(yaml_path):
-                with open(yaml_path, "r", encoding="utf-8") as f:
-                    text = f.read()
-                if re.search(r"(?m)^\s*memory\s*:", text):
-                    text = re.sub(r"(?m)^(\s*)memory\s*:.*$", rf"\1memory: {memory_limit}", text)
-                elif re.search(r"(?m)^limits\s*:", text):
-                    text = re.sub(r"(?m)^limits\s*:\s*$", f"limits:\n  memory: {memory_limit}", text)
-                else:
-                    text = text.rstrip() + f"\nlimits:\n  memory: {memory_limit}\n"
-            else:
-                safe_name = str(display_name).replace("'", "''")
-                text = f"name: '{safe_name}'\nlimits:\n  memory: {memory_limit}\n"
-            with open(yaml_path, "w", encoding="utf-8") as f:
-                f.write(text)
-        except Exception as e:
-            print(f"[-] Limit sync yaml failed for {prob_dir}: {e}")
-
-        zip_path = os.path.join(os.path.basename(os.path.normpath(prob_dir)) + ".zip")
-        if os.path.exists(zip_path):
-            try:
-                import zipfile as zf
-                base = os.path.basename(os.path.normpath(prob_dir))
-                replacements = {}
-                for filename in ("domjudge-problem.ini", "problem.yaml"):
-                    path = os.path.join(prob_dir, filename)
-                    if os.path.exists(path):
-                        with open(path, "rb") as f:
-                            replacements[filename] = f.read()
-                if replacements:
-                    tmp = zip_path + ".tmp"
-                    with zf.ZipFile(zip_path, "r") as zin, zf.ZipFile(tmp, "w", compression=zf.ZIP_DEFLATED) as zout:
-                        infos = zin.infolist()
-                        arc_replacements = {
-                            _zip_preferred_arcname(infos, base, filename): content
-                            for filename, content in replacements.items()
-                        }
-                        skip_names = set()
-                        for filename in replacements:
-                            skip_names.update(_zip_candidate_names(base, filename))
-                        for item in zin.infolist():
-                            if item.filename not in skip_names:
-                                zout.writestr(item, zin.read(item.filename))
-                        for arcname, content in arc_replacements.items():
-                            zout.writestr(arcname, content)
-                    os.replace(tmp, zip_path)
-            except Exception as e:
-                print(f"[-] Limit sync zip failed for {prob_dir}: {e}")
-
-
 def _load_problem_by_index(subtitle, index):
-    schema = _schema_workspace(subtitle)
-    if schema is not None:
-        root, workspace = schema
-        entries = problem_entries(workspace)
-        if index < 0 or index >= len(entries):
-            raise ValueError("Problem index out of range")
-        data = load_editor_data(root, workspace)
-        return data[index]
-    json_path = secure_path(subtitle, "problems.json")
-    with open(json_path, "r", encoding="utf-8") as f:
-        problems = json.load(f)
-    if index < 0 or index >= len(problems):
+    root, workspace = _schema_workspace(subtitle)
+    entries = problem_entries(workspace)
+    if index < 0 or index >= len(entries):
         raise ValueError("Problem index out of range")
-    return problems[index]
+    data = load_editor_data(root, workspace)
+    return data[index]
 
 
 def _sandbox_problem_info(subtitle, index):
     problem = _load_problem_by_index(subtitle, index)
     display_name = problem.get("problem", {}).get("display_name", "")
-    schema = _schema_workspace(subtitle)
-    if schema is not None:
-        root, workspace = schema
-        entries = problem_entries(workspace)
-        prob_dir = str(root / entries[index].get("directory", entries[index]["id"]))
-    else:
-        name_to_dir = find_problem_dirs()
-        prob_dir = name_to_dir.get(display_name)
+    root, workspace = _schema_workspace(subtitle)
+    entries = problem_entries(workspace)
+    prob_dir = str(root / entries[index].get("directory", entries[index]["id"]))
     info = {
         "name": display_name,
         "matched": bool(prob_dir),
@@ -822,44 +577,33 @@ def _sandbox_problem_info(subtitle, index):
             info["files_truncated"] = True
 
     config = read_probhub_config_from_dir(prob_dir)
-    if config is not None:
-        judge = config.get("judge") or {}
-        validator = _normalized_config_path(judge.get("validator"))
-        if validator and os.path.isfile(os.path.join(prob_dir, validator)):
-            info["files"]["validator"] = validator
+    if config is None:
+        info["reason"] = "migration_required"
+        return info
+    if config.get("schema_version") != 1:
+        info["reason"] = "unsupported_schema"
+        return info
 
-        solutions = config.get("solutions") or {}
-        configured = set()
-        for config_key, display_key in (("accepted", "std"), ("brute", "brute"), ("wrong", "wrong")):
-            for entry in _config_entries(solutions.get(config_key)):
-                source = _normalized_config_path(entry)
-                if source and os.path.isfile(os.path.join(prob_dir, source)):
-                    configured.add(source)
-                    add_file(display_key, source)
+    judge = config.get("judge") or {}
+    validator = _normalized_config_path(judge.get("validator"))
+    if validator and os.path.isfile(os.path.join(prob_dir, validator)):
+        info["files"]["validator"] = validator
 
-        if info["files"]["validator"]:
-            configured.add(info["files"]["validator"])
-        for entry in _config_entries(config.get("generators")):
+    solutions = config.get("solutions") or {}
+    configured = set()
+    for config_key, display_key in (("accepted", "std"), ("brute", "brute"), ("wrong", "wrong")):
+        for entry in _config_entries(solutions.get(config_key)):
             source = _normalized_config_path(entry)
-            if source and source not in configured and os.path.isfile(os.path.join(prob_dir, source)):
-                add_file("other", source)
-    else:
-        with os.scandir(prob_dir) as entries:
-            for entry in entries:
-                file = entry.name
-                if not entry.is_file() or not file.endswith(".cpp"):
-                    continue
-                if file == "validator.cpp":
-                    info["files"]["validator"] = file
-                elif file.startswith("std"):
-                    add_file("std", file)
-                elif file.startswith("brute"):
-                    add_file("brute", file)
-                elif file.startswith("wrong"):
-                    add_file("wrong", file)
-                else:
-                    add_file("other", file)
+            if source and os.path.isfile(os.path.join(prob_dir, source)):
+                configured.add(source)
+                add_file(display_key, source)
 
+    if info["files"]["validator"]:
+        configured.add(info["files"]["validator"])
+    for entry in _config_entries(config.get("generators")):
+        source = _normalized_config_path(entry)
+        if source and source not in configured and os.path.isfile(os.path.join(prob_dir, source)):
+            add_file("other", source)
     info["runnable"] = info["script_exists"] and info["data_count"] > 0
     return info
 
@@ -1980,172 +1724,14 @@ def submission_cancel(job_id):
     return jsonify({"success": True, "status": status, "verdict": verdict})
 
 
-def inject_pdf_to_zip(pdf_path, prob_dir):
-    """将 problem.pdf 注入同名的 .zip 压缩包（如果存在）。"""
-    import zipfile as zf
-    base = os.path.basename(os.path.normpath(prob_dir))
-    zip_path = os.path.join(base + ".zip")
-    if not os.path.exists(zip_path):
-        return None
-    try:
-        tmp = zip_path + ".tmp"
-        with zf.ZipFile(zip_path, "r") as zin, zf.ZipFile(tmp, "w", compression=zf.ZIP_DEFLATED) as zout:
-            infos = zin.infolist()
-            arcname = _zip_preferred_arcname(infos, base, "problem.pdf")
-            skip_names = _zip_candidate_names(base, "problem.pdf")
-            for item in zin.infolist():
-                if item.filename not in skip_names:
-                    zout.writestr(item, zin.read(item.filename))
-            zout.write(pdf_path, arcname)
-        os.replace(tmp, zip_path)
-        return "updated"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def distribute_problems(subtitle):
-    """Run extract_new_problem.py for each problem in the current subtitle."""
-    # Find the extract script (same dir as this ui.py or in skill scripts)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    extract_script = os.path.join(script_dir, "extract_new_problem.py")
-
-    # If not in workspace, look in skill scripts
-    if not os.path.exists(extract_script):
-        skill_scripts = os.path.join(
-            os.path.expanduser("~"), ".claude", "skills", "probhub", "scripts", "extract_new_problem.py"
-        )
-        if os.path.exists(skill_scripts):
-            extract_script = skill_scripts
-        else:
-            return {"error": "extract_new_problem.py not found"}
-
-    # Match problem names to directories
-    name_to_dir = find_problem_dirs()
-
-    # Read current problems.json to get active problems in order
-    typst_subdir = os.path.join(BASE_DIR, subtitle)
-    problems_json = os.path.join(typst_subdir, "problems.json")
-    if not os.path.exists(problems_json):
-        return {"error": "problems.json not found"}
-
-    with open(problems_json, "r", encoding="utf-8") as f:
-        problems = json.load(f)
-
-    results = []
-    for p in problems:
-        display_name = p.get("problem", {}).get("display_name", "")
-        if not display_name:
-            results.append({"name": "?", "status": "skipped", "reason": "no display_name"})
-            continue
-        prob_dir = name_to_dir.get(display_name)
-        if not prob_dir:
-            results.append({"name": display_name, "status": "skipped", "reason": "no matching directory"})
-            continue
-
-        typst_dir = os.path.join(BASE_DIR, subtitle)
-        try:
-            subprocess.run(
-                [sys.executable, extract_script, typst_dir, prob_dir],
-                check=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
-            )
-            # Inject problem.pdf into matching .zip if it exists
-            pdf_path = os.path.join(prob_dir, "problem.pdf")
-            zip_status = inject_pdf_to_zip(pdf_path, prob_dir) if os.path.exists(pdf_path) else None
-            results.append({
-                "name": display_name, "status": "ok", "dir": prob_dir,
-                "zip": zip_status  # None=no zip, "updated"=done, "error:..."=fail
-            })
-        except subprocess.CalledProcessError as e:
-            results.append({"name": display_name, "status": "failed", "reason": e.stderr[:200]})
-
-    return results
-
-# ── Contest Config (main.typ + lib.typ) ──────────────────────────
-
-def _read_contest_config(subtitle):
-    """Parse main.typ and lib.typ, return config dict."""
-    main_path = secure_path(subtitle, "main.typ")
-    lib_path = os.path.join(BASE_DIR, "lib.typ")
-    config = {
-        "title": "", "subtitle": subtitle, "author": "", "date": "",
-        "logo": "usts.png", "logo_width": "9cm",
-        "logo_space_above": "0em", "logo_space_below": "0em",
-    }
-
-    if os.path.exists(main_path):
-        with open(main_path, "r", encoding="utf-8") as f:
-            text = f.read()
-        for key in ("title", "subtitle", "author", "date"):
-            m = re.search(rf'{key}:\s*"([^"]*)"', text)
-            if m:
-                config[key] = m.group(1)
-
-    if os.path.exists(lib_path):
-        with open(lib_path, "r", encoding="utf-8") as f:
-            text = f.read()
-        m = re.search(r'image\("([^"]+)"\s*(?:,\s*width:\s*([^,)]+))?', text)
-        if m:
-            config["logo"] = m.group(1)
-            if m.group(2):
-                config["logo_width"] = m.group(2).strip()
-        # Parse space above/below logo
-        # Look for v(Xem) on the line immediately before/after align(center, image(...))
-        m = re.search(r'v\(([^)]+)\)\s*(?://[^\n]*)?\s*\n\s*(?://[^\n]*\n\s*)?align\(center,\s*image\(', text)
-        if m:
-            config["logo_space_above"] = m.group(1).strip()
-        m = re.search(r'align\(center,\s*image\([^)]+\)\)\s*\n\s*v\(([^)]+)\)', text)
-        if m:
-            config["logo_space_below"] = m.group(1).strip()
-
-    return config
-
-
-def _write_contest_config(subtitle, config):
-    """Write updated values back to main.typ and lib.typ."""
-    main_path = secure_path(subtitle, "main.typ")
-    lib_path = os.path.join(BASE_DIR, "lib.typ")
-
-    if os.path.exists(main_path):
-        with open(main_path, "r", encoding="utf-8") as f:
-            text = f.read()
-        for key in ("title", "subtitle", "author", "date"):
-            if key in config:
-                text = re.sub(rf'({key}:\s*)"[^"]*"', rf'\1"{config[key]}"', text)
-        with open(main_path, "w", encoding="utf-8") as f:
-            f.write(text)
-
-    if os.path.exists(lib_path):
-        with open(lib_path, "r", encoding="utf-8") as f:
-            text = f.read()
-        logo = config.get("logo", "usts.png")
-        width = config.get("logo_width", "9cm")
-        space_above = config.get("logo_space_above", "0em")
-        space_below = config.get("logo_space_below", "0em")
-        # Update image path/width
-        text = re.sub(r'image\("[^"]+"\s*(?:,\s*width:\s*[^,)]+)?', f'image("{logo}", width: {width}', text)
-        # Update space above logo (v() before align(center, image())
-        text = re.sub(
-            r'v\([^)]+\)(\s*(?://[^\n]*)?\s*\n\s*(?://[^\n]*\n\s*)?align\(center,\s*image\()',
-            f'v({space_above})\\1', text
-        )
-        # Update space below logo (v() after image line)
-        text = re.sub(
-            r'(align\(center,\s*image\([^)]+\)\)\s*\n\s*)v\([^)]+\)',
-            f'\\1v({space_below})', text
-        )
-        with open(lib_path, "w", encoding="utf-8") as f:
-            f.write(text)
-
-
 @app.route('/api/config/<subtitle>', methods=['GET'])
 def get_contest_config(subtitle):
     try:
-        defaults = _read_contest_config(subtitle)
-        schema = _schema_workspace(subtitle)
-        if schema is not None:
-            root, workspace = schema
-            return jsonify({"success": True, "config": load_contest_config(root, workspace, defaults)})
-        return jsonify({"success": True, "config": defaults})
+        root, workspace = _schema_workspace(subtitle)
+        return jsonify({"success": True, "config": load_contest_config(root, workspace, {})})
+    except ProbHubError as exc:
+        status = 409 if exc.code in {"migration_required", "unknown_subtitle"} else 400
+        return jsonify({"success": False, "error": str(exc), "code": exc.code}), status
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -2154,19 +1740,15 @@ def get_contest_config(subtitle):
 def save_contest_config(subtitle):
     try:
         config = request.json
-        schema = _schema_workspace(subtitle)
-        if schema is not None:
-            root, _ = schema
-            with workspace_build_lock(root):
-                _, live_workspace = load_workspace(root)
-                saved = save_schema_contest_config(root, live_workspace, config)
-            return jsonify({"success": True, "config": saved})
-        _write_contest_config(subtitle, config)
-        return jsonify({"success": True})
+        root, _ = _schema_workspace(subtitle)
+        with workspace_build_lock(root):
+            _, live_workspace = load_workspace(root)
+            saved = save_schema_contest_config(root, live_workspace, config)
+        return jsonify({"success": True, "config": saved})
     except RequestEntityTooLarge:
         raise
     except ProbHubError as e:
-        status = 409 if e.code in {"source_conflict", "build_busy"} else 400
+        status = 409 if e.code in {"source_conflict", "build_busy", "migration_required", "unknown_subtitle"} else 400
         return jsonify({"success": False, "error": str(e), "code": e.code}), status
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -2175,8 +1757,12 @@ def save_contest_config(subtitle):
 @app.route('/api/pdf-pages/<subtitle>')
 def pdf_page_count(subtitle):
     """Return the number of pages in main.pdf."""
+    try:
+        _, _, typst_dir = _schema_typst_dir(subtitle)
+    except ProbHubError as exc:
+        return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
     preview_path = _preview_pdf_path(subtitle)
-    pdf_path = str(preview_path if preview_path.is_file() else Path(secure_path(subtitle, "main.pdf")))
+    pdf_path = str(preview_path if preview_path.is_file() else typst_dir / "main.pdf")
     if not os.path.exists(pdf_path):
         return jsonify({"pages": 0})
     try:
@@ -2190,8 +1776,12 @@ def serve_pdf_page(subtitle, page):
     """Render a single PDF page through Poppler into the process temp cache."""
     from flask import send_file
 
+    try:
+        _, _, typst_dir = _schema_typst_dir(subtitle)
+    except ProbHubError as exc:
+        return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
     preview_path = _preview_pdf_path(subtitle)
-    pdf_path = str(preview_path if preview_path.is_file() else Path(secure_path(subtitle, "main.pdf")))
+    pdf_path = str(preview_path if preview_path.is_file() else typst_dir / "main.pdf")
     if not os.path.exists(pdf_path):
         return "PDF not compiled", 404
 

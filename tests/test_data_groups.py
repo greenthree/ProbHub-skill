@@ -104,12 +104,16 @@ class DataGroupExpectationUnitTests(unittest.TestCase):
         self.assertEqual(outcome["groups"], [])
         self.assertEqual(len(outcome["selected_cases"]), 3)
 
-    def test_legacy_string_solution_entries_remain_supported(self):
+    def test_string_solution_entries_remain_supported(self):
         with tempfile.TemporaryDirectory() as temp:
             problem = Path(temp)
             (problem / "code").mkdir()
             (problem / "code/std.cpp").write_text("int main(){}\n", encoding="utf-8")
-            entries = JUDGE.discover_solution_entries(str(problem), {"solutions": {"accepted": ["code/std.cpp"]}})
+            entries = JUDGE.discover_solution_entries(str(problem), {
+                "schema_version": 1,
+                "id": "A",
+                "solutions": {"accepted": ["code/std.cpp"]},
+            })
             self.assertEqual(entries["std"][0]["expected"]["status"], ["AC"])
             self.assertTrue(entries["std"][0]["expected"]["all"])
 
