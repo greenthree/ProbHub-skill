@@ -762,13 +762,11 @@ def _signal_matching_identity(identity):
         return status, None
     if identity.pid == os.getpid():
         return "unsafe", "refused to signal the ProbHub supervisor process"
-    try:
-        if os.getpgid(identity.pid) == os.getpgrp():
-            return "unsafe", "refused to signal the ProbHub supervisor process group"
-    except ProcessLookupError:
-        return "gone", None
-    except OSError as exc:
-        return "unavailable", f"cannot inspect process group for pid {identity.pid}: {exc}"
+
+    # A tracked child may share the supervisor's process group (notably a
+    # multiprocessing worker).  Whole-group signalling is guarded below, but
+    # an individually identity-checked child is safe to terminate here.  The
+    # supervisor PID itself is the only process we must refuse explicitly.
 
     pidfd_open = getattr(os, "pidfd_open", None)
     pidfd_signal = getattr(signal, "pidfd_send_signal", None)
@@ -827,17 +825,36 @@ def _terminate_posix_process_tree(
         try:
             root_group = os.getpgid(int(proc.pid))
             if root_group == os.getpgrp():
-                raise OSError("refused to signal the ProbHub supervisor process group")
-            os.killpg(root_group, signal.SIGKILL)
+                # The root may be a multiprocessing worker in the
+                # supervisor's group.  Do not kill the whole group; the root
+                # identity and observed descendants are handled individually.
+                pass
+            else:
+                os.killpg(root_group, signal.SIGKILL)
         except ProcessLookupError:
             pass
         except OSError as exc:
             errors.append(f"cannot terminate original process group {proc.pid}: {exc}")
 
+    # A root that shares the supervisor's process group cannot be handled by
+    # killpg.  Signal its captured identity individually; if a private group
+    # was killed above, this is an idempotent gone/already-signalled check.
+    if root_identity is not None:
+        status, detail = _signal_matching_identity(root_identity)
+        if status in {"error", "unsafe", "unavailable"}:
+            errors.append(detail or f"cannot confirm pid {root_identity.pid} identity")
+
     try:
         proc.wait(timeout=POSIX_CLEANUP_TIMEOUT_SECONDS)
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        errors.append(f"cannot reap managed process {proc.pid}: {exc}")
+    except (subprocess.TimeoutExpired, OSError):
+        # The identity signal above is the normal path for multiprocessing
+        # workers.  Keep a final adapter-level fallback for callers whose
+        # root identity was unavailable or whose process ignored the signal.
+        try:
+            proc.kill()
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"cannot reap managed process {proc.pid}: {exc}")
 
     for identity in tuple(identities.values()):
         status, detail = _signal_matching_identity(identity)
