@@ -23,7 +23,7 @@ import yaml
 
 from .errors import ProbHubError
 from .io import normalize_newlines as _normalize_newlines, read_yaml, write_json
-from .process_control import DEFAULT_PROCESS_LIMIT
+from .process_control import DEFAULT_PROCESS_LIMIT, PROCESS_CLEANUP_FAILED
 from .special_judges import run_checker_to_files
 from .source_diagnostics import diagnose_source, format_diagnostic
 from .stressing import _prepare_program, _run
@@ -791,6 +791,7 @@ def generate_problem_data(
                         "process_limit": "RE",
                         "start_error": "RE",
                         "output_control_error": "FAIL",
+                        PROCESS_CLEANUP_FAILED: "FAIL",
                     }.get(checked.get("execution_status"))
                     if legacy_execution_status:
                         failure["execution_status"] = legacy_execution_status

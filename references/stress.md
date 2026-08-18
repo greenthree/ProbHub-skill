@@ -52,7 +52,7 @@ limits:
   processes: 32  # 默认 32
 ```
 
-Generator、Validator、accepted、brute、Checker 与编译器全部使用共享进程树控制。accepted/brute 使用 `stress.time_limit` 与题目资源限制；Generator、Validator、Checker 使用 `stress.tool_timeout` 及有界内部诊断输出。一次执行的 stdout、stderr 与显式 Checker feedback 路径原子共享同一输出预算；完成、超时、取消和资源超限均在终止进程树后执行确定性前缀截断。accepted/brute 超限记为 `OLE`，官方工具超限或无法执行截断记为 `infrastructure`。即使某阶段的直接父进程已正常退出，其遗留后代仍会被清理。平台语义见 `references/process-control.md`。
+Generator、Validator、accepted、brute、Checker 与编译器全部使用共享进程树控制。accepted/brute 使用 `stress.time_limit` 与题目资源限制；Generator、Validator、Checker 使用 `stress.tool_timeout` 及有界内部诊断输出。一次执行的 stdout、stderr 与显式 Checker feedback 路径原子共享同一输出预算；完成、超时、取消和资源超限均在终止进程组后执行确定性前缀截断，并对采样期间观察到的脱离后代执行身份校验清理。accepted/brute 超限记为 `OLE`，官方工具超限或无法执行截断、确认清理失败记为 `infrastructure`。若后代在采样前快速双 fork 并重新建 session，ProbHub 不把本地流程冒充强容器；平台语义见 `references/process-control.md`。
 
 ### 自定义 Checker 配置
 
@@ -129,7 +129,7 @@ args: ["--seed", "{seed}", "--round", "{round}", "--size", "20"]
 4. brute 运行并产生待检查输出；
 5. 按 `judge.type` 比较两份输出。
 
-任一阶段失败或输出不匹配时停止，不再执行后续轮次，并保存首个反例。每个阶段都在完整进程树控制下运行；TLE、MLE、OLE、进程数超限或启动基础设施错误都会先清理所有后代再返回。
+任一阶段失败或输出不匹配时停止，不再执行后续轮次，并保存首个反例。每个阶段都在平台支持的进程组控制下运行，并清理采样期间确认的脱离后代；TLE、MLE、OLE、进程数超限或启动基础设施错误都会先完成清理闭环再返回。清理无法确认时返回 `infrastructure`，不保存为普通反例。
 
 ### `standard`
 

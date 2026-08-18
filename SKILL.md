@@ -275,7 +275,7 @@ probhub mutation L01 --operator comparison-boundary --no-cache
 - WebUI “编译”使用隔离快照和临时 PDF 预览；只有显式“分发”可调用 Core 正式 build。保存冲突以 `source_conflict` 返回，不得静默覆盖其他会话或 Agent 的修改。
 - Schema v1 WebUI 的临时提交评测只接受 UTF-8 `.cpp`，源码必须进入 `.probhub/submissions/<task-id>/` 独立目录；评测结束后清理，不得覆盖或修改题目原有 `code/`、数据、配置、答案和构建产物。
 - WebUI 上传提交时直接使用“沙箱评测”页；以编译事件、逐测试点事件和最终 verdict 为准，不得把上传代码加入 `solutions.accepted` 或写回 `probhub.yaml`。
-- 需要停止排队中或运行中的上传任务时使用页面“取消”按钮，并等待状态从 `CANCELLING` 进入 `CANCELLED`；不要手工删除仍在运行的任务目录。Core 会协作取消并在必要时强杀完整进程树。
+- 需要停止排队中或运行中的上传任务时使用页面“取消”按钮，并等待状态从 `CANCELLING` 进入 `CANCELLED`；不要手工删除仍在运行的任务目录。Core 会协作取消并按平台语义清理受控进程组及已观察脱离后代；无法确认清理时会报告基础设施失败。
 - 本地 WebUI 最多同时处理 8 个 HTTP 请求；完整沙箱与上传评测共用有界任务队列。`429` / `queue_full` 表示本机 worker 已满，应按 `retry_after` 稍后重试，不得把它冒充 Judge 失败或通过。完整沙箱同样支持取消，任务 deadline、日志截断或上传清理失败必须按结构化状态报告；清理失败时不得用 `cancelled` 或成功结果掩盖 `submission_cleanup_failed`。
 - WebUI 启动和接受新提交时会清理超过 24 小时且名称合法的遗留任务目录；陌生目录、符号链接和活动任务不得自动删除。
 - 没有 `.probhub/workspace.yaml` 时，WebUI、Judge 和构建命令必须 fail closed，并返回 `migration_required`；不得读取或写入旧 `meta.json`、`problems.json`、PDF、ZIP 或手工 DOMjudge 配置。

@@ -53,7 +53,7 @@ from probhub.process_control import (
     process_tree_metrics,
     process_alive,
     run_managed_to_files,
-    snapshot_process_tree,
+    snapshot_process_tree_identities,
     terminate_external_process_tree,
 )
 from probhub.solutions import normalize_solution_entries, resolve_solution_source
@@ -772,14 +772,25 @@ class _MultiprocessingProcessAdapter:
     def kill(self):
         self._process.kill()
 
+    def poll(self):
+        return None if self._process.is_alive() else self._process.exitcode
 
-def _stop_worker(process, known_pids=(), *, allow_descendant_claim=True):
-    known_pids = set(known_pids or ())
+
+def _capture_process_identities(pids):
+    identities = set()
+    for pid in pids:
+        identities.update(snapshot_process_tree_identities(pid))
+    return identities
+
+
+def _stop_worker(process, known_identities=(), *, allow_descendant_claim=True):
+    known_identities = set(known_identities or ())
     if process.pid:
-        known_pids.update(snapshot_process_tree(process.pid))
-    if process.is_alive():
-        terminate_external_process_tree(
-            _MultiprocessingProcessAdapter(process), known_pids
+        known_identities.update(snapshot_process_tree_identities(process.pid))
+    cleanup = {"ok": True}
+    if process.pid:
+        cleanup = terminate_external_process_tree(
+            _MultiprocessingProcessAdapter(process), known_identities
         )
     if process.is_alive():
         process.terminate()
@@ -788,7 +799,9 @@ def _stop_worker(process, known_pids=(), *, allow_descendant_claim=True):
         process.kill()
         process.join(timeout=1.0)
     cleanup_deadline = time.monotonic() + 10.0
-    external_pids = {pid for pid in known_pids if pid != process.pid}
+    external_pids = {
+        identity.pid for identity in known_identities if identity.pid != process.pid
+    }
     while (
         any(process_alive(pid) for pid in external_pids)
         and time.monotonic() < cleanup_deadline
@@ -798,6 +811,7 @@ def _stop_worker(process, known_pids=(), *, allow_descendant_claim=True):
     descendants_cleaned = (
         not process.is_alive()
         and not any(process_alive(pid) for pid in external_pids)
+        and bool(cleanup.get("ok", False))
     )
     return {
         "worker_stopped": worker_stopped,
@@ -857,7 +871,12 @@ def run_spawn_scheduler(
         process.start()
         child.close()
         processes.append(process)
-        active[task.index] = (process, parent, task, {process.pid})
+        active[task.index] = (
+            process,
+            parent,
+            task,
+            snapshot_process_tree_identities(process.pid),
+        )
 
     def sample_resources():
         nonlocal last_resource_sample
@@ -871,13 +890,13 @@ def run_spawn_scheduler(
         aggregate_rss_mb = 0.0
         observed_process = False
         rss_complete = True
-        for process, _connection, _task, known_pids in active.values():
+        for process, _connection, _task, known_identities in active.values():
             if process.pid and process.is_alive():
                 observed_process = True
-                known_pids.update(snapshot_process_tree(process.pid))
+                known_identities.update(snapshot_process_tree_identities(process.pid))
                 count, current_rss_mb = process_tree_metrics(process.pid)
                 if count is None:
-                    count = len(known_pids)
+                    count = len(known_identities)
                     resource_peak["fallback_samples"] += 1
                 else:
                     resource_peak["procfs_samples"] += 1
@@ -904,9 +923,9 @@ def run_spawn_scheduler(
             made_progress = False
             sample_resources()
             for index in sorted(tuple(active)):
-                process, connection, task, known_pids = active[index]
+                process, connection, task, known_identities = active[index]
                 if process.is_alive():
-                    known_pids.update(snapshot_process_tree(process.pid))
+                    known_identities.update(snapshot_process_tree_identities(process.pid))
                 if connection.poll():
                     try:
                         result = connection.recv()
@@ -920,7 +939,7 @@ def run_spawn_scheduler(
                     if process.is_alive():
                         stopped = _stop_worker(
                             process,
-                            known_pids,
+                            known_identities,
                             allow_descendant_claim=_can_claim_descendant_cleanup(task),
                         )
                         result.update(stopped)
@@ -945,7 +964,7 @@ def run_spawn_scheduler(
                     result["worker_cleaned"] = _parent_cleanup_worker(task)
                     stopped = _stop_worker(
                         process,
-                        known_pids,
+                        known_identities,
                         allow_descendant_claim=_can_claim_descendant_cleanup(task),
                     )
                     result.update(stopped)
@@ -972,18 +991,20 @@ def run_spawn_scheduler(
                 and now - cancellation_started >= cancel_grace
             ):
                 for index in sorted(tuple(active)):
-                    process, connection, task, known_pids = active[index]
+                    process, connection, task, known_identities = active[index]
                     stop_after = cancel_grace
                     if not _can_claim_descendant_cleanup(task):
                         stop_after += task.mutant_timeout
                     if now - cancellation_started < stop_after:
                         continue
                     del active[index]
-                    known_pids.update(_synthetic_registered_pids(task))
+                    known_identities.update(
+                        _capture_process_identities(_synthetic_registered_pids(task))
+                    )
                     connection.close()
                     stopped = _stop_worker(
                         process,
-                        known_pids,
+                        known_identities,
                         allow_descendant_claim=_can_claim_descendant_cleanup(task),
                     )
                     _parent_cleanup_worker(task)
@@ -1009,11 +1030,11 @@ def run_spawn_scheduler(
                 time.sleep(0.01)
     finally:
         cancel_event.set()
-        for process, connection, task, known_pids in active.values():
+        for process, connection, task, known_identities in active.values():
             connection.close()
             _stop_worker(
                 process,
-                known_pids,
+                known_identities,
                 allow_descendant_claim=_can_claim_descendant_cleanup(task),
             )
             _parent_cleanup_worker(task)

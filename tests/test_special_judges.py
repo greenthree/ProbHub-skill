@@ -67,6 +67,71 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
             self.assertIn("cannot enforce", message)
             self.assertEqual(details["termination_reason"], "output_control_error")
 
+    def test_process_cleanup_failure_is_infrastructure_fail(self):
+        execution = {
+            "reason": "process_cleanup_failed",
+            "returncode": 0,
+            "time": 0.01,
+            "memory": 1,
+            "memory_enforced": True,
+            "process_limit_enforced": True,
+            "output_bytes": 0,
+            "retained_output_bytes": 0,
+            "stdout_retained_bytes": 0,
+            "stderr_retained_bytes": 0,
+            "output_truncated": False,
+            "message": "descendant survived cleanup",
+        }
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            JUDGE_MODULE,
+            "run_managed_to_files",
+            return_value=execution,
+        ):
+            output = str(Path(temp) / "output.txt")
+            status, _, _, _, message, details = JUDGE_MODULE.run_program_to_file(
+                "unused", "unused", output
+            )
+        self.assertEqual(status, "FAIL")
+        self.assertIn("survived cleanup", message)
+        self.assertEqual(details["termination_reason"], "process_cleanup_failed")
+
+    def test_checker_process_cleanup_failure_is_supervisor_control_failure(self):
+        execution = {
+            "reason": "process_cleanup_failed",
+            "returncode": 0,
+            "time": 0.01,
+            "memory": 1,
+            "memory_enforced": True,
+            "process_limit_enforced": True,
+            "output_bytes": 0,
+            "retained_output_bytes": 0,
+            "stdout_retained_bytes": 0,
+            "stderr_retained_bytes": 0,
+            "output_truncated": False,
+            "message": "descendant survived cleanup",
+        }
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            SPECIAL_JUDGES,
+            "run_managed_to_files",
+            return_value=execution,
+        ):
+            root = Path(temp)
+            for name in ("case.in", "case.ans", "contestant.out"):
+                (root / name).write_bytes(b"")
+            result = SPECIAL_JUDGES.run_checker_to_files(
+                ["unused"],
+                root / "case.in",
+                root / "case.ans",
+                root / "contestant.out",
+                timeout=1,
+                cwd=root,
+                output_limit_bytes=1024,
+            )
+        self.assertIsNone(result["verdict"])
+        self.assertEqual(result["execution_status"], "process_cleanup_failed")
+        self.assertEqual(result["failure_kind"], "control_failure")
+        self.assertEqual(result["actor"], "supervisor")
+
     def test_custom_checker_output_control_failure_has_precise_reason(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(
             JUDGE_MODULE,
@@ -657,7 +722,7 @@ class InteractiveJudgeUnitTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "FAIL")
         self.assertEqual(result["actor"], "supervisor")
-        self.assertEqual(result["execution_status"], "cleanup_error")
+        self.assertEqual(result["execution_status"], "process_cleanup_failed")
         self.assertEqual(result["failure_kind"], "cleanup_failure")
         self.assertFalse(result["cleanup"]["ok"])
         self.assertEqual(managed[0].terminate_calls, 1)

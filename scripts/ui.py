@@ -38,9 +38,10 @@ from probhub.building import build_workspace, create_build_plan, create_build_sn
 from probhub.errors import ProbHubError
 from probhub.pdf_processing import pdf_page_count as bounded_pdf_page_count
 from probhub.process_control import (
+    PROCESS_CLEANUP_FAILED,
     run_managed_to_files,
     spawn_managed,
-    snapshot_process_tree,
+    snapshot_process_tree_identities,
     terminate_external_process_tree,
 )
 from probhub.submissions import (
@@ -1038,9 +1039,20 @@ def _supervise_judge_process(
     return_code = None
     stop_reason = None
     stop_started = None
-    known_pids = set()
+    last_identity_sample = 0.0
+    known_identities = set()
+    cleanup_failure_message = None
     managed = None
     capture = None
+
+    def record_cleanup(cleanup):
+        nonlocal cleanup_failure_message, stop_reason
+        if isinstance(cleanup, dict) and not cleanup.get("ok", False):
+            errors = cleanup.get("errors") or ()
+            cleanup_failure_message = (
+                str(errors[0]) if errors else "process tree cleanup could not be confirmed"
+            )
+            stop_reason = PROCESS_CLEANUP_FAILED
     if _task_cancel_requested(jobs, lock, job_id):
         _task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
         _publish_task_progress(jobs, lock, job_id, result, log)
@@ -1079,29 +1091,32 @@ def _supervise_judge_process(
                 _publish_task_progress(jobs, lock, job_id, result, log)
 
             now_mono = time.monotonic()
+            if now_mono - last_identity_sample >= 0.05 and proc.poll() is None:
+                managed.sample()
+                last_identity_sample = now_mono
             if capture.overflow and stop_reason is None:
                 stop_reason = "output_limit"
                 stop_started = now_mono
-                known_pids = snapshot_process_tree(proc.pid)
+                known_identities = snapshot_process_tree_identities(proc.pid)
             elif _task_cancel_requested(jobs, lock, job_id) and stop_reason is None:
                 stop_reason = "cancelled"
                 stop_started = now_mono
-                known_pids = snapshot_process_tree(proc.pid)
+                known_identities = snapshot_process_tree_identities(proc.pid)
                 _touch_cancel_file(cancel_file)
             elif now_mono >= execution_deadline and stop_reason is None:
                 stop_reason = "deadline"
                 stop_started = now_mono
-                known_pids = snapshot_process_tree(proc.pid)
+                known_identities = snapshot_process_tree_identities(proc.pid)
                 _touch_cancel_file(cancel_file)
 
             if stop_reason == "output_limit" and proc.poll() is None:
-                terminate_external_process_tree(proc, known_pids)
+                record_cleanup(terminate_external_process_tree(proc, known_identities))
             elif (
                 stop_reason is not None
                 and proc.poll() is None
                 and now_mono - float(stop_started or now_mono) >= SUBMISSION_FORCE_CANCEL_AFTER
             ):
-                terminate_external_process_tree(proc, known_pids)
+                record_cleanup(terminate_external_process_tree(proc, known_identities))
 
             return_code = proc.poll()
             if return_code is not None:
@@ -1110,8 +1125,10 @@ def _supervise_judge_process(
     finally:
         if managed is not None:
             if managed.proc.poll() is None:
-                terminate_external_process_tree(managed.proc, known_pids)
-            managed.terminate()
+                record_cleanup(
+                    terminate_external_process_tree(managed.proc, known_identities)
+                )
+            record_cleanup(managed.terminate())
             managed.close()
         if capture is not None:
             if not capture.join(timeout=2.0):
@@ -1138,7 +1155,13 @@ def _supervise_judge_process(
 
     if stop_reason is None and _task_cancel_requested(jobs, lock, job_id):
         stop_reason = "cancelled"
-    if stop_reason == "cancelled":
+    if stop_reason == PROCESS_CLEANUP_FAILED:
+        _task_failure_result(
+            result,
+            PROCESS_CLEANUP_FAILED,
+            cleanup_failure_message or "process tree cleanup could not be confirmed",
+        )
+    elif stop_reason == "cancelled":
         _task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
     elif stop_reason == "deadline":
         _task_failure_result(result, "task_deadline_exceeded", "task exceeded its execution deadline")
@@ -1480,7 +1503,8 @@ def _run_submission_job(job_id, info, filename, source):
                     or time.monotonic() >= execution_deadline
                 )
                 infrastructure_failed = run["stop_reason"] in {
-                    "deadline", "output_limit", "missing", "protocol_error"
+                    "deadline", "output_limit", "missing", "protocol_error",
+                    PROCESS_CLEANUP_FAILED,
                 }
                 if not workspace_cleaned:
                     verdict = "FAIL"
@@ -1858,7 +1882,9 @@ def shutdown_webui_tasks():
     WEBUI_TASK_EXECUTOR.shutdown(wait=False, cancel_pending=True)
     for proc in process_items:
         if proc.poll() is None:
-            terminate_external_process_tree(proc, snapshot_process_tree(proc.pid))
+            terminate_external_process_tree(
+                proc, snapshot_process_tree_identities(proc.pid)
+            )
     WEBUI_TASK_EXECUTOR.shutdown(wait=True, cancel_pending=True)
     WEBUI_PREVIEW_TEMP.cleanup()
 

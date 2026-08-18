@@ -34,7 +34,7 @@ limits:
 - Core 与 WebUI 的 pypdf 页数读取、边界扫描和切页 worker。
 - mutation 的 Tree-sitter C++ native parser worker。
 
-所有超时、超限、异常和正常退出路径都会回收直接进程并清理后代。若父进程创建后台子进程后先正常退出，ProbHub 仍会终止遗留后代，避免污染下一测试点、占用文件或持续消耗 CPU。
+所有超时、超限、异常和正常退出路径都会回收直接进程并进入同一后代清理闭环。Windows 由 Job Object 覆盖关联进程；受支持 Linux 上，原进程组由 `killpg` 清理，资源采样期间已经观察到的脱离后代还会按 PID 与内核启动时间复核后单独清理。若父进程创建后台子进程后先正常退出，只要后代仍在原进程组或已经被采样观察，ProbHub 仍会终止它，避免污染下一测试点、占用文件或持续消耗 CPU。
 
 官方工具与选手程序使用同一底层控制，但结果语义不同：选手超限属于提交结果；Checker、Validator、Interactor、Generator 或编译器超限属于题目基础设施错误。
 
@@ -51,6 +51,8 @@ limits:
 | `FAIL` | 官方评测基础设施失败 | Checker/Validator/Interactor/Generator/编译器超限、异常或协议错误 |
 
 进程数超限当前映射为选手 `RE`，并在消息中报告 `process limit exceeded`。官方工具发生同类错误时映射为 `FAIL` 或 stress 的 `infrastructure`。
+
+若进程树清理无法确认完成，底层返回稳定原因 `process_cleanup_failed`，并保留清理前原因用于诊断。它始终属于 supervisor/题目基础设施失败，会覆盖原先候选的 AC、WA、TLE、MLE、OLE 或 RE；不得把无法确认回收的运行写入普通 verdict 或缓存为可信结果。诊断只保留有界数量的 PID 与错误。
 
 ## 4. 输出限制与截断
 
@@ -91,10 +93,14 @@ Linux/Unix 使用：
 - 由隔离 Python 启动的内联 exec helper 在子进程内设置 `RLIMIT_AS`，随后以 `exec` 原位替换为目标程序；
 - Linux `/proc` 低频采样整棵进程树的 RSS 和进程数；
 - `killpg` 在结束时清理进程组。
+- 采样时有界记录最多 4096 个后代的 PID 与 `/proc/<pid>/stat` 启动时间；清理原进程组后，只对启动时间仍匹配的已观察脱离后代发信号，支持时使用 pidfd 缩小 PID 复用竞态；
+- 清理前会从仍匹配的已观察后代再扩展一次当前子树，随后复核它们已经退出。PID 已复用时不会向新进程发信号，`/proc` 信息不可读取、跟踪上限溢出或匹配后代仍存活时 fail closed 为 `process_cleanup_failed`。
 
 Flask 多线程请求和 CLI 都不会在父进程中使用 Python `preexec_fn`。helper 代码通过 `python -I -S -c` 传入，避免 WSL 在 Windows 挂载目录中为每个短进程重新打开 helper 脚本；它仍通过仅在成功 `exec` 时关闭的状态管道报告参数、`setrlimit` 或 `exec` 失败。启动阶段超时同样 fail closed，不会退化成无内存限制执行。
 
-资源采样约每 `50 ms` 进行一次，时间和输出检查使用更短轮询，以降低大量短进程和 stress 场景的监控开销。Linux 的 `RLIMIT_AS` 是每进程地址空间限制，和 Windows Job 的整树共享内存配额并不完全等价；ProbHub 同时使用 `/proc` 聚合 RSS 做补充监控。无法使用 `/proc` 时，进程组清理与 `RLIMIT_AS` 仍然有效，但进程数和聚合内存遥测能力会受限。
+资源采样约每 `50 ms` 进行一次，时间和输出检查使用更短轮询，以降低大量短进程和 stress 场景的监控开销。Linux 的 `RLIMIT_AS` 是每进程地址空间限制，和 Windows Job 的整树共享内存配额并不完全等价；ProbHub 同时使用 `/proc` 聚合 RSS 做补充监控。无法使用 `/proc` 时，进程组清理与 `RLIMIT_AS` 仍然有效，但进程数、聚合内存遥测和脱离后代身份跟踪能力会受限；若一个先前已记录的身份在清理时变得不可核对，该次运行按基础设施失败处理。
+
+这项保证的准确边界是“受支持 Ubuntu/Linux 上，在父子关系仍可见时被采样观察到的后代”。一个敌意程序若在约 `50 ms` 采样间隔内快速双 fork、重新建立 session，并在被观察前让中间父进程退出，可能不再能从 `/proc` 父子关系追溯。ProbHub 不使用 cgroup、PID namespace 或外部 watchdog，因此这不是可安全执行任意敌意代码的强容器；需要该安全等级时应在独立容器或专用评测机运行。
 
 ## 7. Checker、Validator、编译器和 Interactor
 
@@ -130,7 +136,7 @@ Stress 不读取或写入普通沙箱缓存。完整反例和 replay 协议见 `
 
 ## 9. 缓存
 
-逐点缓存键包含时间、内存、输出、进程数、平台和沙箱策略。共享输出截断与 Checker feedback 受控后缓存 Schema 为 6；进程控制或资源状态语义变化时会继续提升 Schema，因此旧版本缓存不会返回缺少 OLE、旧 feedback 或旧进程树行为的结果。
+逐点缓存键包含时间、内存、输出、进程数、平台和沙箱策略。可观测脱离后代清理与 `process_cleanup_failed` 语义加入后缓存 Schema 为 8；进程控制或资源状态语义变化时会继续提升 Schema，因此旧版本缓存不会返回缺少 OLE、旧 feedback 或旧进程树行为的结果。
 
 要强制完整执行并刷新缓存：
 

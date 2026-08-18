@@ -321,7 +321,7 @@ limits:
   processes: 32  # 整棵进程树，默认 32
 ```
 
-选手程序超过输出预算时状态为 `OLE`；超过进程数上限时为 `RE` 并带 `process limit exceeded`。官方 Checker、Validator、Interactor 或编译器自身超时、超限或无法建立完整进程树控制时属于基础设施 `FAIL`，而不是选手答案错误。输出超限后，保存的 stdout/stderr 会截断到预算以内。完整跨平台语义见 `references/process-control.md`。
+选手程序超过输出预算时状态为 `OLE`；超过进程数上限时为 `RE` 并带 `process limit exceeded`。官方 Checker、Validator、Interactor 或编译器自身超时、超限、无法建立完整进程树控制或返回 `process_cleanup_failed` 时属于基础设施 `FAIL`，而不是选手答案错误；该原因也会覆盖普通运行的候选 verdict。输出超限后，保存的 stdout/stderr 会截断到预算以内。完整跨平台语义见 `references/process-control.md`。
 
 成功最终事件：
 
@@ -407,7 +407,7 @@ probhub mutate ID [--operator OPERATOR] [--max-mutants N] [--jobs {1,2}] [--time
 
 `mutation` 只对 `judge.type: standard` 且首个 accepted 为 C++ 源码的题目执行。它使用固定 Tree-sitter C++ 语法树在函数/lambda 复合语句体内生成比较边界、布尔条件和十进制整数边界变异，跳过模板、宏、运算符声明、`<=>`、`case` 标签和未求值上下文，再从一次一致的不可变 baseline 为每个变异建立独立 worker，复用正式 Validator/Judge 逐点运行；解析器能报告的失败会结构化终止，不回退到 Token 猜测。命令不会把变异体登记为 accepted/wrong，也不会改写题目源文件或正式产物。`--operator` 可重复指定，`--max-mutants` 范围为 1..256，`--timeout` 是每题总秒数。题目可用 `mutation.schema_version: 1` 和 `mutation.exclusions: [{id, reason}]` 记录经人工审查的精确排除；排除先于数量上限应用。
 
-`--jobs` 默认为 1；显式 `--jobs 2` 才启用 spawn-bounded 并行，输出仍按计划顺序稳定聚合。调度器按问题级 2 个 worker token、8192 MiB Judge 内存额度和 160 个 Judge 进程额度计算 `effective_jobs`，题目 per-worker 上限过高时可从 2 降为 1；这些是配置额度，不是宿主机资源预留。题目级 `mutation.lock` 覆盖整次命令；全局 `build.lock` 只在 baseline 捕获和最终输入围栏/证据发布期间短暂持有，不覆盖 Judge。首个基础设施失败会停止派发、协作取消活动 worker，并在 2 秒后强制清理进程树；失败结果的 `execution.mutations` 会按 plan 顺序包含 `cancelled` 项，但取消项不计为 killed。整题 `--timeout` 到期为 `mutation_timeout`。取消、超时、live 输入变化和发布失败都保留旧 evidence。
+`--jobs` 默认为 1；显式 `--jobs 2` 才启用 spawn-bounded 并行，输出仍按计划顺序稳定聚合。调度器按问题级 2 个 worker token、8192 MiB Judge 内存额度和 160 个 Judge 进程额度计算 `effective_jobs`，题目 per-worker 上限过高时可从 2 降为 1；这些是配置额度，不是宿主机资源预留。题目级 `mutation.lock` 覆盖整次命令；全局 `build.lock` 只在 baseline 捕获和最终输入围栏/证据发布期间短暂持有，不覆盖 Judge。首个基础设施失败会停止派发、协作取消活动 worker，并在 2 秒后按平台语义清理进程组及已观察脱离后代；失败结果的 `execution.mutations` 会按 plan 顺序包含 `cancelled` 项，但取消项不计为 killed。整题 `--timeout` 到期为 `mutation_timeout`。取消、超时、live 输入变化和发布失败都保留旧 evidence。
 
 JSON 结果保持与其他多题命令相同的外层结构：
 
