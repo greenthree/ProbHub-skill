@@ -154,8 +154,8 @@ probhub build L01 --no-cache
 WebUI“沙箱评测”页支持上传单个 UTF-8 `.cpp` 并只评测该提交：
 
 1. 请求限制源码扩展名、UTF-8 编码和 `1 MiB` 大小；
-2. 本地 WSGI 服务最多同时使用 8 个请求线程；完整沙箱与上传评测在读取题目或上传正文前先经过非阻塞 admission gate，随后共用固定 worker pool；默认 worker 数为 `min(4, CPU)`，等待队列最多 16 项，不会按请求无限创建 HTTP 或评测线程，也不会无界保留源码；
-3. admission 或队列饱和返回 HTTP `429`、`code: queue_full`、`retryable: true` 与 `retry_after`，被拒绝的上传不创建任务目录；
+2. 本地 WSGI 服务最多同时使用 8 个请求线程，请求 socket 的 I/O 空闲 timeout 为 30 秒；HTTP 槽位满载时不会阻塞 accept 循环或进入 Flask，而是在 0.25 秒总收尾 deadline 内返回 HTTP `503`、`Retry-After: 1`、`code: http_request_limit` 后关闭连接；发送后的半关闭与接收排空同时受 deadline 和 `64 KiB` 上限约束；
+3. 完整沙箱与上传评测在读取题目或上传正文前先经过独立的非阻塞 admission gate，随后共用固定 worker pool；默认 worker 数为 `min(4, CPU)`，等待队列最多 16 项，不会按请求无限创建 HTTP 或评测线程，也不会无界保留源码；任务 admission 或队列饱和返回 HTTP `429`、`code: queue_full`、`retryable: true` 与 `retry_after`，被拒绝的上传不创建任务目录；
 4. WebUI 进程内先按题目目录互斥，`local_judge.py` 再取得 `<problem>/.probhub/judge.lock` 的 OS 排他锁；因此同题的 CLI、多个 WebUI 进程与完整沙箱不会并发改写编译产物和缓存，不同题目仍可占用不同 worker 并行运行，上传提交始终使用各自的隔离目录；
 5. 每次提交生成唯一 task ID，真正开始执行后才把源码写入 `.probhub/submissions/<task-id>/problem/code/submission.cpp`；
 6. 临时配置只保留上传解法，并以绝对只读路径引用题目现有测试数据；
