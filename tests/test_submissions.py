@@ -598,6 +598,11 @@ class SubmissionUiApiTests(unittest.TestCase):
                 shutdown_thread.start()
                 shutdown_thread.join(2)
                 self.assertFalse(shutdown_thread.is_alive())
+                # BaseServer.shutdown() waits for serve_forever() to signal
+                # its shutdown event just before the serving thread returns.
+                # Join explicitly so the assertion does not race that final
+                # thread-return window on slower CI runners.
+                server_thread.join(2)
                 self.assertFalse(server_thread.is_alive())
         finally:
             release.set()
