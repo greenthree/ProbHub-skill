@@ -5,12 +5,11 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
 from pathlib import Path
-
-import yaml
 
 if __package__:
     from scripts.check_release import (
@@ -181,18 +180,27 @@ def _set_e2e_time_limit(workspace, seconds=E2E_TIME_LIMIT_SECONDS):
     """Give the generated clean-install problem deterministic timing headroom."""
     config_path = Path(workspace) / "E2E/probhub.yaml"
     try:
-        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
         raise CleanInstallError(f"failed to read generated E2E config: {exc}") from exc
-    if not isinstance(config, dict) or not isinstance(config.get("limits"), dict):
-        raise CleanInstallError("generated E2E config has invalid limits")
-    config["limits"]["time"] = seconds
+    matches = list(re.finditer(
+        r"(?m)^(?P<indent>[ \t]*)time:[ \t]*(?P<value>\d+)"
+        r"(?P<suffix>[ \t]*(?:#.*)?)(?P<newline>\r?\n|$)",
+        text,
+    ))
+    if len(matches) != 1:
+        raise CleanInstallError("generated E2E config has an ambiguous limits.time field")
+    match = matches[0]
+    limits_header = re.search(r"(?m)^limits:[ \t]*(?:\r?\n|$)", text[:match.start()])
+    if limits_header is None:
+        raise CleanInstallError("generated E2E config has no limits mapping")
+    replacement = (
+        f"{match.group('indent')}time: {int(seconds)}"
+        f"{match.group('suffix')}{match.group('newline')}"
+    )
+    updated = text[:match.start()] + replacement + text[match.end():]
     try:
-        config_path.write_text(
-            yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-            newline="\n",
-        )
+        config_path.write_text(updated, encoding="utf-8", newline="\n")
     except OSError as exc:
         raise CleanInstallError(f"failed to write generated E2E config: {exc}") from exc
 
