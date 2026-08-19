@@ -19,7 +19,6 @@ from urllib.parse import urlsplit
 import yaml
 from flask import Flask, g, jsonify, request, render_template_string, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
-from werkzeug.serving import ThreadedWSGIServer
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PACKAGE_ROOT = next(
@@ -63,6 +62,7 @@ from probhub.webui_workspace import (
 )
 from probhub.workspace import load_workspace, problem_entries
 from probhub.webui_tasks import BoundedPipeCapture, BoundedTaskExecutor, BoundedUtf8Log
+from probhub.webui_server import BoundedThreadedWSGIServer
 
 app = Flask(__name__)
 MAX_SUBMISSION_REQUEST_BYTES = MAX_SOURCE_BYTES + 64 * 1024
@@ -97,6 +97,9 @@ WEBUI_TASK_ERROR_BYTES = 64 * 1024
 WEBUI_TASK_MAX_COMPLETED = 32
 WEBUI_TASK_INFO_FILES_PER_ROLE = 64
 WEBUI_HTTP_REQUEST_THREADS = 8
+WEBUI_HTTP_REQUEST_IDLE_TIMEOUT = 30.0
+WEBUI_HTTP_OVERLOAD_RESPONSE_TIMEOUT = 0.25
+WEBUI_HTTP_OVERLOAD_RETRY_AFTER = 1
 WEBUI_TASK_EXECUTOR = BoundedTaskExecutor(
     max_workers=WEBUI_TASK_WORKERS,
     max_queued=WEBUI_TASK_QUEUE_SIZE,
@@ -1889,58 +1892,22 @@ def shutdown_webui_tasks():
     WEBUI_PREVIEW_TEMP.cleanup()
 
 
-class BoundedThreadedWSGIServer(ThreadedWSGIServer):
-    """Werkzeug server with a hard cap on live request-handler threads."""
-
-    daemon_threads = True
-
-    def __init__(self, host, port, application, *, max_request_threads):
-        if isinstance(max_request_threads, bool) or int(max_request_threads) <= 0:
-            raise ValueError("max_request_threads must be a positive integer")
-        self.max_request_threads = int(max_request_threads)
-        self._request_slots = BoundedSemaphore(self.max_request_threads)
-        self._request_stats_lock = Lock()
-        self._active_request_threads = 0
-        self._peak_request_threads = 0
-        super().__init__(host, port, application)
-
-    def process_request(self, request_socket, client_address):
-        self._request_slots.acquire()
-        try:
-            super().process_request(request_socket, client_address)
-        except BaseException:
-            self._request_slots.release()
-            raise
-
-    def process_request_thread(self, request_socket, client_address):
-        with self._request_stats_lock:
-            self._active_request_threads += 1
-            self._peak_request_threads = max(
-                self._peak_request_threads,
-                self._active_request_threads,
-            )
-        try:
-            super().process_request_thread(request_socket, client_address)
-        finally:
-            with self._request_stats_lock:
-                self._active_request_threads -= 1
-            self._request_slots.release()
-
-    def request_thread_stats(self):
-        with self._request_stats_lock:
-            return {
-                "active": self._active_request_threads,
-                "peak": self._peak_request_threads,
-                "limit": self.max_request_threads,
-            }
-
-
-def _create_webui_server(port, *, max_request_threads=WEBUI_HTTP_REQUEST_THREADS):
+def _create_webui_server(
+    port,
+    *,
+    max_request_threads=WEBUI_HTTP_REQUEST_THREADS,
+    request_idle_timeout=WEBUI_HTTP_REQUEST_IDLE_TIMEOUT,
+    overload_response_timeout=WEBUI_HTTP_OVERLOAD_RESPONSE_TIMEOUT,
+    overload_retry_after=WEBUI_HTTP_OVERLOAD_RETRY_AFTER,
+):
     return BoundedThreadedWSGIServer(
         "127.0.0.1",
         port,
         app,
         max_request_threads=max_request_threads,
+        request_idle_timeout=request_idle_timeout,
+        overload_response_timeout=overload_response_timeout,
+        overload_retry_after=overload_retry_after,
     )
 
 

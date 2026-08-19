@@ -214,7 +214,7 @@ def validate_pack_inventories(
         "probhub/judge_qa_runtime.py",
         "probhub/mutation.py", "probhub/mutation_config.py",
         "probhub/mutation_syntax.py", "probhub/mutation_parser_worker.py",
-        "probhub/webui_runtime.py",
+        "probhub/webui_runtime.py", "probhub/webui_server.py",
         "probhub/assets/fonts/NotoSansCJKsc-Regular.otf",
         "probhub/assets/fonts/OFL.txt",
         "scripts/probhub.py", "scripts/local_judge.py", "scripts/ui.py",

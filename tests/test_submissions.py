@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ import threading
 import time
 import unittest
 import urllib.request
+import urllib.error
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -456,15 +458,19 @@ class SubmissionUiApiTests(unittest.TestCase):
             daemon=True,
         )
         responses = []
+        request_errors = []
 
         def request_problem():
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/sandbox/problem?subtitle=contest&index=0",
-                timeout=10,
-            ) as response:
-                responses.append(response.status)
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/sandbox/problem?subtitle=contest&index=0",
+                    timeout=10,
+                ) as response:
+                    responses.append(response.status)
+            except Exception as exc:
+                request_errors.append(exc)
 
-        clients = [threading.Thread(target=request_problem) for _ in range(12)]
+        clients = [threading.Thread(target=request_problem) for _ in range(4)]
         try:
             with mock.patch.object(self.ui, "_sandbox_problem_info", side_effect=problem_info):
                 server_thread.start()
@@ -475,15 +481,188 @@ class SubmissionUiApiTests(unittest.TestCase):
                 while server.request_thread_stats()["active"] < 4 and time.time() < deadline:
                     time.sleep(0.01)
                 self.assertEqual(server.request_thread_stats()["active"], 4)
+
+                overload_started = time.monotonic()
+                overloads = []
+                for _ in range(4):
+                    try:
+                        urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/api/sandbox/problem?subtitle=contest&index=0",
+                            timeout=2,
+                        )
+                    except urllib.error.HTTPError as exc:
+                        try:
+                            overloads.append(
+                                (
+                                    exc.code,
+                                    json.loads(exc.read().decode("utf-8")),
+                                    exc.headers.get("Retry-After"),
+                                )
+                            )
+                        finally:
+                            exc.close()
+                    else:
+                        self.fail("overloaded request unexpectedly succeeded")
+                self.assertLess(time.monotonic() - overload_started, 2)
+                self.assertEqual([item[0] for item in overloads], [503] * 4)
+                self.assertTrue(
+                    all(item[1]["code"] == "http_request_limit" for item in overloads)
+                )
+                self.assertTrue(all(item[1]["retryable"] for item in overloads))
+                self.assertEqual([item[2] for item in overloads], ["1"] * 4)
+
                 release.set()
                 for client in clients:
                     client.join(10)
+                deadline = time.time() + 3
+                while server.request_thread_stats()["active"] and time.time() < deadline:
+                    time.sleep(0.01)
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/sandbox/problem?subtitle=contest&index=0",
+                    timeout=3,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                deadline = time.time() + 3
+                while server.request_thread_stats()["active"] and time.time() < deadline:
+                    time.sleep(0.01)
             self.assertTrue(all(not client.is_alive() for client in clients))
+            self.assertEqual(request_errors, [])
             self.assertEqual(responses, [200] * len(clients))
-            self.assertEqual(server.request_thread_stats()["peak"], 4)
-            self.assertEqual(server.request_thread_stats()["limit"], 4)
+            self.assertEqual(len(served_by), 5)
+            stats = server.request_thread_stats()
+            self.assertEqual(stats["active"], 0)
+            self.assertEqual(stats["peak"], 4)
+            self.assertEqual(stats["limit"], 4)
+            self.assertEqual(stats["rejected"], 4)
+            self.assertEqual(stats["overload_response_failures"], 0)
         finally:
             release.set()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(3)
+
+    def test_overload_does_not_block_server_shutdown(self):
+        server = self.ui._create_webui_server(0, max_request_threads=1)
+        port = server.server_port
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        release = threading.Event()
+        entered = threading.Event()
+        first_result = []
+        overload_result = []
+
+        def problem_info(_subtitle, _index):
+            entered.set()
+            release.wait(5)
+            return {"runnable": False, "reason": "test"}
+
+        def first_request():
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/sandbox/problem?subtitle=contest&index=0",
+                    timeout=10,
+                ) as response:
+                    first_result.append(response.status)
+            except Exception as exc:
+                first_result.append(exc)
+
+        def overload_request():
+            try:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/sandbox/problem?subtitle=contest&index=0",
+                    timeout=3,
+                )
+            except urllib.error.HTTPError as exc:
+                try:
+                    overload_result.append(
+                        (exc.code, json.loads(exc.read().decode("utf-8")))
+                    )
+                finally:
+                    exc.close()
+            except Exception as exc:
+                overload_result.append(exc)
+
+        first_client = threading.Thread(target=first_request)
+        overload_client = threading.Thread(target=overload_request)
+        shutdown_thread = threading.Thread(target=server.shutdown)
+        try:
+            with mock.patch.object(self.ui, "_sandbox_problem_info", side_effect=problem_info):
+                server_thread.start()
+                first_client.start()
+                self.assertTrue(entered.wait(3))
+                overload_client.start()
+                overload_client.join(3)
+                self.assertFalse(overload_client.is_alive())
+                self.assertEqual(overload_result[0][0], 503)
+                self.assertEqual(overload_result[0][1]["code"], "http_request_limit")
+
+                shutdown_thread.start()
+                shutdown_thread.join(2)
+                self.assertFalse(shutdown_thread.is_alive())
+                self.assertFalse(server_thread.is_alive())
+        finally:
+            release.set()
+            first_client.join(5)
+            if overload_client.ident is not None:
+                overload_client.join(3)
+            if shutdown_thread.ident is not None:
+                shutdown_thread.join(3)
+            if server_thread.is_alive():
+                server.shutdown()
+            server.server_close()
+            server_thread.join(3)
+        self.assertEqual(first_result, [200])
+        deadline = time.time() + 3
+        while server.request_thread_stats()["active"] and time.time() < deadline:
+            time.sleep(0.01)
+        stats = server.request_thread_stats()
+        self.assertEqual(stats["active"], 0)
+        self.assertEqual(stats["rejected"], 1)
+
+    def test_idle_request_socket_releases_slot_and_server_recovers(self):
+        server = self.ui._create_webui_server(
+            0,
+            max_request_threads=2,
+            request_idle_timeout=0.2,
+        )
+        port = server.server_port
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        idle_sockets = []
+        try:
+            with mock.patch.object(
+                self.ui,
+                "_sandbox_problem_info",
+                return_value={"runnable": False, "reason": "test"},
+            ):
+                server_thread.start()
+                idle_sockets = [
+                    socket.create_connection(("127.0.0.1", port), timeout=2)
+                    for _ in range(2)
+                ]
+                deadline = time.time() + 3
+                while server.request_thread_stats()["active"] < 2 and time.time() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(server.request_thread_stats()["active"], 2)
+
+                deadline = time.time() + 3
+                while server.request_thread_stats()["active"] and time.time() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(server.request_thread_stats()["active"], 0)
+
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/sandbox/problem?subtitle=contest&index=0",
+                    timeout=3,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                deadline = time.time() + 3
+                while server.request_thread_stats()["active"] and time.time() < deadline:
+                    time.sleep(0.01)
+            stats = server.request_thread_stats()
+            self.assertEqual(stats["active"], 0)
+            self.assertEqual(stats["peak"], 2)
+            self.assertEqual(stats["rejected"], 0)
+        finally:
+            for idle_socket in idle_sockets:
+                idle_socket.close()
             server.shutdown()
             server.server_close()
             server_thread.join(3)
@@ -533,6 +712,13 @@ class SubmissionUiApiTests(unittest.TestCase):
         def request_compile():
             try:
                 compile_result.append(post_json("/api/compile", {"subtitle": "contest"}))
+            except urllib.error.HTTPError as exc:
+                try:
+                    compile_result.append(
+                        (exc.code, json.loads(exc.read().decode("utf-8")))
+                    )
+                finally:
+                    exc.close()
             except Exception as exc:
                 compile_result.append(exc)
 
@@ -571,7 +757,8 @@ class SubmissionUiApiTests(unittest.TestCase):
                 release_compile.set()
                 compile_thread.join(3)
                 self.assertFalse(compile_thread.is_alive())
-                self.assertTrue(compile_result)
+                self.assertEqual(compile_result[0][0], 409)
+                self.assertEqual(compile_result[0][1]["code"], "build_busy")
         finally:
             release_compile.set()
             server.shutdown()
