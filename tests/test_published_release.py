@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 from scripts import check_clean_install, check_published_release, check_release
 
 
@@ -305,6 +307,32 @@ class PublishedReleaseTests(unittest.TestCase):
         )
         registry.assert_called_once_with(VERSION, registry_url=REGISTRY)
         local_pack.assert_not_called()
+
+    def test_clean_install_fixture_adds_timing_headroom_without_changing_other_limits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            problem = workspace / "E2E"
+            problem.mkdir()
+            config_path = problem / "probhub.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "limits": {"time": 1, "memory": 256, "output": 64, "processes": 32},
+                        "judge": {"type": "custom"},
+                    },
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            check_clean_install._set_e2e_time_limit(workspace)
+
+            updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated["limits"]["time"], check_clean_install.E2E_TIME_LIMIT_SECONDS)
+            self.assertEqual(updated["limits"]["memory"], 256)
+            self.assertEqual(updated["limits"]["output"], 64)
+            self.assertEqual(updated["limits"]["processes"], 32)
 
     def test_pack_manifest_passes_registry_as_an_argv_token(self):
         completed = {
