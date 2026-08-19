@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -7,6 +8,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from probhub.io import write_yaml
 
@@ -28,9 +30,64 @@ class LocalJudgeLayoutTests(unittest.TestCase):
                 '#include "testlib.h"\nint main() { return 0; }\n',
                 encoding="utf-8",
             )
-            self.assertTrue(MODULE.compile_cpp(str(source), str(output), kind="std"))
+            identity = MODULE.compile_cpp(str(source), str(output), kind="std")
+            self.assertTrue(identity)
             self.assertTrue(output.is_file())
+            self.assertEqual(identity["path"], str(output.absolute()))
+            self.assertEqual(identity["size"], output.stat().st_size)
+            self.assertEqual(identity["digest"], MODULE._file_digest(output))
             self.assertEqual(list((code / ".probhub/compile").iterdir()), [])
+
+    @unittest.skipUnless(shutil.which("g++"), "g++ is required")
+    def test_cached_and_refresh_compile_return_the_same_binary_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "缓存 身份"
+            code = problem / "code"
+            code.mkdir(parents=True)
+            source = code / "std.cpp"
+            output = code / ("std.exe" if MODULE.platform.system() == "Windows" else "std")
+            source.write_text("int main() { return 0; }\n", encoding="utf-8")
+
+            cache = MODULE.SandboxCache(problem)
+            first = MODULE.compile_cpp(
+                str(source), str(output), kind="std", display_file="code/std.cpp", cache=cache
+            )
+            cached = MODULE.compile_cpp(
+                str(source), str(output), kind="std", display_file="code/std.cpp", cache=cache
+            )
+            refresh_cache = MODULE.SandboxCache(problem, enabled=True, read_enabled=False)
+            refreshed = MODULE.compile_cpp(
+                str(source), str(output), kind="std", display_file="code/std.cpp", cache=refresh_cache
+            )
+
+            self.assertEqual(cached, first)
+            self.assertEqual(refreshed, MODULE.binary_identity(output))
+            self.assertEqual(cache.stats["compile_hits"], 1)
+
+    @unittest.skipUnless(shutil.which("g++"), "g++ is required")
+    def test_changed_cached_binary_is_recompiled_before_reuse(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp) / "A"
+            code = problem / "code"
+            code.mkdir(parents=True)
+            source = code / "std.cpp"
+            output = code / ("std.exe" if MODULE.platform.system() == "Windows" else "std")
+            source.write_text("int main() { return 0; }\n", encoding="utf-8")
+            cache = MODULE.SandboxCache(problem)
+            expected = MODULE.compile_cpp(
+                str(source), str(output), kind="std", display_file="code/std.cpp", cache=cache
+            )
+            output.write_bytes(b"replaced binary")
+            replaced_digest = MODULE.binary_identity(output)["digest"]
+
+            actual = MODULE.compile_cpp(
+                str(source), str(output), kind="std", display_file="code/std.cpp", cache=cache
+            )
+
+            self.assertEqual(actual, MODULE.binary_identity(output))
+            self.assertNotEqual(actual["digest"], replaced_digest)
+            self.assertEqual(cache.stats["compile_hits"], 0)
+            self.assertEqual(cache.stats["compile_misses"], 2)
 
     @unittest.skipUnless(shutil.which("g++"), "g++ is required")
     def test_compile_cpp_isolates_concurrent_runs_and_preserves_last_binary_on_failure(self):
@@ -46,7 +103,8 @@ class LocalJudgeLayoutTests(unittest.TestCase):
                     lambda output: MODULE.compile_cpp(str(source), str(output), kind="std"),
                     outputs,
                 ))
-            self.assertEqual(results, [True] * len(outputs))
+            self.assertTrue(all(results))
+            self.assertTrue(all(isinstance(result, dict) for result in results))
             self.assertTrue(all(output.is_file() for output in outputs))
             self.assertEqual(list((code / ".probhub/compile").iterdir()), [])
 
@@ -54,6 +112,70 @@ class LocalJudgeLayoutTests(unittest.TestCase):
             source.write_text("int main( {\n", encoding="utf-8")
             self.assertFalse(MODULE.compile_cpp(str(source), str(outputs[0]), kind="std"))
             self.assertEqual(outputs[0].read_bytes(), previous)
+
+    def test_publish_identity_mismatch_restores_previous_binary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            staged = root / "staged.exe"
+            output = root / "program.exe"
+            staged.write_bytes(b"new binary")
+            output.write_bytes(b"last known good")
+            staged_identity = MODULE.binary_identity(staged)
+            mismatched = {
+                "path": str(output.absolute()),
+                "size": len(b"tampered"),
+                "digest": "0" * 64,
+            }
+
+            with patch.object(MODULE, "binary_identity", return_value=mismatched):
+                with self.assertRaises(MODULE.BinaryChangedError):
+                    MODULE.publish_compiled_binary(
+                        str(staged), str(output), staged_identity
+                    )
+
+            self.assertEqual(output.read_bytes(), b"last known good")
+
+    def test_publish_failure_preserves_previous_binary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            staged = root / "staged.exe"
+            output = root / "program.exe"
+            staged.write_bytes(b"new binary")
+            output.write_bytes(b"locked binary")
+            staged_identity = MODULE.binary_identity(staged)
+            real_replace = os.replace
+
+            def deny_publish(source, destination):
+                if Path(destination) == output:
+                    raise PermissionError("injected file-in-use failure")
+                return real_replace(source, destination)
+
+            with patch.object(MODULE.os, "replace", side_effect=deny_publish):
+                with self.assertRaises(PermissionError):
+                    MODULE.publish_compiled_binary(
+                        str(staged), str(output), staged_identity
+                    )
+
+            self.assertEqual(output.read_bytes(), b"locked binary")
+
+    def test_binary_identity_fence_reports_each_judge_role_as_infrastructure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for role in ("validator", "checker", "interactor", "std", "brute", "wrong"):
+                with self.subTest(role=role):
+                    binary = root / f"{role}.exe"
+                    binary.write_bytes(b"expected")
+                    identity = MODULE.binary_identity(binary)
+                    binary.write_bytes(b"changed!")
+                    failure = MODULE.verify_binary_identities([{
+                        "role": role,
+                        "program": f"code/{role}.cpp",
+                        "identity": identity,
+                    }])
+                    self.assertEqual(failure["code"], "binary_changed")
+                    self.assertEqual(failure["failure_kind"], "infrastructure")
+                    self.assertEqual(failure["role"], role)
+                    self.assertIsNotNone(failure["actual_digest"])
 
     def test_schema_paths_resolve_inside_code_directory(self):
         with tempfile.TemporaryDirectory() as temp:

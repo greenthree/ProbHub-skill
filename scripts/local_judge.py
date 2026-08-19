@@ -67,6 +67,102 @@ _COMPILER_IDENTITY = None
 _FILE_DIGEST_CACHE = {}
 
 
+class BinaryChangedError(RuntimeError):
+    pass
+
+
+def binary_identity(path):
+    """Return the published binary identity used by one Judge session."""
+    absolute = os.path.abspath(path)
+    digest = hashlib.sha256()
+    with open(absolute, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        stat = os.fstat(stream.fileno())
+    return {
+        "path": absolute,
+        "size": int(stat.st_size),
+        "digest": digest.hexdigest(),
+    }
+
+
+def verify_binary_identities(entries):
+    """Check compiled binaries once before the first Judge execution.
+
+    The caller supplies identities captured immediately after compilation (or
+    from a validated cache hit).  A single changed/missing file invalidates the
+    whole Judge session and must not become a contestant verdict.
+    """
+    for entry in entries:
+        expected = entry.get("identity") or {}
+        path = expected.get("path")
+        try:
+            actual = binary_identity(path)
+        except (OSError, TypeError, ValueError) as exc:
+            return {
+                "code": "binary_changed",
+                "failure_kind": "infrastructure",
+                "role": entry.get("role"),
+                "program": entry.get("program"),
+                "path": path,
+                "expected_digest": expected.get("digest"),
+                "actual_digest": None,
+                "message": f"compiled binary is unavailable before first execution: {path} ({exc})",
+            }
+        if (
+            actual.get("digest") != expected.get("digest")
+            or actual.get("size") != expected.get("size")
+        ):
+            return {
+                "code": "binary_changed",
+                "failure_kind": "infrastructure",
+                "role": entry.get("role"),
+                "program": entry.get("program"),
+                "path": path,
+                "expected_digest": expected.get("digest"),
+                "actual_digest": actual.get("digest"),
+                "expected_size": expected.get("size"),
+                "actual_size": actual.get("size"),
+                "message": f"compiled binary changed before first execution: {path}",
+            }
+    return None
+
+
+def publish_compiled_binary(staged_binary, out_bin, staged_identity):
+    """Atomically publish a compiled binary and restore the previous file on mismatch."""
+    previous = staged_binary + ".previous"
+    had_previous = os.path.isfile(out_bin)
+    if had_previous:
+        shutil.copyfile(out_bin, previous)
+    published = False
+    try:
+        os.replace(staged_binary, out_bin)
+        published = True
+        actual = binary_identity(out_bin)
+        if (
+            actual["digest"] != staged_identity["digest"]
+            or actual["size"] != staged_identity["size"]
+        ):
+            raise BinaryChangedError(
+                "published binary identity differs from staged binary"
+            )
+        return actual
+    except Exception:
+        if not published:
+            raise
+        try:
+            if had_previous and os.path.isfile(previous):
+                os.replace(previous, out_bin)
+            elif not had_previous and os.path.lexists(out_bin):
+                os.remove(out_bin)
+        except OSError as rollback_error:
+            raise BinaryChangedError(
+                "compiled binary publish failed and the previous binary could not be restored: "
+                f"{rollback_error}"
+            ) from rollback_error
+        raise
+
+
 def _cancel_signal_handler(_signum, _frame):
     raise ProcessCancelled("execution cancelled")
 
@@ -92,19 +188,29 @@ def _hash_parts(*parts):
 def _file_digest(path):
     path = os.path.abspath(path)
     stat = os.stat(path)
-    cache_key = (path, stat.st_mtime_ns, stat.st_size)
+    cache_key = (
+        path,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        stat.st_size,
+        getattr(stat, "st_ino", 0),
+    )
     cached = _FILE_DIGEST_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    value = digest.hexdigest()
+    value = _file_digest_uncached(path)
     if len(_FILE_DIGEST_CACHE) > 4096:
         _FILE_DIGEST_CACHE.clear()
     _FILE_DIGEST_CACHE[cache_key] = value
     return value
+
+
+def _file_digest_uncached(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def normalize_sample_output(payload):
@@ -420,9 +526,10 @@ def compile_cpp(
     cache=None,
     fingerprint=None,
 ):
+    if reporter is None:
+        reporter = Reporter(False)
     if not os.path.exists(src_file):
         return False
-    reporter = reporter or Reporter(False)
     file_name = display_file or os.path.basename(src_file)
     fingerprint = fingerprint or source_fingerprint(src_file, os.path.dirname(src_file), kind)
     cache_key = str(file_name).replace(os.sep, "/")
@@ -432,13 +539,29 @@ def compile_cpp(
         binary_matches = False
         if cached and cached.get("fingerprint") == fingerprint and os.path.isfile(out_bin):
             try:
-                binary_matches = cached.get("binary_digest") == _file_digest(out_bin)
+                current_identity = binary_identity(out_bin)
+                binary_matches = (
+                    cached.get("binary_digest") == current_identity["digest"]
+                    and (
+                        cached.get("binary_size") is None
+                        or cached.get("binary_size") == current_identity["size"]
+                    )
+                )
             except OSError:
                 binary_matches = False
         if binary_matches:
             reporter.text(f"[*] Compiling {file_name}... cached")
-            reporter.event("compile", kind=kind or "unknown", file=file_name, ok=True, stderr="", cached=True)
-            return True
+            reporter.event(
+                "compile",
+                kind=kind or "unknown",
+                file=file_name,
+                ok=True,
+                stderr="",
+                cached=True,
+                binary_digest=current_identity["digest"],
+                binary_size=current_identity["size"],
+            )
+            return current_identity
         if cached is not None:
             cache.stats["compile_hits"] -= 1
             cache.stats["compile_misses"] += 1
@@ -493,8 +616,16 @@ def compile_cpp(
             except OSError:
                 stderr = ""
             ok = ret["reason"] == "completed" and ret["returncode"] == 0
+            staged_identity = None
             if ok:
-                os.replace(staged_binary, out_bin)
+                staged_identity = binary_identity(staged_binary)
+                published_identity = publish_compiled_binary(
+                    staged_binary,
+                    out_bin,
+                    staged_identity,
+                )
+            else:
+                published_identity = None
         if ret["reason"] != "completed":
             stderr = (stderr + "\n" + (ret["message"] or ret["reason"])).strip()
         reporter.event(
@@ -504,6 +635,14 @@ def compile_cpp(
             ok=ok,
             stderr=stderr,
             cached=False,
+            **(
+                {
+                    "binary_digest": published_identity["digest"],
+                    "binary_size": published_identity["size"],
+                }
+                if published_identity is not None
+                else {}
+            ),
         )
         if not ok:
             if cache:
@@ -514,9 +653,28 @@ def compile_cpp(
             cache.set(
                 "compile",
                 cache_key,
-                {"fingerprint": fingerprint, "binary_digest": _file_digest(out_bin)},
+                {
+                    "fingerprint": fingerprint,
+                    "binary_digest": published_identity["digest"],
+                    "binary_size": published_identity["size"],
+                },
             )
-        return True
+        return published_identity
+    except BinaryChangedError as e:
+        if cache:
+            cache.delete("compile", cache_key)
+        reporter.event(
+            "compile",
+            kind=kind or "unknown",
+            file=file_name,
+            ok=False,
+            stderr=str(e),
+            cached=False,
+            code="binary_changed",
+            failure_kind="infrastructure",
+        )
+        reporter.text(f"[-] Compile error: {e}")
+        raise
     except Exception as e:
         if cache:
             cache.delete("compile", cache_key)
@@ -1669,7 +1827,7 @@ def run_sample_check_mode(
         )
     bin_path = binary_path_for_source(source_path)
     fingerprint = source_fingerprint(source_path, prob_dir, "std")
-    if not compile_cpp(
+    accepted_identity = compile_cpp(
         source_path,
         bin_path,
         reporter,
@@ -1677,7 +1835,8 @@ def run_sample_check_mode(
         program_name,
         cache=cache,
         fingerprint=fingerprint,
-    ):
+    )
+    if not accepted_identity:
         finish(
             reporter,
             False,
@@ -1687,6 +1846,25 @@ def run_sample_check_mode(
             applicable=True,
             judge_type=judge_type,
             program=program_name,
+        )
+    identity_error = verify_binary_identities([{
+        "role": "accepted",
+        "program": program_name,
+        "identity": accepted_identity,
+    }])
+    if identity_error:
+        finish(
+            reporter,
+            False,
+            identity_error["message"],
+            1,
+            "binary_changed",
+            failure_kind="infrastructure",
+            role=identity_error.get("role"),
+            program=identity_error.get("program"),
+            path=identity_error.get("path"),
+            expected_digest=identity_error.get("expected_digest"),
+            actual_digest=identity_error.get("actual_digest"),
         )
 
     checks = []
@@ -2012,14 +2190,18 @@ def _main_unlocked():
             **failure_payload,
         )
 
-    # 1. Compile and run Validator
+    # 1. Compile every binary before executing any official tool or solution.
+    compiled_identities = []
     validator_entry = ((config or {}).get("judge") or {}).get("validator") if config is not None else None
     val_cpp = discover_validator_source(prob_dir, config)
+    val_bin = None
+    val_name = None
+    val_fingerprint = None
     if val_cpp and os.path.exists(val_cpp):
         val_bin = binary_path_for_source(val_cpp)
         val_name = display_problem_path(prob_dir, val_cpp)
         val_fingerprint = source_fingerprint(val_cpp, prob_dir, "validator")
-        if compile_cpp(
+        val_identity = compile_cpp(
             val_cpp,
             val_bin,
             reporter,
@@ -2027,42 +2209,13 @@ def _main_unlocked():
             val_name,
             cache=cache,
             fingerprint=val_fingerprint,
-        ):
-            reporter.text("\nRunning validator...")
-            all_ok = True
-            for testcase in testcases:
-                key = validator_cache_key(val_fingerprint, testcase["in_path"])
-                cached_result = cache.get("validator", key)
-                if cached_result is not None:
-                    ok = bool(cached_result.get("ok"))
-                    validator_message = cached_result.get("message", "")
-                    cached = True
-                else:
-                    ok, validator_message = run_validator(val_bin, testcase["in_path"])
-                    cache.set("validator", key, {"ok": ok, "message": validator_message})
-                    cached = False
-                reporter.event(
-                    "validator",
-                    case=testcase["case"],
-                    ok=ok,
-                    message=validator_message,
-                    cached=cached,
-                )
-                if not ok:
-                    all_ok = False
-                    detail = f" ({validator_message})" if validator_message else ""
-                    reporter.text(
-                        f"[-] FATAL: {testcase['case']} violates validator constraints{detail}! "
-                        "Fix the data generator."
-                    )
-                    finish(
-                        reporter,
-                        False,
-                        f"{testcase['case']} violates validator constraints{detail}",
-                        1,
-                    )
-            if all_ok:
-                reporter.text("[+] Validator: ALL PASS")
+        )
+        if val_identity:
+            compiled_identities.append({
+                "role": "validator",
+                "program": val_name,
+                "identity": val_identity,
+            })
     elif jsonl and (validator_entry or val_cpp):
         validator_name = _entry_file(validator_entry) or display_problem_path(prob_dir, val_cpp)
         reporter.event(
@@ -2077,6 +2230,7 @@ def _main_unlocked():
         finish(reporter, False, f"unsupported judge.type: {judge_type}", 1, "invalid_judge_type")
 
     judge_bin = None
+    judge_identity = None
     judge_fingerprint = "standard-v2-ignore-line-trailing-whitespace"
     if judge_type in {"custom", "interactive"}:
         source_key = "checker" if judge_type == "custom" else "interactor"
@@ -2086,7 +2240,7 @@ def _main_unlocked():
             finish(reporter, False, f"{source_key} not found: {judge_name}", 1, f"{source_key}_missing")
         judge_bin = binary_path_for_source(judge_source)
         judge_fingerprint = source_fingerprint(judge_source, prob_dir, source_key)
-        if not compile_cpp(
+        judge_identity = compile_cpp(
             judge_source,
             judge_bin,
             reporter,
@@ -2094,8 +2248,14 @@ def _main_unlocked():
             judge_name,
             cache=cache,
             fingerprint=judge_fingerprint,
-        ):
+        )
+        if not judge_identity:
             finish(reporter, False, f"{source_key} failed to compile", 1, f"{source_key}_compile_failed")
+        compiled_identities.append({
+            "role": source_key,
+            "program": judge_name,
+            "identity": judge_identity,
+        })
 
     # 2. Discover and compile all solutions
     solutions = {"std": [], "brute": [], "wrong": []}
@@ -2113,7 +2273,7 @@ def _main_unlocked():
                 continue
             bin_name = binary_path_for_source(source_path)
             fingerprint = source_fingerprint(source_path, prob_dir, kind)
-            if compile_cpp(
+            solution_identity = compile_cpp(
                 source_path,
                 bin_name,
                 reporter,
@@ -2121,7 +2281,13 @@ def _main_unlocked():
                 program_name,
                 cache=cache,
                 fingerprint=fingerprint,
-            ):
+            )
+            if solution_identity:
+                compiled_identities.append({
+                    "role": kind,
+                    "program": program_name,
+                    "identity": solution_identity,
+                })
                 solutions[kind].append((
                     program_name,
                     bin_name,
@@ -2145,7 +2311,65 @@ def _main_unlocked():
             "accepted_compile_failed",
         )
 
-    # 3. Evaluate all solutions
+    identity_error = verify_binary_identities(compiled_identities)
+    if identity_error:
+        finish(
+            reporter,
+            False,
+            identity_error["message"],
+            1,
+            "binary_changed",
+            failure_kind="infrastructure",
+            role=identity_error.get("role"),
+            program=identity_error.get("program"),
+            path=identity_error.get("path"),
+            expected_digest=identity_error.get("expected_digest"),
+            actual_digest=identity_error.get("actual_digest"),
+            expected_size=identity_error.get("expected_size"),
+            actual_size=identity_error.get("actual_size"),
+        )
+
+    # 3. Run Validator only after the whole Judge binary snapshot passed.
+    if val_bin and val_fingerprint and any(
+        entry.get("role") == "validator" for entry in compiled_identities
+    ):
+        reporter.text("\nRunning validator...")
+        all_ok = True
+        for testcase in testcases:
+            key = validator_cache_key(val_fingerprint, testcase["in_path"])
+            cached_result = cache.get("validator", key)
+            if cached_result is not None:
+                ok = bool(cached_result.get("ok"))
+                validator_message = cached_result.get("message", "")
+                cached = True
+            else:
+                ok, validator_message = run_validator(val_bin, testcase["in_path"])
+                cache.set("validator", key, {"ok": ok, "message": validator_message})
+                cached = False
+            reporter.event(
+                "validator",
+                case=testcase["case"],
+                ok=ok,
+                message=validator_message,
+                cached=cached,
+            )
+            if not ok:
+                all_ok = False
+                detail = f" ({validator_message})" if validator_message else ""
+                reporter.text(
+                    f"[-] FATAL: {testcase['case']} violates validator constraints{detail}! "
+                    "Fix the data generator."
+                )
+                finish(
+                    reporter,
+                    False,
+                    f"{testcase['case']} violates validator constraints{detail}",
+                    1,
+                )
+        if all_ok:
+            reporter.text("[+] Validator: ALL PASS")
+
+    # 4. Evaluate all solutions.
     for kind, progs in solutions.items():
         for (
             prog_name,
@@ -2472,6 +2696,16 @@ def main():
             no_follow=True,
         ):
             return _main_unlocked()
+    except BinaryChangedError as exc:
+        reporter = Reporter("--jsonl" in sys.argv)
+        finish(
+            reporter,
+            False,
+            str(exc),
+            1,
+            "binary_changed",
+            failure_kind="infrastructure",
+        )
     except ProbHubError as exc:
         reporter = Reporter("--jsonl" in sys.argv)
         finish(reporter, False, str(exc), 1, exc.code)
