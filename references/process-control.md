@@ -111,6 +111,8 @@ Flask 多线程请求和 CLI 都不会在父进程中使用 Python `preexec_fn`�
 - 编译器超时、输出超限或异常会产生结构化编译失败。
 - Interactor 的协议结果与选手结果分离；Interactor 自身超限为 `FAIL`。
 
+C++ 编译产物先在题目目录内的隔离 staging 目录生成并计算 SHA-256 与字节数，随后才原子替换正式缓存二进制。缓存命中与 `--no-cache` 新编译都返回同一结构的二进制身份；Validator、Checker/Interactor、accepted、brute 和 wrong 全部编译完成后，Judge 会在首次执行任何程序前统一复核一次。文件缺失、大小变化或摘要变化返回 `binary_changed` 与 `failure_kind: infrastructure`，不会成为 AC/WA、错解击杀或新的逐点缓存结果。身份围栏只在单次 Judge 会话首次执行前运行，不为每个测试点重复哈希。
+
 这一区分对出题自检很重要：官方工具失败必须修复题目基础设施，不能作为错解“被击杀”的证据。
 
 PDF 解析不会在 CLI 主构建进程或 Flask 请求线程内直接运行。Core 通过独立 Python worker 调用固定版本 pypdf，默认限制为 30 秒、512 MiB、1 MiB stdout/stderr 共享预算和 4 个进程；WebUI 页数检查使用 10 秒 deadline，页面渲染继续由受控 Poppler 进程完成。worker 超时、内存/输出/进程超限、损坏 JSON、链接输入、畸形 PDF 或缺失切页输出统一返回 `pdf_processing_failed`；正式 build/typeset 仍在 staging 中处理，失败不会覆盖最后正确产物。

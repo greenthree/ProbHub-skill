@@ -323,6 +323,8 @@ limits:
 
 选手程序超过输出预算时状态为 `OLE`；超过进程数上限时为 `RE` 并带 `process limit exceeded`。官方 Checker、Validator、Interactor 或编译器自身超时、超限、无法建立完整进程树控制或返回 `process_cleanup_failed` 时属于基础设施 `FAIL`，而不是选手答案错误；该原因也会覆盖普通运行的候选 verdict。输出超限后，保存的 stdout/stderr 会截断到预算以内。完整跨平台语义见 `references/process-control.md`。
 
+每个 C++ 编译结果还带有本次发布二进制的 `binary_digest`（SHA-256）和 `binary_size`。Judge 在 Validator、Checker/Interactor、accepted、brute、wrong 全部编译完成后、首次执行任何程序前统一复核这些身份；文件被替换、截断或删除时返回 `code: binary_changed`、`failure_kind: infrastructure`，不会计入 AC/WA、错解击杀或逐点缓存。
+
 成功最终事件：
 
 ```json
@@ -372,7 +374,7 @@ limits:
 
 缓存层级：
 
-- 编译：源码、相关头文件、参数、编译器、平台、二进制摘要。
+- 编译：源码、相关头文件、参数、编译器、平台、二进制摘要和字节数。
 - Validator：验证器指纹和输入内容。
 - Case：程序指纹、输入、答案、时限、内存、输出上限、进程数上限、平台和沙箱策略。
 

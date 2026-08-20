@@ -306,6 +306,48 @@ class PublishedReleaseTests(unittest.TestCase):
         registry.assert_called_once_with(VERSION, registry_url=REGISTRY)
         local_pack.assert_not_called()
 
+    def test_clean_install_fixture_adds_timing_headroom_without_changing_other_limits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            problem = workspace / "E2E"
+            problem.mkdir()
+            config_path = problem / "probhub.yaml"
+            config_path.write_text(
+                "limits:\n"
+                "  time: 1\n"
+                "  memory: 256\n"
+                "  output: 64\n"
+                "  processes: 32\n"
+                "judge:\n"
+                "  type: custom\n",
+                encoding="utf-8",
+            )
+
+            check_clean_install._set_e2e_time_limit(workspace)
+
+            updated = config_path.read_text(encoding="utf-8")
+            self.assertIn(f"  time: {check_clean_install.E2E_TIME_LIMIT_SECONDS}\n", updated)
+            self.assertIn("  memory: 256\n", updated)
+            self.assertIn("  output: 64\n", updated)
+            self.assertIn("  processes: 32\n", updated)
+
+    def test_clean_install_fixture_rejects_ambiguous_time_fields(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config_path = Path(temp) / "E2E/probhub.yaml"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                "limits:\n  time: 1\njudge:\n  time: 2\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(check_clean_install.CleanInstallError):
+                check_clean_install._set_e2e_time_limit(Path(temp))
+
+            self.assertEqual(
+                config_path.read_text(encoding="utf-8"),
+                "limits:\n  time: 1\njudge:\n  time: 2\n",
+            )
+
     def test_pack_manifest_passes_registry_as_an_argv_token(self):
         completed = {
             "reason": "completed",

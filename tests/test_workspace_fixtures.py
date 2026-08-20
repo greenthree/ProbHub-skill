@@ -98,6 +98,24 @@ class FixtureExecutionTests(unittest.TestCase):
                 cases = [event for event in result["events"] if event.get("type") == "case"]
                 self.assertTrue(cases, result)
                 self.assertEqual({case["judge_type"] for case in cases}, {judge_type})
+                successful_compiles = [
+                    event for event in result["events"]
+                    if event.get("type") == "compile" and event.get("ok") is True
+                ]
+                self.assertTrue(successful_compiles, result)
+                self.assertTrue(all(event.get("binary_digest") for event in successful_compiles))
+                self.assertTrue(all(event.get("binary_size", 0) > 0 for event in successful_compiles))
+                first_execution = next(
+                    index for index, event in enumerate(result["events"])
+                    if event.get("type") in {"validator", "case"}
+                )
+                self.assertLess(
+                    max(
+                        index for index, event in enumerate(result["events"])
+                        if event.get("type") == "compile"
+                    ),
+                    first_execution,
+                )
 
     def test_stress_workspace_passes_deterministic_rounds(self):
         with tempfile.TemporaryDirectory() as temp:

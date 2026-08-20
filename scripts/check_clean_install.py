@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -50,6 +51,13 @@ WINDOWS_NODE_CHILD_LAUNCHER = (
 
 class CleanInstallError(RuntimeError):
     pass
+
+
+# The generated scaffold defaults to a one-second limit.  That is appropriate
+# for a new problem, but too close to Windows process-startup jitter for this
+# release smoke test.  Keep the fixture's resource semantics intact while
+# leaving enough margin to test the delivery flow deterministically.
+E2E_TIME_LIMIT_SECONDS = 5
 
 
 for stream in (sys.stdout, sys.stderr):
@@ -166,6 +174,35 @@ def _configure_checker_qa(workspace):
     output = problem / "judge-fixtures/checker/accepted.out"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(b"3\n")
+
+
+def _set_e2e_time_limit(workspace, seconds=E2E_TIME_LIMIT_SECONDS):
+    """Give the generated clean-install problem deterministic timing headroom."""
+    config_path = Path(workspace) / "E2E/probhub.yaml"
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CleanInstallError(f"failed to read generated E2E config: {exc}") from exc
+    matches = list(re.finditer(
+        r"(?m)^(?P<indent>[ \t]*)time:[ \t]*(?P<value>\d+)"
+        r"(?P<suffix>[ \t]*(?:#.*)?)(?P<newline>\r?\n|$)",
+        text,
+    ))
+    if len(matches) != 1:
+        raise CleanInstallError("generated E2E config has an ambiguous limits.time field")
+    match = matches[0]
+    limits_header = re.search(r"(?m)^limits:[ \t]*(?:\r?\n|$)", text[:match.start()])
+    if limits_header is None:
+        raise CleanInstallError("generated E2E config has no limits mapping")
+    replacement = (
+        f"{match.group('indent')}time: {int(seconds)}"
+        f"{match.group('suffix')}{match.group('newline')}"
+    )
+    updated = text[:match.start()] + replacement + text[match.end():]
+    try:
+        config_path.write_text(updated, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        raise CleanInstallError(f"failed to write generated E2E config: {exc}") from exc
 
 
 def _installed_package_metadata(package_root):
@@ -446,6 +483,7 @@ def run_clean_install(*, registry_version=None, registry_url=DEFAULT_REGISTRY):
             cwd=project,
             env=env,
         )
+        _set_e2e_time_limit(workspace)
         _configure_checker_qa(workspace)
         generated = _run_json([*common, "gen", "E2E", "--apply"], cwd=project, env=env)
         cases = generated.get("results", [])
