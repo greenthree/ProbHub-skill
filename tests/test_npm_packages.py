@@ -42,8 +42,18 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertIn("--require-clean", main["scripts"]["prepublishOnly"])
         self.assertIn("--require-head-tag", compat["scripts"]["prepublishOnly"])
         self.assertIn("CHANGELOG.md", main["files"])
+        self.assertIn("requirements.lock", main["files"])
         self.assertIn("scripts/webui/**", main["files"])
         self.assertIn("!scripts/audit_python_dependencies.py", main["files"])
+        self.assertIn("!scripts/update_python_dependency_lock.py", main["files"])
+        self.assertEqual(
+            "python scripts/update_python_dependency_lock.py && python scripts/update_python_dependency_lock.py --source requirements-audit.txt --lock requirements-audit.lock",
+            main["scripts"]["python:lock:check"],
+        )
+        self.assertEqual(
+            "python scripts/update_python_dependency_lock.py --apply && python scripts/update_python_dependency_lock.py --source requirements-audit.txt --lock requirements-audit.lock --apply",
+            main["scripts"]["python:lock:update"],
+        )
 
     def test_judge_qa_runtime_and_contract_are_published(self):
         main_files = {
@@ -57,6 +67,11 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertIn("probhub/mutation_parser_worker.py", main_files)
         self.assertIn("references/checker-interactor.md", main_files)
         self.assertIn("references/mutation-testing.md", main_files)
+        self.assertIn("requirements.lock", main_files)
+        self.assertNotIn("requirements-audit.txt", main_files)
+        self.assertNotIn("requirements-audit.lock", main_files)
+        self.assertIn("probhub/dependency_lock.py", main_files)
+        self.assertNotIn("scripts/update_python_dependency_lock.py", main_files)
 
     def test_both_packages_expose_cli_and_skill_installer(self):
         expected_bins = {
@@ -91,7 +106,9 @@ class NpmPackageMetadataTests(unittest.TestCase):
         for label, content in documents.items():
             with self.subTest(document=label):
                 self.assertIn("Node.js 18", content)
-                self.assertIn("Python 3.10", content)
+                self.assertIn("CPython 3.10", content)
+                self.assertIn("3.12", content)
+                self.assertIn("x86_64", content)
                 self.assertIn("python3-pip", content)
                 self.assertIn(windows, content)
                 self.assertIn(linux, content)
@@ -433,16 +450,26 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 },
                 clear=False,
             ),
+            patch("probhub.install_deps.verify_wheelhouse", return_value={"ok": True}),
             patch("probhub.install_deps.run_managed_to_files", return_value=completed) as run,
         ):
             code = install_deps.main()
         self.assertEqual(code, 0)
-        command = run.call_args.args[0]
+        self.assertEqual(run.call_count, 2)
+        download_command = run.call_args_list[0].args[0]
+        command = run.call_args_list[1].args[0]
         self.assertIn(sys.executable, command)
         self.assertIn("pip", command)
         self.assertIn("install", command)
         self.assertIn("--user", command)
-        self.assertIn(str(ROOT / "requirements.txt"), command)
+        self.assertIn("--no-index", command)
+        self.assertIn("--find-links", command)
+        self.assertIn("--force-reinstall", command)
+        self.assertIn("download", download_command)
+        self.assertIn("--dest", download_command)
+        self.assertIn(str(ROOT / "requirements.lock"), command)
+        self.assertIn("--require-hashes", command)
+        self.assertIn("--only-binary=:all:", command)
         child_env = run.call_args.kwargs["env"]
         self.assertEqual(child_env["PIP_BREAK_SYSTEM_PACKAGES"], "1")
         self.assertNotIn("PYTHONHOME", child_env)
@@ -455,12 +482,77 @@ class NpmPackageMetadataTests(unittest.TestCase):
         completed = {"reason": "completed", "returncode": 0, "message": None}
         with (
             patch("probhub.install_deps._inside_virtual_environment", return_value=True),
+            patch("probhub.install_deps.verify_wheelhouse", return_value={"ok": True}),
             patch("probhub.install_deps.run_managed_to_files", return_value=completed) as run,
         ):
             code = install_deps.main()
         self.assertEqual(code, 0)
-        self.assertNotIn("--user", run.call_args.args[0])
+        self.assertEqual(run.call_count, 2)
+        self.assertNotIn("--user", run.call_args_list[1].args[0])
         self.assertNotIn("PIP_BREAK_SYSTEM_PACKAGES", run.call_args.kwargs["env"])
+
+    def test_dependency_installer_rejects_an_invalid_lock_before_starting_pip(self):
+        from probhub import install_deps
+        from probhub.dependency_lock import DependencyLockError
+
+        error = io.StringIO()
+        with (
+            patch("probhub.install_deps._inside_virtual_environment", return_value=True),
+            patch(
+                "probhub.install_deps.load_dependency_lock",
+                side_effect=DependencyLockError("dependency_lock_missing", "lock missing"),
+            ),
+            patch("probhub.install_deps.run_managed_to_files") as run,
+            redirect_stderr(error),
+        ):
+            code = install_deps.main()
+
+        self.assertEqual(code, 1)
+        self.assertIn("dependency_lock_missing", error.getvalue())
+        run.assert_not_called()
+
+    def test_dependency_download_failure_never_starts_install(self):
+        from probhub import install_deps
+
+        failed = {"reason": "completed", "returncode": 1, "message": None}
+        error = io.StringIO()
+        with (
+            patch("probhub.install_deps._inside_virtual_environment", return_value=True),
+            patch("probhub.install_deps.run_managed_to_files", return_value=failed) as run,
+            patch("probhub.install_deps.verify_wheelhouse") as verify,
+            redirect_stderr(error),
+        ):
+            code = install_deps.main()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("download", run.call_args.args[0])
+        verify.assert_not_called()
+        self.assertIn("dependency download failed", error.getvalue())
+
+    def test_invalid_downloaded_wheel_never_starts_install(self):
+        from probhub import install_deps
+        from probhub.dependency_lock import DependencyLockError
+
+        completed = {"reason": "completed", "returncode": 0, "message": None}
+        error = io.StringIO()
+        with (
+            patch("probhub.install_deps._inside_virtual_environment", return_value=True),
+            patch("probhub.install_deps.run_managed_to_files", return_value=completed) as run,
+            patch(
+                "probhub.install_deps.verify_wheelhouse",
+                side_effect=DependencyLockError(
+                    "dependency_wheel_hash_mismatch",
+                    "tampered wheel",
+                ),
+            ),
+            redirect_stderr(error),
+        ):
+            code = install_deps.main()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("dependency_wheel_hash_mismatch", error.getvalue())
 
     def test_dependency_installer_explains_missing_ubuntu_pip(self):
         from probhub import install_deps
@@ -486,17 +578,23 @@ class NpmPackageMetadataTests(unittest.TestCase):
     def test_windows_dependency_installer_uses_a_bounded_node_supervisor(self):
         from probhub import install_deps
 
-        requirements = ROOT / "requirements.txt"
+        requirements = ROOT / "requirements.lock"
         with (
             patch("probhub.install_deps.os.name", "nt"),
             patch("probhub.install_deps.shutil.which", return_value="C:/node/node.exe"),
             patch.dict(os.environ, {"PYTHON": "C:/python/python.exe"}, clear=False),
         ):
-            command = install_deps._pip_install_command(requirements, user_install=False)
+            command = install_deps._pip_install_command(
+                requirements,
+                user_install=False,
+                wheelhouse=Path("C:/tmp/wheelhouse"),
+            )
         self.assertEqual(command[:2], ["C:/node/node.exe", "-e"])
         self.assertEqual(command[3:7], ["C:/python/python.exe", "-m", "pip", "install"])
-        self.assertIn("--only-binary", command)
-        self.assertIn("tree-sitter,tree-sitter-cpp", command)
+        self.assertIn("--require-hashes", command)
+        self.assertIn("--only-binary=:all:", command)
+        self.assertIn("--no-index", command)
+        self.assertIn("--find-links", command)
         self.assertEqual(command[-1], str(requirements))
 
     @unittest.skipUnless(shutil.which("node"), "node is required")

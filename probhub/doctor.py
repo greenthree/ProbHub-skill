@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from .builder_fingerprint import builder_toolchain_status
+from .dependency_lock import SUPPORTED_RUNTIME_DESCRIPTION
 from .errors import ProbHubError
 from .mutation_syntax import (
     TREE_SITTER_CPP_VERSION,
@@ -175,10 +176,18 @@ def run_doctor():
 
     tools = {
         "python": {
-            "ok": sys.version_info >= (3, 10),
+            "ok": (
+                sys.implementation.name == "cpython"
+                and (3, 10) <= (sys.version_info.major, sys.version_info.minor) < (3, 13)
+                and platform.system() in {"Windows", "Linux"}
+                and platform.machine().lower() in {"x86_64", "amd64"}
+            ),
             "path": sys.executable,
             "version": platform.python_version(),
-            "requirement": ">=3.10",
+            "implementation": sys.implementation.name,
+            "platform": platform.system(),
+            "architecture": platform.machine(),
+            "requirement": SUPPORTED_RUNTIME_DESCRIPTION,
         },
         "g++": _command_version("g++"),
         "typst": typst,

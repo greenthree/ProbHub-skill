@@ -12,9 +12,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.check_release import run_bounded
+from probhub.dependency_lock import (
+    DependencyLockError,
+    active_locked_requirements,
+    load_dependency_lock,
+    normalize_project_name,
+    validate_target_coverage,
+)
 
 
-DEFAULT_REQUIREMENTS = ROOT / "requirements.txt"
+DEFAULT_REQUIREMENTS = ROOT / "requirements.lock"
+DEFAULT_SOURCE_REQUIREMENTS = ROOT / "requirements.txt"
 DEFAULT_EXCEPTIONS = ROOT / "security/python-audit-exceptions.json"
 AUDIT_TIMEOUT_SECONDS = 180
 AUDIT_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
@@ -87,17 +95,33 @@ def audit_command(requirements):
     ]
 
 
-def evaluate_audit(payload, exceptions):
+def evaluate_audit(
+    payload,
+    exceptions,
+    *,
+    expected_requirements=None,
+    all_requirement_names=None,
+):
     dependencies = payload.get("dependencies") if isinstance(payload, dict) else None
     if not isinstance(dependencies, list):
         raise DependencyAuditError("Python dependency audit returned an unexpected schema")
     matched = set()
     unhandled = []
     vulnerability_count = 0
+    audited_requirements = {}
     for dependency in dependencies:
-        if not isinstance(dependency, dict) or not isinstance(dependency.get("name"), str):
+        if (
+            not isinstance(dependency, dict)
+            or not isinstance(dependency.get("name"), str)
+            or not isinstance(dependency.get("version"), str)
+        ):
             raise DependencyAuditError("Python dependency audit returned an invalid dependency")
-        package = dependency["name"].casefold()
+        package = normalize_project_name(dependency["name"])
+        if package in audited_requirements:
+            raise DependencyAuditError(
+                f"Python dependency audit returned a duplicate dependency: {dependency['name']}"
+            )
+        audited_requirements[package] = dependency["version"]
         vulnerabilities = dependency.get("vulns")
         if not isinstance(vulnerabilities, list):
             raise DependencyAuditError("Python dependency audit returned invalid vulnerabilities")
@@ -108,7 +132,10 @@ def evaluate_audit(payload, exceptions):
             identifiers = {vulnerability["id"], *(vulnerability.get("aliases") or [])}
             accepted = None
             for entry in exceptions:
-                if entry["id"] in identifiers and entry["package"].casefold() == package:
+                if (
+                    entry["id"] in identifiers
+                    and normalize_project_name(entry["package"]) == package
+                ):
                     accepted = entry
                     break
             if accepted is None:
@@ -116,7 +143,28 @@ def evaluate_audit(payload, exceptions):
                 unhandled.append(f"{dependency['name']} {vulnerability['id']} (fix: {fixes})")
             else:
                 matched.add(accepted["id"])
-    stale = sorted(entry["id"] for entry in exceptions if entry["id"] not in matched)
+    if expected_requirements is not None and audited_requirements != expected_requirements:
+        missing = sorted(set(expected_requirements) - set(audited_requirements))
+        extra = sorted(set(audited_requirements) - set(expected_requirements))
+        changed = sorted(
+            name
+            for name in set(expected_requirements) & set(audited_requirements)
+            if expected_requirements[name] != audited_requirements[name]
+        )
+        raise DependencyAuditError(
+            "Python dependency audit result does not match the active runtime lock "
+            f"(missing={missing}, extra={extra}, version_changed={changed})"
+        )
+    stale = []
+    for entry in exceptions:
+        package = normalize_project_name(entry["package"])
+        if all_requirement_names is not None and package not in all_requirement_names:
+            stale.append(entry["id"])
+        elif expected_requirements is not None and package not in expected_requirements:
+            continue
+        elif entry["id"] not in matched:
+            stale.append(entry["id"])
+    stale.sort()
     if unhandled:
         raise DependencyAuditError(
             "unhandled Python dependency vulnerabilities: " + "; ".join(unhandled)
@@ -129,10 +177,27 @@ def evaluate_audit(payload, exceptions):
     return len(dependencies), vulnerability_count
 
 
-def run_audit(requirements=DEFAULT_REQUIREMENTS, exceptions_path=DEFAULT_EXCEPTIONS):
+def run_audit(
+    requirements=DEFAULT_REQUIREMENTS,
+    exceptions_path=DEFAULT_EXCEPTIONS,
+    source_requirements=DEFAULT_SOURCE_REQUIREMENTS,
+):
     requirements = Path(requirements)
     if not requirements.is_file():
         raise DependencyAuditError(f"requirements file is missing: {requirements}")
+    try:
+        lock = load_dependency_lock(requirements, source_path=source_requirements)
+        validate_target_coverage(lock)
+    except DependencyLockError as exc:
+        raise DependencyAuditError(f"runtime dependency lock is invalid ({exc.code}): {exc}") from exc
+    active = active_locked_requirements(lock)
+    expected_requirements = {
+        requirement.pin.normalized_name: requirement.pin.version
+        for requirement in active
+    }
+    all_requirement_names = {
+        requirement.pin.normalized_name for requirement in lock.requirements
+    }
     exceptions = load_exceptions(exceptions_path)
     result = run_bounded(
         audit_command(requirements),
@@ -156,7 +221,12 @@ def run_audit(requirements=DEFAULT_REQUIREMENTS, exceptions_path=DEFAULT_EXCEPTI
                 f"({result['returncode']} / completed): {detail or 'invalid or empty JSON output'}"
             ) from exc
         raise DependencyAuditError("Python dependency audit returned invalid JSON") from exc
-    dependencies, vulnerability_count = evaluate_audit(payload, exceptions)
+    dependencies, vulnerability_count = evaluate_audit(
+        payload,
+        exceptions,
+        expected_requirements=expected_requirements,
+        all_requirement_names=all_requirement_names,
+    )
     if result["returncode"] == 1 and vulnerability_count == 0:
         raise DependencyAuditError(
             "Python dependency audit exited with status 1 but reported no vulnerabilities"
@@ -164,6 +234,8 @@ def run_audit(requirements=DEFAULT_REQUIREMENTS, exceptions_path=DEFAULT_EXCEPTI
     return {
         "ok": True,
         "requirements": str(requirements),
+        "lock_sha256": lock.lock_sha256,
+        "active_requirements": len(expected_requirements),
         "exceptions": [entry["id"] for entry in exceptions],
         "dependencies": dependencies,
         "vulnerabilities": vulnerability_count,
@@ -173,10 +245,15 @@ def run_audit(requirements=DEFAULT_REQUIREMENTS, exceptions_path=DEFAULT_EXCEPTI
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--requirements", type=Path, default=DEFAULT_REQUIREMENTS)
+    parser.add_argument("--source-requirements", type=Path, default=DEFAULT_SOURCE_REQUIREMENTS)
     parser.add_argument("--exceptions", type=Path, default=DEFAULT_EXCEPTIONS)
     args = parser.parse_args(argv)
     try:
-        payload = run_audit(args.requirements, args.exceptions)
+        payload = run_audit(
+            args.requirements,
+            args.exceptions,
+            source_requirements=args.source_requirements,
+        )
     except DependencyAuditError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 1

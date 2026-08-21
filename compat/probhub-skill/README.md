@@ -2,7 +2,7 @@
 
 `probhub-skill` 是 ProbHub 的轻量 npm 入口包。完整实现由同版本的 [`probhub`](https://www.npmjs.com/package/probhub) 主包提供；本包只保留命令转发，不复制 Python Core、WebUI、Skill 或 references。
 
-安装前需要 Node.js 18 或更高版本（包含 npm），以及 Python 3.10 或更高版本；Ubuntu 的系统 Python 还需安装 `python3-pip`。
+安装前需要 Node.js 18 或更高版本（包含 npm），以及 Windows/Linux x86_64 上的 CPython 3.10、3.11 或 3.12；Ubuntu 的系统 Python 还需安装 `python3-pip`。
 
 Windows PowerShell：
 
@@ -21,7 +21,7 @@ PROBHUB_ALLOW_SYSTEM_PYTHON=1 probhub-skill
 probhub doctor
 ```
 
-`PROBHUB_ALLOW_SYSTEM_PYTHON=1` 明确授权安装器把固定版本的 Python 依赖安装到当前 Python 的用户依赖目录，不会覆盖 Ubuntu 由系统包管理器维护的 Python 包。PowerShell 中的设置只在当前终端会话生效。需要指定另一套 Python 3.10+ 时，先设置 `PYTHON` 指向该解释器。
+`PROBHUB_ALLOW_SYSTEM_PYTHON=1` 明确授权安装器把固定版本的 Python 依赖安装到当前 Python 的用户依赖目录，不会覆盖 Ubuntu 由系统包管理器维护的 Python 包。PowerShell 中的设置只在当前终端会话生效。需要指定另一套受支持的 CPython 3.10–3.12 x86_64 时，先设置 `PYTHON` 指向该解释器。
 
 再次运行安装器时，`.claude/skills/probhub` 与 `.agents/skills/probhub` 会作为完整目录整体替换，而不是增量合并；目录中的本地手工修改不会保留。
 

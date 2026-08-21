@@ -17,9 +17,23 @@ SPEC.loader.exec_module(MODULE)
 
 
 class DependencyAuditTests(unittest.TestCase):
+    def expected_dependencies(self):
+        lock = MODULE.load_dependency_lock(
+            MODULE.DEFAULT_REQUIREMENTS,
+            source_path=MODULE.DEFAULT_SOURCE_REQUIREMENTS,
+        )
+        return [
+            {
+                "name": item.pin.name,
+                "version": item.pin.version,
+                "vulns": [],
+            }
+            for item in MODULE.active_locked_requirements(lock)
+        ]
+
     def audit_result(self, *, returncode=0, reason="completed", stdout=None, stderr="", message=None):
         if stdout is None:
-            stdout = json.dumps({"dependencies": []})
+            stdout = json.dumps({"dependencies": self.expected_dependencies()})
         return {
             "returncode": returncode,
             "reason": reason,
@@ -79,11 +93,12 @@ class DependencyAuditTests(unittest.TestCase):
                 MODULE.load_exceptions(duplicate, today=date(2099, 1, 1))
 
     def test_audit_command_does_not_hide_vulnerabilities_from_evaluation(self):
-        command = MODULE.audit_command(ROOT / "requirements.txt")
+        command = MODULE.audit_command(ROOT / "requirements.lock")
         self.assertNotIn("--ignore-vuln", command)
         self.assertIn("--strict", command)
         self.assertIn("--no-deps", command)
         self.assertIn("--disable-pip", command)
+        self.assertEqual(MODULE.DEFAULT_REQUIREMENTS, ROOT / "requirements.lock")
 
     def test_requirements_pin_the_complete_runtime_closure(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
@@ -116,6 +131,17 @@ class DependencyAuditTests(unittest.TestCase):
             requirements,
         )
 
+    def test_audit_tool_closure_has_a_current_hash_lock(self):
+        lock = MODULE.load_dependency_lock(
+            ROOT / "requirements-audit.lock",
+            source_path=ROOT / "requirements-audit.txt",
+        )
+        MODULE.validate_target_coverage(lock)
+        names = {item.pin.normalized_name for item in lock.requirements}
+        self.assertIn("pip-audit", names)
+        self.assertIn("requests", names)
+        self.assertIn("cyclonedx-python-lib", names)
+
     def test_exception_must_match_vulnerability_and_package(self):
         payload = {
             "dependencies": [{
@@ -144,8 +170,34 @@ class DependencyAuditTests(unittest.TestCase):
         with patch.object(MODULE, "run_bounded", return_value=self.audit_result()):
             result = MODULE.run_audit()
         self.assertTrue(result["ok"])
-        self.assertEqual(result["dependencies"], 0)
+        self.assertEqual(result["dependencies"], len(self.expected_dependencies()))
         self.assertEqual(result["vulnerabilities"], 0)
+        self.assertRegex(result["lock_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_run_audit_rejects_empty_or_version_drifted_dependency_sets(self):
+        payloads = [
+            {"dependencies": []},
+            {
+                "dependencies": [
+                    {
+                        **dependency,
+                        "version": "0.0.0" if index == 0 else dependency["version"],
+                    }
+                    for index, dependency in enumerate(self.expected_dependencies())
+                ]
+            },
+        ]
+        for payload in payloads:
+            with (
+                self.subTest(payload=payload),
+                patch.object(
+                    MODULE,
+                    "run_bounded",
+                    return_value=self.audit_result(stdout=json.dumps(payload)),
+                ),
+                self.assertRaisesRegex(MODULE.DependencyAuditError, "active runtime lock"),
+            ):
+                MODULE.run_audit()
 
     def test_run_audit_fails_closed_on_process_failures(self):
         results = (
@@ -182,17 +234,13 @@ class DependencyAuditTests(unittest.TestCase):
             MODULE.run_audit()
 
     def test_run_audit_rejects_unhandled_vulnerability(self):
-        payload = {
-            "dependencies": [{
-                "name": "example",
-                "version": "1.0",
-                "vulns": [{
-                    "id": "PYSEC-2099-1",
-                    "aliases": [],
-                    "fix_versions": ["2.0"],
-                }],
-            }],
-        }
+        dependencies = self.expected_dependencies()
+        dependencies[0]["vulns"] = [{
+            "id": "PYSEC-2099-1",
+            "aliases": [],
+            "fix_versions": ["2.0"],
+        }]
+        payload = {"dependencies": dependencies}
         result = self.audit_result(returncode=1, stdout=json.dumps(payload))
         with (
             patch.object(MODULE, "run_bounded", return_value=result),
@@ -201,20 +249,19 @@ class DependencyAuditTests(unittest.TestCase):
             MODULE.run_audit()
 
     def test_run_audit_accepts_exit_one_for_reviewed_vulnerability(self):
-        payload = {
-            "dependencies": [{
-                "name": "example",
-                "version": "1.0",
-                "vulns": [{
-                    "id": "PYSEC-2099-1",
-                    "aliases": [],
-                    "fix_versions": [],
-                }],
-            }],
-        }
+        dependencies = self.expected_dependencies()
+        dependencies[0]["vulns"] = [{
+            "id": "PYSEC-2099-1",
+            "aliases": [],
+            "fix_versions": [],
+        }]
+        payload = {"dependencies": dependencies}
         result = self.audit_result(returncode=1, stdout=json.dumps(payload))
         with tempfile.TemporaryDirectory() as temp:
-            exceptions = self.write_exceptions(temp, [self.valid_entry()])
+            exceptions = self.write_exceptions(
+                temp,
+                [self.valid_entry(package=dependencies[0]["name"])],
+            )
             with patch.object(MODULE, "run_bounded", return_value=result):
                 audited = MODULE.run_audit(exceptions_path=exceptions)
         self.assertTrue(audited["ok"])

@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+- Python 运行时依赖新增跨平台 wheel SHA-256 锁：Windows/Linux x86_64 的 CPython 3.10、3.11、3.12 共用同一 `requirements.lock`，安装器先下载并逐文件复核临时 wheelhouse，再仅从本地目录强制安装；缺失 hash、字节变化、sdist、目标不支持或下载失败均在修改依赖前 fail closed。常规 CI、mutation、发布后验证、npm 包门禁与 clean-install 统一使用该身份，Python 3.12 纳入正式矩阵。
+- `pip-audit` 的 CI 专用完整闭包也使用独立 hash lock；单一维护命令会重新下载并计算所有允许 wheel、输出结构化差异并原子更新，离线检查对账 source hash、marker 和六个正式目标。漏洞审计现在严格要求返回的包名与版本集合等于当前 marker 生效的运行时锁，空、缺失、额外或漂移结果均失败。
+
 ## [0.6.9] - 2026-08-17
 
 - 0.6.9 删除 Legacy 工作流及其执行入口：Skill、WebUI 和直接调用的 local judge 只接受 Workspace Schema v1；旧目录统一以 `migration_required` 或 `unsupported_schema` fail closed，不再扫描旧目录源码、读取旧 `meta.json`/`problem.yaml`/`domjudge-problem.ini` 限制或改写旧 PDF/ZIP。移除手工 `add_problem.py`、`extract_new_problem.py` 及旧工作流参考文档；历史 PDF/evidence 格式解析兼容仍作为独立内部能力保留。

@@ -5,12 +5,12 @@
 ## 1. 支持环境
 
 - Node.js 18 或更高版本，包含 npm。
-- Python 3.10 或更高版本；Ubuntu 的系统 Python 需要 `python3-pip`。
+- CPython 3.10、3.11 或 3.12，运行在 Windows/Linux x86_64；Ubuntu 的系统 Python 需要 `python3-pip`。Python 3.13+、PyPy、ARM 和 macOS 当前不在锁文件保证范围内。
 - 完整出题还需要支持 C++17 的 `g++` 与 Typst 0.14.2；固定中文字体随主包提供。
 
-不要向用户推荐创建虚拟环境。`probhub-skill` 会选择 `PYTHON` 指定的解释器；未设置时选择 PATH 中的 Python 3.10+。当该解释器不是虚拟环境时，安装 Python 依赖必须显式设置 `PROBHUB_ALLOW_SYSTEM_PYTHON=1`，依赖只写入该解释器的用户依赖目录。Ubuntu 仍由系统包管理器维护全局 Python 包；缺少 pip 时先运行 `sudo apt install python3-pip`。
+不要向用户推荐创建虚拟环境。`probhub-skill` 会选择 `PYTHON` 指定的受支持解释器；未设置时从 PATH 中选择 CPython 3.10–3.12 x86_64。当该解释器不是虚拟环境时，安装 Python 依赖必须显式设置 `PROBHUB_ALLOW_SYSTEM_PYTHON=1`，依赖只写入该解释器的用户依赖目录。Ubuntu 仍由系统包管理器维护全局 Python 包；缺少 pip 时先运行 `sudo apt install python3-pip`。
 
-该变量仅表示用户同意本次安装向所选 Python 的用户依赖目录写入固定版本依赖。安装器只会在非虚拟环境执行 `python -m pip install --user ...` 时，为该 pip 子进程设置 `PIP_BREAK_SYSTEM_PACKAGES=1`；它不会移除 `--user`、使用 `sudo` 或写入发行版维护的全局 `site-packages`。该变量不关闭沙箱限制，不改变构建身份，也不应被描述为永久系统设置。
+该变量仅表示用户同意本次安装向所选 Python 的用户依赖目录写入固定版本依赖。安装器使用随 npm 包发布的 `requirements.lock`，强制 wheel-only 与 SHA-256 hash；缺少适用 wheel、lock 不完整或下载字节不匹配都会直接失败，不会回退到未锁定版本或源码构建。锁文件本身不包含 wheel，因此断网时仍需提前准备与同一 hash 匹配的 pip 缓存。安装器只会在非虚拟环境执行 `python -m pip install --user ...` 时，为该 pip 子进程设置 `PIP_BREAK_SYSTEM_PACKAGES=1`；它不会移除 `--user`、使用 `sudo` 或写入发行版维护的全局 `site-packages`。该变量不关闭沙箱限制，不改变构建身份，也不应被描述为永久系统设置。
 
 再次运行安装器时，`.claude/skills/probhub` 与 `.agents/skills/probhub` 会作为完整目录整体替换，而不是增量合并；目录中的本地手工修改不会保留。安装仍以两个目标共用的事务发布，任一目标失败时恢复原目录。
 

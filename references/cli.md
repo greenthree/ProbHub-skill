@@ -156,7 +156,7 @@ probhub gen L05 --case max01    # 只处理指定配方（可重复）
 probhub doctor
 ```
 
-用于确认 Python >=3.10、Node >=18、npm、固定 Typst 0.14.2、`Noto Sans CJK SC`、g++ 和 Flask/PyYAML/pypdf，并报告 Python 包实际版本。`python -m probhub doctor` 与 npm `probhub doctor` 在这些业务模块尚未安装时也会输出结构化缺失报告，而不是在参数解析前 traceback。首次安装、换机器或 CI 失败时优先运行。
+用于确认 CPython 3.10–3.12（Windows/Linux x86_64）、Node >=18、npm、固定 Typst 0.14.2、`Noto Sans CJK SC`、g++ 和 Flask/PyYAML/pypdf，并报告 Python 包实际版本。`python -m probhub doctor` 与 npm `probhub doctor` 在这些业务模块尚未安装时也会输出结构化缺失报告，而不是在参数解析前 traceback。首次安装、换机器或 CI 失败时优先运行。
 
 ## 6.1 `ui`
 

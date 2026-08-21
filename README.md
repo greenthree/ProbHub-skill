@@ -53,7 +53,7 @@ flowchart LR
 
 ### 1. 安装 Skill
 
-先确认 Node.js 18+（含 npm）和 Python 3.10+。Ubuntu 的系统 Python 还需要 python3-pip。ProbHub 不要求创建虚拟环境，也不推荐把依赖写入系统 Python 的全局目录。
+先确认 Node.js 18+（含 npm），以及 Windows/Linux x86_64 上的 CPython 3.10、3.11 或 3.12。Ubuntu 的系统 Python 还需要 python3-pip。ProbHub 不要求创建虚拟环境，也不推荐把依赖写入系统 Python 的全局目录。
 
 Windows PowerShell：
 
@@ -213,7 +213,7 @@ Core 生成物不要手工修改：meta.json、Typst problems.json、problem.yam
 
 | 工具 | 要求 | 用途 |
 | --- | --- | --- |
-| [Python](https://www.python.org/downloads/) | 3.10+ | 运行 ProbHub Core |
+| [Python](https://www.python.org/downloads/) | CPython 3.10–3.12，Windows/Linux x86_64 | 运行 ProbHub Core |
 | [Node.js](https://nodejs.org/) | 18+ | 安装 npm 包和 Agent Skill |
 | g++ | C++17 | 编译标程、Validator 和 Checker |
 | [Typst](https://github.com/typst/typst/releases/tag/v0.14.2) | 0.14.2 | 生成 PDF |

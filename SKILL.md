@@ -85,7 +85,7 @@ probhub build
 
 | 命令 | 作用 |
 |---|---|
-| `doctor` | 在业务依赖缺失时也可启动，检查 Python >=3.10、Node >=18、Typst 0.14.2、固定 CJK 字体、g++ 和 Python 依赖 |
+| `doctor` | 在业务依赖缺失时也可启动，检查 CPython 3.10–3.12（Windows/Linux x86_64）、Node >=18、Typst 0.14.2、固定 CJK 字体、g++ 和 Python 依赖 |
 | `init` | 创建 Workspace Schema v1、固定时间戳和可直接组卷的 Typst 模板 |
 | `new <ID>` | 创建可编译、judge 开箱即过的题目骨架（`--judge` 可选 standard/custom/interactive），含带独立性声明的双 accepted、示例错解与定向数据组 |
 | `gen <ID>` | 先预检常见 testlib 源码错误，再按 `data.recipes` 生成/校验 secret 数据；默认 plan 只报告，`--apply` 才写入，失败零写入 |
