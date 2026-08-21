@@ -20,6 +20,9 @@ env:
   TYPST_IGNORE_SYSTEM_FONTS: "true"
   PROBHUB_RUN_TYPST_E2E: "1"
 
+permissions:
+  contents: read
+
 jobs:
   quality:
     if: github.event_name != 'schedule'
