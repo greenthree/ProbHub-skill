@@ -229,6 +229,7 @@ def request_too_large(_error):
 
 @app.after_request
 def add_webui_security_headers(response):
+    response.headers.pop("Access-Control-Allow-Origin", None)
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "

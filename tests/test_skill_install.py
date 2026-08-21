@@ -55,9 +55,15 @@ class SkillInstallTests(unittest.TestCase):
             package = self.create_package(root)
             targets = self.seed_old_installs(base)
 
-            installed = install_skill(base, source_root=package, version="9.8.7")
+            installed, replaced = install_skill(
+                base,
+                source_root=package,
+                version="9.8.7",
+                include_status=True,
+            )
 
             self.assertEqual(installed, targets)
+            self.assertEqual(replaced, (True, True))
             for target in targets:
                 self.assertFalse((target / "old.txt").exists())
                 self.assertEqual((target / "SKILL.md").read_text(encoding="utf-8"), "# new\n")
@@ -66,6 +72,22 @@ class SkillInstallTests(unittest.TestCase):
                 )
                 self.assertEqual(marker["version"], "9.8.7")
                 self.assertTrue((target / "probhub/probhub.txt").is_file())
+            self.assert_no_transactions(base)
+
+    def test_new_install_reports_that_neither_target_was_replaced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = root / "home"
+            package = self.create_package(root)
+
+            installed, replaced = install_skill(
+                base,
+                source_root=package,
+                include_status=True,
+            )
+
+            self.assertEqual(installed, self.targets(base))
+            self.assertEqual(replaced, (False, False))
             self.assert_no_transactions(base)
 
     def test_second_target_publish_failure_rolls_back_both_targets(self):

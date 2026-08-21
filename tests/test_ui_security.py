@@ -179,6 +179,7 @@ class UiSecurityTests(unittest.TestCase):
 
     def test_responses_include_browser_security_headers(self):
         response = self.client.get("/")
+        self.assertNotIn("Access-Control-Allow-Origin", response.headers)
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
@@ -194,6 +195,27 @@ class UiSecurityTests(unittest.TestCase):
         self.assertNotIn("fonts.googleapis.com", csp)
         self.assertIn("font-src 'self'", csp)
         self.assertIn("img-src 'self' data:", csp)
+
+    def test_success_and_rejection_responses_never_grant_cross_origin_access(self):
+        responses = [
+            self.client.get("/"),
+            self.client.get("/webui/assets/app.js"),
+            self.client.post(
+                "/api/data",
+                json={},
+                headers={
+                    **self.csrf_headers,
+                    "Origin": "https://attacker.example",
+                },
+            ),
+        ]
+        try:
+            self.assertEqual(responses[-1].status_code, 403)
+            for response in responses:
+                self.assertNotIn("Access-Control-Allow-Origin", response.headers)
+        finally:
+            for response in responses:
+                response.close()
 
     def test_oversized_upload_returns_structured_413(self):
         response = self.client.post(
@@ -236,7 +258,11 @@ class UiSecurityTests(unittest.TestCase):
     def test_markdown_preview_routes_rendered_html_through_sanitizer(self):
         html = (self.ui.WEBUI_ASSET_DIR / "app.js").read_text(encoding="utf-8")
         self.assertIn("function sanitizeRenderedMarkdown(html)", html)
-        self.assertIn("el.innerHTML = sanitizeRenderedMarkdown(marked.parse(text));", html)
+        self.assertIn("'script', 'style', 'svg', 'template', 'video', 'xmp'", html)
+        self.assertIn("return template.content;", html)
+        self.assertIn("el.replaceChildren(sanitizeRenderedMarkdown(marked.parse(text)));", html)
+        self.assertNotIn("return template.innerHTML;", html)
+        self.assertNotIn("el.innerHTML = sanitizeRenderedMarkdown(marked.parse(text));", html)
         self.assertNotIn("el.innerHTML = marked.parse(text);", html)
 
     @unittest.skipUnless(HEADLESS_BROWSER, "Edge, Chrome, or Chromium is required for DOM sanitizer tests")
@@ -250,12 +276,31 @@ class UiSecurityTests(unittest.TestCase):
             '<a href="javascript:alert(1)" style="position:fixed">x</a>'
             '<svg><script>alert(1)</script></svg>'
             '<iframe srcdoc="<script>alert(1)</script>"></iframe>'
+            '<noscript><img src="/noscript.png" onerror="alert(1)"></noscript>'
+            '<xmp><img src="/xmp.png" onerror="alert(1)"></xmp>'
+            '<p><a href="https://example.com/safe" target="_blank" rel="opener">outer'
+            '<a href="javascript:alert(2)" onclick="alert(2)">inner</a>end</a></p>'
+            '<strong>safe formatting</strong>'
         )
         encoded = json.dumps(malicious).replace("</", "<\\/")
         page = (
-            "<!doctype html><meta charset=\"utf-8\"><div id=\"result\"></div><script>"
+            "<!doctype html><meta charset=\"utf-8\"><div id=\"result\"></div>"
+            "<div id=\"reparsed\"></div><pre id=\"probe\"></pre><script>"
             + sanitizer
-            + f"document.getElementById('result').textContent = sanitizeRenderedMarkdown({encoded});"
+            + "function inspect(root) {"
+            + "return {"
+            + "html: root.innerHTML,"
+            + "forbiddenTags: root.querySelectorAll('script,style,svg,iframe,noscript,xmp,template,object').length,"
+            + "forbiddenAttributes: root.querySelectorAll('[onerror],[onclick],[style],[srcdoc]').length,"
+            + "unsafeLinks: Array.from(root.querySelectorAll('a[href]')).filter(a => a.href.startsWith('javascript:')).length,"
+            + "externalImages: Array.from(root.querySelectorAll('img[src]')).filter(img => img.origin !== window.location.origin).length,"
+            + "anchors: Array.from(root.querySelectorAll('a')).map(a => ({href: a.getAttribute('href'), target: a.getAttribute('target'), rel: a.getAttribute('rel')})),"
+            + "strongText: root.querySelector('strong')?.textContent || ''"
+            + "};"
+            + "}"
+            + f"const result = document.getElementById('result');result.replaceChildren(sanitizeRenderedMarkdown({encoded}));"
+            + "const reparsed = document.getElementById('reparsed');reparsed.innerHTML = result.innerHTML;"
+            + "document.getElementById('probe').textContent = JSON.stringify({result: inspect(result), reparsed: inspect(reparsed)});"
             + "</script>"
         )
         root = Path(tempfile.mkdtemp())
@@ -291,15 +336,39 @@ class UiSecurityTests(unittest.TestCase):
             remove_tree_after_handle_release(root)
         self.assertEqual(completed["reason"], "completed", browser_stderr[-2000:])
         self.assertEqual(completed["returncode"], 0, browser_stderr[-2000:])
-        match = re.search(r'<div id="result">(.*?)</div>', browser_stdout, re.DOTALL)
+        match = re.search(r'<pre id="probe">(.*?)</pre>', browser_stdout, re.DOTALL)
         self.assertIsNotNone(match, browser_stdout[-2000:])
-        sanitized = html.unescape(match.group(1))
-        self.assertEqual(
-            sanitized,
-            '<img><a>x</a>',
-        )
-        for forbidden in ("onerror", "javascript:", "style=", "<svg", "<script", "<iframe", "srcdoc"):
-            self.assertNotIn(forbidden, sanitized.lower())
+        probe = json.loads(html.unescape(match.group(1)))
+        for stage in ("result", "reparsed"):
+            with self.subTest(stage=stage):
+                state = probe[stage]
+                self.assertEqual(state["forbiddenTags"], 0)
+                self.assertEqual(state["forbiddenAttributes"], 0)
+                self.assertEqual(state["unsafeLinks"], 0)
+                self.assertEqual(state["externalImages"], 0)
+                self.assertEqual(state["strongText"], "safe formatting")
+                self.assertIn(
+                    {
+                        "href": "https://example.com/safe",
+                        "target": "_blank",
+                        "rel": "noopener noreferrer",
+                    },
+                    state["anchors"],
+                )
+                self.assertTrue(any(anchor["href"] is None for anchor in state["anchors"]))
+                for forbidden in (
+                    "onerror",
+                    "onclick",
+                    "javascript:",
+                    "style=",
+                    "<svg",
+                    "<script",
+                    "<iframe",
+                    "<noscript",
+                    "<xmp",
+                    "srcdoc",
+                ):
+                    self.assertNotIn(forbidden, state["html"].lower())
 
 
 if __name__ == "__main__":

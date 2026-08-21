@@ -10,7 +10,9 @@
 
 不要向用户推荐创建虚拟环境。`probhub-skill` 会选择 `PYTHON` 指定的解释器；未设置时选择 PATH 中的 Python 3.10+。当该解释器不是虚拟环境时，安装 Python 依赖必须显式设置 `PROBHUB_ALLOW_SYSTEM_PYTHON=1`，依赖只写入该解释器的用户依赖目录。Ubuntu 仍由系统包管理器维护全局 Python 包；缺少 pip 时先运行 `sudo apt install python3-pip`。
 
-该变量仅表示用户同意本次安装向所选 Python 的用户依赖目录写入固定版本依赖。它不关闭沙箱限制，不改变构建身份，也不应被描述为永久系统设置。
+该变量仅表示用户同意本次安装向所选 Python 的用户依赖目录写入固定版本依赖。安装器只会在非虚拟环境执行 `python -m pip install --user ...` 时，为该 pip 子进程设置 `PIP_BREAK_SYSTEM_PACKAGES=1`；它不会移除 `--user`、使用 `sudo` 或写入发行版维护的全局 `site-packages`。该变量不关闭沙箱限制，不改变构建身份，也不应被描述为永久系统设置。
+
+再次运行安装器时，`.claude/skills/probhub` 与 `.agents/skills/probhub` 会作为完整目录整体替换，而不是增量合并；目录中的本地手工修改不会保留。安装仍以两个目标共用的事务发布，任一目标失败时恢复原目录。
 
 ## 2. 持久安装
 

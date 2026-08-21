@@ -23,6 +23,8 @@ probhub doctor
 
 `PROBHUB_ALLOW_SYSTEM_PYTHON=1` 明确授权安装器把固定版本的 Python 依赖安装到当前 Python 的用户依赖目录，不会覆盖 Ubuntu 由系统包管理器维护的 Python 包。PowerShell 中的设置只在当前终端会话生效。需要指定另一套 Python 3.10+ 时，先设置 `PYTHON` 指向该解释器。
 
+再次运行安装器时，`.claude/skills/probhub` 与 `.agents/skills/probhub` 会作为完整目录整体替换，而不是增量合并；目录中的本地手工修改不会保留。
+
 临时运行时使用：
 
 ```powershell

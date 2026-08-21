@@ -83,6 +83,8 @@ The Skill is installed into:
 ~/.agents/skills/probhub
 ~~~
 
+Running the installer again replaces both Skill directories as whole directories rather than merging files. Local manual changes inside them are not preserved.
+
 ### 2. Call an Agent
 
 Open Codex, Claude Code, or another compatible Agent in the directory where you keep contest files, then describe the goal:
@@ -290,7 +292,7 @@ Re-run the original build, gen --apply, or stress --fixate command so ProbHub ca
 
 ## Security boundary
 
-ProbHub is for a local, single-user, trusted setting. It limits time, memory, output, and process trees, but is not a strong sandbox; another process on the same machine may access the loopback service, and a CSRF token is not multi-user host authentication. Do not run unknown or intentionally hostile code with ProbHub; use a dedicated VM or container instead.
+ProbHub is for a local, single-user, trusted setting, and the WebUI is intended only for that boundary. It limits time, memory, output, and process trees, but is not a strong sandbox; another process on the same machine may access the loopback service, and a CSRF token is not multi-user host authentication. Do not run unknown or intentionally hostile code with ProbHub; use a dedicated VM or container instead.
 
 ## Further reading
 

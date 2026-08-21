@@ -495,7 +495,7 @@ def recover_skill_install(base_dir):
         _recover_locked(base)
 
 
-def install_skill(base_dir, *, source_root=None, version=None):
+def install_skill(base_dir, *, source_root=None, version=None, include_status=False):
     source_root = (
         Path(source_root).resolve()
         if source_root is not None
@@ -601,7 +601,10 @@ def install_skill(base_dir, *, source_root=None, version=None):
                 except OSError:
                     pass
             raise
-    return tuple(_safe_target(base, relative) for relative in TARGETS)
+    targets = tuple(_safe_target(base, relative) for relative in TARGETS)
+    if include_status:
+        return targets, tuple(bool(entry["existed"]) for entry in entries)
+    return targets
 
 
 def main(argv=None):
@@ -610,12 +613,21 @@ def main(argv=None):
     parser.add_argument("--version", help="npm package version written into the marker")
     arguments = parser.parse_args(argv)
     try:
-        targets = install_skill(arguments.base, version=arguments.version)
+        targets, replaced = install_skill(
+            arguments.base,
+            version=arguments.version,
+            include_status=True,
+        )
     except Exception as exc:
         print(f"ProbHub Skill installation failed: {exc}", file=sys.stderr)
         return 1
-    for target in targets:
-        print(f"installed ProbHub Skill: {target}")
+    for target, was_replaced in zip(targets, replaced):
+        if was_replaced:
+            print(f"已整体替换现有 ProbHub Skill 目录：{target}")
+        else:
+            print(f"installed ProbHub Skill: {target}")
+    if any(replaced):
+        print("注意：已替换目录中的本地手工修改不会保留。")
     return 0
 
 
