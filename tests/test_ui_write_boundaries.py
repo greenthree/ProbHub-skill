@@ -330,7 +330,7 @@ class UiWriteBoundaryTests(unittest.TestCase):
         before = self.file_state()
         snapshot = mock.MagicMock()
         snapshot.root = self.root
-        snapshot.workspace = {}
+        snapshot.workspace = {"typst": {"directory": "typst-statement/Contest"}}
         snapshot.loaded_problems = ()
         context = mock.MagicMock()
         context.__enter__.return_value = snapshot
@@ -341,10 +341,50 @@ class UiWriteBoundaryTests(unittest.TestCase):
             mock.patch.object(self.ui, "compile_collection", return_value=(self.root, staged_pdf, [])),
         ):
             response = self.client.post("/api/compile", json={"subtitle": "Contest"})
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertTrue(response.get_json()["preview"])
+            self.assertEqual(self.file_state(), before)
+            self.assertEqual(
+                self.ui._preview_pdf_path(
+                    "Contest",
+                    root=self.root,
+                    workspace=snapshot.workspace,
+                ).read_bytes(),
+                b"preview pdf",
+            )
+
+    def test_schema_preview_cache_uses_live_workspace_identity_for_snapshot_pdf(self):
+        snapshot = mock.MagicMock()
+        snapshot.root = self.root / "temporary-snapshot"
+        snapshot.root.mkdir()
+        snapshot.workspace = {"typst": {"directory": "typst-statement/Contest"}}
+        snapshot.loaded_problems = ()
+        context = mock.MagicMock()
+        context.__enter__.return_value = snapshot
+        context.__exit__.return_value = False
+        staged_pdf = self.root / "staged-main.pdf"
+        staged_pdf.write_bytes(b"snapshot pdf")
+        before = self.file_state()
+        plan = mock.MagicMock()
+        plan.root = self.root
+
+        with (
+            mock.patch.object(self.ui, "create_build_plan", return_value=plan),
+            mock.patch.object(self.ui, "create_build_snapshot", return_value=context),
+            mock.patch.object(self.ui, "compile_collection", return_value=(self.root, staged_pdf, [])),
+        ):
+            response = self.client.post("/api/compile", json={"subtitle": "Contest"})
+
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-        self.assertTrue(response.get_json()["preview"])
+        self.assertEqual(
+            self.ui._preview_pdf_path(
+                "Contest",
+                root=self.root,
+                workspace=snapshot.workspace,
+            ).read_bytes(),
+            b"snapshot pdf",
+        )
         self.assertEqual(self.file_state(), before)
-        self.assertEqual(self.ui._preview_pdf_path("Contest").read_bytes(), b"preview pdf")
 
     def test_schema_distribute_delegates_to_core_build(self):
         result = {

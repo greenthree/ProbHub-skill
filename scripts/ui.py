@@ -52,6 +52,12 @@ from probhub.submissions import (
     validate_cpp_upload,
 )
 from probhub.typesetting import compile_collection
+from probhub.webui_preview import (
+    preview_pages_dir,
+    preview_pdf_path,
+    safe_preview_file,
+    validate_typst_directory,
+)
 from probhub.webui_workspace import (
     load_contest_config,
     load_editor_data,
@@ -256,22 +262,33 @@ def _schema_workspace(subtitle):
 
 def _schema_typst_dir(subtitle):
     root, workspace = _schema_workspace(subtitle)
-    relative = Path((workspace.get("typst") or {}).get("directory", "typst-statement/正式赛"))
-    candidate = (root / relative).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise ProbHubError(
-            "workspace Typst directory must stay inside the workspace",
-            code="invalid_workspace_path",
-        ) from exc
+    candidate, _ = validate_typst_directory(root, workspace)
     return root, workspace, candidate
 
 
-def _preview_pdf_path(subtitle):
-    if not subtitle or '..' in subtitle or '/' in subtitle or '\\' in subtitle:
-        raise ValueError("Invalid subtitle")
-    return WEBUI_PREVIEW_ROOT / subtitle / "main.pdf"
+def _preview_pdf_path(subtitle, *, root=None, workspace=None, create=False):
+    """Resolve a preview PDF through a validated Schema v1 workspace identity."""
+    if root is None or workspace is None:
+        root, workspace = _schema_workspace(subtitle)
+    return preview_pdf_path(
+        WEBUI_PREVIEW_ROOT,
+        root,
+        workspace,
+        subtitle,
+        create=create,
+    )
+
+
+def _preview_pages_dir(subtitle, *, root=None, workspace=None, create=False):
+    if root is None or workspace is None:
+        root, workspace = _schema_workspace(subtitle)
+    return preview_pages_dir(
+        WEBUI_PREVIEW_ROOT,
+        root,
+        workspace,
+        subtitle,
+        create=create,
+    )
 
 
 def problem_limits(problem_entry):
@@ -367,11 +384,16 @@ def webui_asset(filename):
 def get_subtitles():
     """Return the Schema v1 Typst collection configured by the workspace."""
     try:
+        if not (Path.cwd() / ".probhub" / "workspace.yaml").is_file():
+            raise ProbHubError(
+                "Workspace Schema v1 is required; migrate this old workspace first",
+                code="migration_required",
+            )
         _, workspace = load_workspace(Path.cwd(), allow_empty=True)
-        typst_dir = Path((workspace.get("typst") or {}).get("directory", "typst-statement/正式赛"))
+        typst_dir, _ = validate_typst_directory(Path.cwd(), workspace)
         return jsonify([typst_dir.name])
     except ProbHubError as exc:
-        return jsonify({"success": False, "error": str(exc), "code": "migration_required"}), 409
+        return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
 
 @app.route('/api/data', methods=['GET'])
 def get_data():
@@ -479,11 +501,29 @@ def compile_pdf():
                     snapshot.workspace,
                     snapshot.loaded_problems,
                 )
-                preview_pdf = _preview_pdf_path(subtitle)
-                preview_pdf.parent.mkdir(parents=True, exist_ok=True)
-                temporary = preview_pdf.with_suffix(".pdf.tmp")
-                shutil.copyfile(staged_pdf, temporary)
-                os.replace(temporary, preview_pdf)
+                preview_pdf = _preview_pdf_path(
+                    subtitle,
+                    # The PDF is compiled from the temporary snapshot, but
+                    # the cache identity must remain tied to the live
+                    # workspace so page requests can find this preview.
+                    root=root,
+                    workspace=snapshot.workspace,
+                    create=True,
+                )
+                temporary_fd, temporary_name = tempfile.mkstemp(
+                    prefix=".main-",
+                    suffix=".pdf.tmp",
+                    dir=preview_pdf.parent,
+                )
+                os.close(temporary_fd)
+                temporary = Path(temporary_name)
+                try:
+                    safe_preview_file(WEBUI_PREVIEW_ROOT, temporary)
+                    shutil.copyfile(staged_pdf, temporary)
+                    safe_preview_file(WEBUI_PREVIEW_ROOT, preview_pdf)
+                    os.replace(temporary, preview_pdf)
+                finally:
+                    temporary.unlink(missing_ok=True)
         return jsonify({"success": True, "preview": True})
     except ProbHubError as e:
         detail = analyze_compile_error(str(e))
@@ -1785,10 +1825,10 @@ def save_contest_config(subtitle):
 def pdf_page_count(subtitle):
     """Return the number of pages in main.pdf."""
     try:
-        _, _, typst_dir = _schema_typst_dir(subtitle)
+        root, workspace, typst_dir = _schema_typst_dir(subtitle)
+        preview_path = _preview_pdf_path(subtitle, root=root, workspace=workspace)
     except ProbHubError as exc:
         return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
-    preview_path = _preview_pdf_path(subtitle)
     pdf_path = str(preview_path if preview_path.is_file() else typst_dir / "main.pdf")
     if not os.path.exists(pdf_path):
         return jsonify({"pages": 0})
@@ -1804,10 +1844,10 @@ def serve_pdf_page(subtitle, page):
     from flask import send_file
 
     try:
-        _, _, typst_dir = _schema_typst_dir(subtitle)
+        root, workspace, typst_dir = _schema_typst_dir(subtitle)
+        preview_path = _preview_pdf_path(subtitle, root=root, workspace=workspace)
     except ProbHubError as exc:
         return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
-    preview_path = _preview_pdf_path(subtitle)
     pdf_path = str(preview_path if preview_path.is_file() else typst_dir / "main.pdf")
     if not os.path.exists(pdf_path):
         return "PDF not compiled", 404
@@ -1821,15 +1861,34 @@ def serve_pdf_page(subtitle, page):
         return "Invalid PDF", 500
 
     # Page rendering is a read-only WebUI concern; never cache into the workspace.
-    preview_dir = str(WEBUI_PREVIEW_ROOT / subtitle / ".pages")
-    os.makedirs(preview_dir, exist_ok=True)
-    png_path = os.path.join(preview_dir, f"page-{page + 1}.png")
+    try:
+        preview_dir = _preview_pages_dir(
+            subtitle,
+            root=root,
+            workspace=workspace,
+            create=True,
+        )
+        png_path = safe_preview_file(
+            WEBUI_PREVIEW_ROOT,
+            preview_dir / f"page-{page + 1}.png",
+        )
+    except ProbHubError as exc:
+        return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
 
     # Regenerate if PNG is missing or older than PDF
     if not os.path.exists(png_path) or os.path.getmtime(png_path) < os.path.getmtime(pdf_path):
-        prefix = str(Path(png_path).with_suffix(""))
-        stdout_path = Path(preview_dir) / f"page-{page + 1}.stdout"
-        stderr_path = Path(preview_dir) / f"page-{page + 1}.stderr"
+        try:
+            prefix = str(safe_preview_file(WEBUI_PREVIEW_ROOT, png_path.with_suffix("")))
+            stdout_path = safe_preview_file(
+                WEBUI_PREVIEW_ROOT,
+                preview_dir / f"page-{page + 1}.stdout",
+            )
+            stderr_path = safe_preview_file(
+                WEBUI_PREVIEW_ROOT,
+                preview_dir / f"page-{page + 1}.stderr",
+            )
+        except ProbHubError as exc:
+            return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
         try:
             rendered = run_managed_to_files(
                 [
