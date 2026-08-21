@@ -587,7 +587,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
             command = install_deps._pip_install_command(
                 requirements,
                 user_install=False,
-                wheelhouse=Path("C:/tmp/wheelhouse"),
+                wheelhouse="C:/tmp/wheelhouse",
             )
         self.assertEqual(command[:2], ["C:/node/node.exe", "-e"])
         self.assertEqual(command[3:7], ["C:/python/python.exe", "-m", "pip", "install"])
