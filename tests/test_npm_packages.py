@@ -99,6 +99,25 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 self.assertNotIn("python3 -m venv", content)
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("references/installation.md", skill)
+        installation = documents["Agent installation reference"]
+        self.assertIn("PIP_BREAK_SYSTEM_PACKAGES=1", installation)
+        self.assertIn("pip install --user", installation)
+        self.assertIn("不会移除 `--user`", installation)
+
+    def test_installation_guides_explain_whole_directory_replacement(self):
+        chinese_documents = {
+            "main README": (ROOT / "README.md").read_text(encoding="utf-8"),
+            "compatibility README": (ROOT / "compat/probhub-skill/README.md").read_text(encoding="utf-8"),
+            "Agent installation reference": (ROOT / "references/installation.md").read_text(encoding="utf-8"),
+        }
+        for label, content in chinese_documents.items():
+            with self.subTest(document=label):
+                self.assertIn("完整目录整体替换", content)
+                self.assertIn("本地手工修改不会保留", content)
+
+        english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+        self.assertIn("replaces both Skill directories as whole directories", english)
+        self.assertIn("Local manual changes inside them are not preserved", english)
 
     def test_release_metadata_gate_passes_for_the_source_tree(self):
         result = subprocess.run(
@@ -338,6 +357,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stderr)
+            self.assertNotIn("已整体替换现有 ProbHub Skill 目录", installed.stdout)
             self.assertFalse(sentinel.exists())
             for target in (
                 project / ".claude/skills/probhub",
@@ -347,6 +367,41 @@ class NpmPackageMetadataTests(unittest.TestCase):
                     (target / ".probhub-version.json").read_text(encoding="utf-8")
                 )
                 self.assertEqual(marker["version"], "0.6.9")
+
+            for target in (
+                project / ".claude/skills/probhub",
+                project / ".agents/skills/probhub",
+            ):
+                (target / "manual.txt").write_text("local change\n", encoding="utf-8")
+
+            reinstalled = subprocess.run(
+                [
+                    shutil.which("node"),
+                    str(ROOT / "bin/init.js"),
+                    "--local",
+                    "--skip-python-deps",
+                ],
+                cwd=project,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(reinstalled.returncode, 0, reinstalled.stderr)
+            self.assertEqual(
+                reinstalled.stdout.count("已整体替换现有 ProbHub Skill 目录"),
+                2,
+            )
+            self.assertIn("本地手工修改不会保留", reinstalled.stdout)
+            for target in (
+                project / ".claude/skills/probhub",
+                project / ".agents/skills/probhub",
+            ):
+                self.assertFalse((target / "manual.txt").exists())
 
     def test_dependency_installer_requires_explicit_system_python_consent(self):
         from probhub import install_deps

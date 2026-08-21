@@ -6,7 +6,7 @@
         ]);
         const PROBHUB_MARKDOWN_DROP_CONTENT = new Set([
             'audio', 'base', 'canvas', 'embed', 'form', 'iframe', 'math', 'noscript', 'object',
-            'script', 'style', 'svg', 'template', 'video'
+            'script', 'style', 'svg', 'template', 'video', 'xmp'
         ]);
         const PROBHUB_MARKDOWN_ATTRIBUTES = {
             a: new Set(['href', 'title', 'target', 'rel']),
@@ -57,7 +57,7 @@
                     if (node.getAttribute('target') === '_blank') node.setAttribute('rel', 'noopener noreferrer');
                 }
             }
-            return template.innerHTML;
+            return template.content;
         }
 
         document.addEventListener('alpine:init', () => {
@@ -834,7 +834,7 @@
                         el.innerHTML = '<span class="text-cream-subtle italic text-[12px]">暂无内容...</span>';
                         return;
                     }
-                    el.innerHTML = sanitizeRenderedMarkdown(marked.parse(text));
+                    el.replaceChildren(sanitizeRenderedMarkdown(marked.parse(text)));
                     const problemId = this.problems[this.selectedIdx]?._id;
                     if (problemId && this.currentSubtitle) {
                         const base = new URL(`/workspace/${encodeURIComponent(problemId)}/`, window.location.origin);

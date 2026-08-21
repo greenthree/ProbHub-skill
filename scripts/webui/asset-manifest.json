@@ -2,7 +2,7 @@
   "schema_version": 1,
   "files": {
     "app.css": "sha256-text-lf:ce50a4bb97ee9f5e9748c16292d8e4c1e038d60d21ea05aac344a3808b57d4ca",
-    "app.js": "sha256-text-lf:fd2c5e99e69d234a77e5c57fbf1c19e9b5eb8db78a00d63425e4cc644a6a5e2c",
+    "app.js": "sha256-text-lf:5bed707537d59db413ec139afbaf24824e597ebbd21df6a97b288e5d2901fc7d",
     "index.html": "sha256-text-lf:25f321933e15f37777ebab8d3026b542c3915d6a56379c10b8a7d71ac7bf5ac6",
     "mathjax-config.js": "sha256-text-lf:56fbc310138be2821076be5dd7024090dae63982d483c3c9af187d83146da92e",
     "theme.js": "sha256-text-lf:cec2dc423d1dac5df360ea10fcb85fe4b09ffad82285d0edc89c773ab24d8bba",
