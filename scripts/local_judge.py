@@ -19,12 +19,22 @@ sys.path.insert(0, PACKAGE_ROOT)
 
 from probhub.calibration import (
     MEASUREMENT_NOTE,
-    SANDBOX_CACHE_SCHEMA_VERSION,
     calibration_policy,
 )
 from probhub.build_lock import workspace_file_lock
 from probhub.errors import ProbHubError
 from probhub.io import read_bounded_text
+from probhub.judge_cache import (
+    CACHE_FILENAME,
+    CACHE_LIMITS,
+    CACHE_SCHEMA_VERSION,
+    SandboxCache,
+    calibration_probe_cache_key,
+    file_digest as _file_digest,
+    hash_parts as _hash_parts,
+    testcase_cache_key,
+    validator_cache_key,
+)
 from probhub.judge_results import (
     classify_contestant_failure,
     classify_process_status,
@@ -63,13 +73,9 @@ DEFAULT_OUTPUT_LIMIT = 64
 MAX_TOOL_DIAGNOSTIC_BYTES = 8 * 1024 * 1024
 PROTOCOL_NAME = "probhub.local_judge"
 PROTOCOL_VERSION = 1
-CACHE_SCHEMA_VERSION = SANDBOX_CACHE_SCHEMA_VERSION
-CACHE_FILENAME = "sandbox-cache-v1.json"
-CACHE_LIMITS = {"validator": 4000, "case": 12000, "probe": 2000}
 SAMPLE_ANSWER_SCHEMA_VERSION = 1
 SAMPLE_OUTPUT_PREVIEW_BYTES = 160
 _COMPILER_IDENTITY = None
-_FILE_DIGEST_CACHE = {}
 
 
 class BinaryChangedError(RuntimeError):
@@ -176,46 +182,6 @@ def install_cancellation_handlers():
     signal.signal(signal.SIGTERM, _cancel_signal_handler)
     if platform.system() == "Windows" and hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _cancel_signal_handler)
-
-
-def _hash_parts(*parts):
-    digest = hashlib.sha256()
-    for part in parts:
-        if isinstance(part, bytes):
-            payload = part
-        else:
-            payload = str(part).encode("utf-8")
-        digest.update(len(payload).to_bytes(8, "big"))
-        digest.update(payload)
-    return digest.hexdigest()
-
-
-def _file_digest(path):
-    path = os.path.abspath(path)
-    stat = os.stat(path)
-    cache_key = (
-        path,
-        stat.st_mtime_ns,
-        stat.st_ctime_ns,
-        stat.st_size,
-        getattr(stat, "st_ino", 0),
-    )
-    cached = _FILE_DIGEST_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    value = _file_digest_uncached(path)
-    if len(_FILE_DIGEST_CACHE) > 4096:
-        _FILE_DIGEST_CACHE.clear()
-    _FILE_DIGEST_CACHE[cache_key] = value
-    return value
-
-
-def _file_digest_uncached(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def normalize_sample_output(payload):
@@ -354,153 +320,6 @@ def source_fingerprint(src_file, prob_dir, kind=None):
                 label = path.replace(os.sep, "/")
             parts.extend((label, _file_digest(path)))
     return _hash_parts(*parts)
-
-
-def validator_cache_key(program_fingerprint, in_file):
-    return _hash_parts(
-        CACHE_SCHEMA_VERSION,
-        "validator",
-        platform.system(),
-        program_fingerprint,
-        _file_digest(in_file),
-    )
-
-
-def testcase_cache_key(
-    program_fingerprint,
-    in_file,
-    ans_file,
-    time_limit,
-    memory_limit,
-    judge_type="standard",
-    judge_fingerprint="",
-    judge_options_fingerprint="",
-):
-    return _hash_parts(
-        CACHE_SCHEMA_VERSION,
-        "case",
-        platform.system(),
-        platform.machine(),
-        program_fingerprint,
-        judge_type,
-        judge_fingerprint,
-        judge_options_fingerprint,
-        _file_digest(in_file),
-        _file_digest(ans_file),
-        f"{float(time_limit):.9g}",
-        int(memory_limit),
-    )
-
-
-def calibration_probe_cache_key(
-    program_fingerprint,
-    in_file,
-    time_limit,
-    memory_limit,
-    output_limit,
-    process_limit,
-    probe_factor,
-):
-    return _hash_parts(
-        CACHE_SCHEMA_VERSION,
-        "calibration-probe",
-        platform.system(),
-        platform.machine(),
-        program_fingerprint,
-        _file_digest(in_file),
-        f"{float(time_limit):.9g}",
-        int(memory_limit),
-        int(output_limit),
-        int(process_limit),
-        f"{float(probe_factor):.9g}",
-    )
-
-
-class SandboxCache:
-    def __init__(
-        self,
-        prob_dir,
-        enabled=True,
-        read_enabled=None,
-        preserve_existing=False,
-    ):
-        self.enabled = enabled
-        self.read_enabled = enabled if read_enabled is None else bool(read_enabled and enabled)
-        self.path = os.path.join(prob_dir, ".probhub", CACHE_FILENAME)
-        self.data = {
-            "schema_version": CACHE_SCHEMA_VERSION,
-            "compile": {},
-            "validator": {},
-            "case": {},
-            "probe": {},
-        }
-        self.dirty = False
-        self.stats = {
-            "enabled": enabled,
-            "read_enabled": self.read_enabled,
-            "mode": "normal" if self.read_enabled else ("refresh" if enabled else "disabled"),
-            "compile_hits": 0,
-            "compile_misses": 0,
-            "validator_hits": 0,
-            "validator_misses": 0,
-            "case_hits": 0,
-            "case_misses": 0,
-            "probe_hits": 0,
-            "probe_misses": 0,
-        }
-        if self.read_enabled or (self.enabled and preserve_existing):
-            self._load()
-
-    def _load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as stream:
-                loaded = json.load(stream)
-            if loaded.get("schema_version") != CACHE_SCHEMA_VERSION:
-                return
-            for section in ("compile", "validator", "case", "probe"):
-                if isinstance(loaded.get(section), dict):
-                    self.data[section] = loaded[section]
-        except (OSError, ValueError, TypeError):
-            pass
-
-    def get(self, section, key):
-        if not self.enabled:
-            return None
-        if not self.read_enabled:
-            self.stats[f"{section}_misses"] += 1
-            return None
-        value = self.data.get(section, {}).get(key)
-        counter = f"{section}_hits" if value is not None else f"{section}_misses"
-        self.stats[counter] += 1
-        return value
-
-    def set(self, section, key, value):
-        if not self.enabled:
-            return
-        values = self.data.setdefault(section, {})
-        values.pop(key, None)
-        values[key] = value
-        limit = CACHE_LIMITS.get(section)
-        if limit and len(values) > limit:
-            for old_key in list(values)[: len(values) - limit]:
-                values.pop(old_key, None)
-        self.dirty = True
-
-    def delete(self, section, key):
-        if not self.enabled:
-            return
-        if self.data.get(section, {}).pop(key, None) is not None:
-            self.dirty = True
-
-    def save(self):
-        if not self.enabled or not self.dirty:
-            return
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        temp_path = self.path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as stream:
-            json.dump(self.data, stream, ensure_ascii=False, separators=(",", ":"))
-        os.replace(temp_path, self.path)
-        self.dirty = False
 
 
 class Reporter:
