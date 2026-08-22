@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import platform
@@ -6,8 +5,6 @@ import re
 import shutil
 import signal
 import sys
-import tempfile
-import time
 
 import yaml
 
@@ -19,22 +16,35 @@ sys.path.insert(0, PACKAGE_ROOT)
 
 from probhub.calibration import (
     MEASUREMENT_NOTE,
-    SANDBOX_CACHE_SCHEMA_VERSION,
     calibration_policy,
 )
 from probhub.build_lock import workspace_file_lock
 from probhub.errors import ProbHubError
 from probhub.io import read_bounded_text
+from probhub.judge_cache import (
+    CACHE_FILENAME,
+    CACHE_LIMITS,
+    CACHE_SCHEMA_VERSION,
+    SandboxCache,
+    calibration_probe_cache_key,
+    file_digest as _file_digest,
+    hash_parts as _hash_parts,
+    testcase_cache_key,
+    validator_cache_key,
+)
+from probhub.judge_results import (
+    infer_failed_status,
+)
+from probhub import judge_execution as _judge_execution
+from probhub import judge_planning as _judge_planning
+from probhub import judge_runtime as _judge_runtime
 from probhub.output_compare import compare_standard_output
 from probhub.problem_paths import ProblemPathError, resolve_problem_regular_file
 from probhub.special_judges import execute_interactive_session, run_checker_to_files
 from probhub.process_control import (
     DEFAULT_PROCESS_LIMIT,
     OutputBudgetError,
-    PROCESS_CLEANUP_FAILED,
     ProcessCancelled,
-    VALIDATOR_MEMORY_LIMIT_MB,
-    VALIDATOR_OUTPUT_LIMIT_BYTES,
     VALIDATOR_TIMEOUT_SECONDS,
     cancellation_requested,
     run_managed_to_files,
@@ -46,121 +56,16 @@ from probhub.solutions import (
     normalize_expected,
     normalize_solution_entries,
     resolve_solution_source,
-    select_expectation_cases,
-    select_run_cases,
-    select_target_cases,
 )
 
 REFERENCES_DIR = os.path.join(PACKAGE_ROOT, "references")
 DEFAULT_TIME_LIMIT = 1.0
 DEFAULT_MEMORY_LIMIT = 256
 DEFAULT_OUTPUT_LIMIT = 64
-MAX_TOOL_DIAGNOSTIC_BYTES = 8 * 1024 * 1024
 PROTOCOL_NAME = "probhub.local_judge"
 PROTOCOL_VERSION = 1
-CACHE_SCHEMA_VERSION = SANDBOX_CACHE_SCHEMA_VERSION
-CACHE_FILENAME = "sandbox-cache-v1.json"
-CACHE_LIMITS = {"validator": 4000, "case": 12000, "probe": 2000}
 SAMPLE_ANSWER_SCHEMA_VERSION = 1
-SAMPLE_OUTPUT_PREVIEW_BYTES = 160
 _COMPILER_IDENTITY = None
-_FILE_DIGEST_CACHE = {}
-
-
-class BinaryChangedError(RuntimeError):
-    pass
-
-
-def binary_identity(path):
-    """Return the published binary identity used by one Judge session."""
-    absolute = os.path.abspath(path)
-    digest = hashlib.sha256()
-    with open(absolute, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-        stat = os.fstat(stream.fileno())
-    return {
-        "path": absolute,
-        "size": int(stat.st_size),
-        "digest": digest.hexdigest(),
-    }
-
-
-def verify_binary_identities(entries):
-    """Check compiled binaries once before the first Judge execution.
-
-    The caller supplies identities captured immediately after compilation (or
-    from a validated cache hit).  A single changed/missing file invalidates the
-    whole Judge session and must not become a contestant verdict.
-    """
-    for entry in entries:
-        expected = entry.get("identity") or {}
-        path = expected.get("path")
-        try:
-            actual = binary_identity(path)
-        except (OSError, TypeError, ValueError) as exc:
-            return {
-                "code": "binary_changed",
-                "failure_kind": "infrastructure",
-                "role": entry.get("role"),
-                "program": entry.get("program"),
-                "path": path,
-                "expected_digest": expected.get("digest"),
-                "actual_digest": None,
-                "message": f"compiled binary is unavailable before first execution: {path} ({exc})",
-            }
-        if (
-            actual.get("digest") != expected.get("digest")
-            or actual.get("size") != expected.get("size")
-        ):
-            return {
-                "code": "binary_changed",
-                "failure_kind": "infrastructure",
-                "role": entry.get("role"),
-                "program": entry.get("program"),
-                "path": path,
-                "expected_digest": expected.get("digest"),
-                "actual_digest": actual.get("digest"),
-                "expected_size": expected.get("size"),
-                "actual_size": actual.get("size"),
-                "message": f"compiled binary changed before first execution: {path}",
-            }
-    return None
-
-
-def publish_compiled_binary(staged_binary, out_bin, staged_identity):
-    """Atomically publish a compiled binary and restore the previous file on mismatch."""
-    previous = staged_binary + ".previous"
-    had_previous = os.path.isfile(out_bin)
-    if had_previous:
-        shutil.copyfile(out_bin, previous)
-    published = False
-    try:
-        os.replace(staged_binary, out_bin)
-        published = True
-        actual = binary_identity(out_bin)
-        if (
-            actual["digest"] != staged_identity["digest"]
-            or actual["size"] != staged_identity["size"]
-        ):
-            raise BinaryChangedError(
-                "published binary identity differs from staged binary"
-            )
-        return actual
-    except Exception:
-        if not published:
-            raise
-        try:
-            if had_previous and os.path.isfile(previous):
-                os.replace(previous, out_bin)
-            elif not had_previous and os.path.lexists(out_bin):
-                os.remove(out_bin)
-        except OSError as rollback_error:
-            raise BinaryChangedError(
-                "compiled binary publish failed and the previous binary could not be restored: "
-                f"{rollback_error}"
-            ) from rollback_error
-        raise
 
 
 def _cancel_signal_handler(_signum, _frame):
@@ -173,329 +78,48 @@ def install_cancellation_handlers():
         signal.signal(signal.SIGBREAK, _cancel_signal_handler)
 
 
-def _hash_parts(*parts):
-    digest = hashlib.sha256()
-    for part in parts:
-        if isinstance(part, bytes):
-            payload = part
-        else:
-            payload = str(part).encode("utf-8")
-        digest.update(len(payload).to_bytes(8, "big"))
-        digest.update(payload)
-    return digest.hexdigest()
+BinaryChangedError = _judge_runtime.BinaryChangedError
 
 
-def _file_digest(path):
-    path = os.path.abspath(path)
-    stat = os.stat(path)
-    cache_key = (
-        path,
-        stat.st_mtime_ns,
-        stat.st_ctime_ns,
-        stat.st_size,
-        getattr(stat, "st_ino", 0),
+def binary_identity(path):
+    """Compatibility wrapper for the Core binary identity primitive."""
+    return _judge_runtime.binary_identity(path)
+
+
+def verify_binary_identities(entries):
+    """Compatibility wrapper for the Core binary identity fence."""
+    return _judge_runtime.verify_binary_identities(entries, identity_fn=binary_identity)
+
+
+def publish_compiled_binary(staged_binary, out_bin, staged_identity):
+    """Compatibility wrapper retaining local identity injection for tests."""
+    return _judge_runtime.publish_compiled_binary(
+        staged_binary,
+        out_bin,
+        staged_identity,
+        identity_fn=binary_identity,
     )
-    cached = _FILE_DIGEST_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    value = _file_digest_uncached(path)
-    if len(_FILE_DIGEST_CACHE) > 4096:
-        _FILE_DIGEST_CACHE.clear()
-    _FILE_DIGEST_CACHE[cache_key] = value
-    return value
-
-
-def _file_digest_uncached(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def normalize_sample_output(payload):
-    """Normalize CRLF and bare CR line endings while preserving every other byte."""
-    return payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    """Compatibility wrapper for strict sample output normalization."""
+    return _judge_execution.normalize_sample_output(payload)
 
 
 def _sample_output_summary(payload):
-    preview = payload[:SAMPLE_OUTPUT_PREVIEW_BYTES]
-    return {
-        "sha256": hashlib.sha256(payload).hexdigest(),
-        "bytes": len(payload),
-        "preview": preview.decode("utf-8", errors="backslashreplace"),
-        "preview_truncated": len(preview) < len(payload),
-    }
+    return _judge_execution._sample_output_summary(payload)
 
 
 def _sample_first_difference(actual, expected):
-    shared = min(len(actual), len(expected))
-    offset = next(
-        (index for index in range(shared) if actual[index] != expected[index]),
-        shared,
-    )
-    if offset == len(actual) == len(expected):
-        return None
-    return {
-        "offset": offset,
-        "actual_byte": actual[offset] if offset < len(actual) else None,
-        "expected_byte": expected[offset] if offset < len(expected) else None,
-    }
+    return _judge_execution._sample_first_difference(actual, expected)
 
 
 def compare_sample_answer(output_file, ans_file):
-    """Compare accepted stdout and the stored sample answer as normalized bytes."""
-    try:
-        with open(output_file, "rb") as stream:
-            actual = normalize_sample_output(stream.read())
-        with open(ans_file, "rb") as stream:
-            expected = normalize_sample_output(stream.read())
-    except OSError as exc:
-        return {
-            "schema_version": SAMPLE_ANSWER_SCHEMA_VERSION,
-            "normalization": "crlf_cr_to_lf",
-            "matches": False,
-            "actual": None,
-            "expected": None,
-            "first_difference": None,
-            "error": str(exc),
-        }
-    matches = actual == expected
-    return {
-        "schema_version": SAMPLE_ANSWER_SCHEMA_VERSION,
-        "normalization": "crlf_cr_to_lf",
-        "matches": matches,
-        "actual": _sample_output_summary(actual),
-        "expected": _sample_output_summary(expected),
-        "first_difference": None if matches else _sample_first_difference(actual, expected),
-    }
+    return _judge_execution.compare_sample_answer(output_file, ans_file)
 
 
 def valid_sample_answer_summary(value):
-    return (
-        isinstance(value, dict)
-        and value.get("schema_version") == SAMPLE_ANSWER_SCHEMA_VERSION
-        and isinstance(value.get("matches"), bool)
-        and isinstance(value.get("actual"), dict)
-        and isinstance(value.get("expected"), dict)
-    )
-
-
-def compiler_identity():
-    global _COMPILER_IDENTITY
-    if _COMPILER_IDENTITY is not None:
-        return _COMPILER_IDENTITY
-    try:
-        with tempfile.TemporaryDirectory(prefix="probhub-compiler-version-") as temp:
-            stdout_path = os.path.join(temp, "stdout")
-            stderr_path = os.path.join(temp, "stderr")
-            result = run_managed_to_files(
-                ["g++", "--version"],
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                timeout=10,
-                memory_limit_mb=512,
-                output_limit_bytes=1024 * 1024,
-                process_limit=8,
-            )
-            with open(stdout_path, "r", encoding="utf-8", errors="replace") as stream:
-                stdout = stream.read()
-            with open(stderr_path, "r", encoding="utf-8", errors="replace") as stream:
-                stderr = stream.read()
-        if result["reason"] != "completed" or result["returncode"] != 0:
-            raise RuntimeError(result.get("message") or result["reason"])
-        first_line = (stdout or stderr).splitlines()[0]
-        _COMPILER_IDENTITY = first_line.strip()
-    except Exception as exc:
-        _COMPILER_IDENTITY = f"g++-unknown:{exc}"
-    return _COMPILER_IDENTITY
-
-
-def source_fingerprint(src_file, prob_dir, kind=None):
-    src_file = os.path.abspath(src_file)
-    prob_dir = os.path.abspath(prob_dir)
-    dependencies = [src_file]
-    source_text = ""
-    try:
-        with open(src_file, "r", encoding="utf-8", errors="replace") as stream:
-            source_text = stream.read()
-    except OSError:
-        pass
-
-    for root, directories, files in os.walk(prob_dir):
-        directories[:] = [name for name in directories if name != ".probhub"]
-        for name in files:
-            if name.endswith((".h", ".hpp")):
-                dependencies.append(os.path.join(root, name))
-    if "testlib.h" in source_text:
-        dependencies.append(os.path.join(REFERENCES_DIR, "testlib.h"))
-
-    parts = [
-        CACHE_SCHEMA_VERSION,
-        platform.system(),
-        platform.machine(),
-        compiler_identity(),
-        kind or "unknown",
-        "-O2",
-        "-std=c++17",
-        "-static" if platform.system() == "Windows" else "dynamic",
-        "-DFOR_LINUX" if platform.system() == "Windows" and kind == "validator" else "native-lines",
-    ]
-    for path in sorted(set(os.path.abspath(item) for item in dependencies)):
-        if os.path.isfile(path):
-            try:
-                label = os.path.relpath(path, prob_dir).replace(os.sep, "/")
-            except ValueError:
-                label = path.replace(os.sep, "/")
-            parts.extend((label, _file_digest(path)))
-    return _hash_parts(*parts)
-
-
-def validator_cache_key(program_fingerprint, in_file):
-    return _hash_parts(
-        CACHE_SCHEMA_VERSION,
-        "validator",
-        platform.system(),
-        program_fingerprint,
-        _file_digest(in_file),
-    )
-
-
-def testcase_cache_key(
-    program_fingerprint,
-    in_file,
-    ans_file,
-    time_limit,
-    memory_limit,
-    judge_type="standard",
-    judge_fingerprint="",
-    judge_options_fingerprint="",
-):
-    return _hash_parts(
-        CACHE_SCHEMA_VERSION,
-        "case",
-        platform.system(),
-        platform.machine(),
-        program_fingerprint,
-        judge_type,
-        judge_fingerprint,
-        judge_options_fingerprint,
-        _file_digest(in_file),
-        _file_digest(ans_file),
-        f"{float(time_limit):.9g}",
-        int(memory_limit),
-    )
-
-
-def calibration_probe_cache_key(
-    program_fingerprint,
-    in_file,
-    time_limit,
-    memory_limit,
-    output_limit,
-    process_limit,
-    probe_factor,
-):
-    return _hash_parts(
-        CACHE_SCHEMA_VERSION,
-        "calibration-probe",
-        platform.system(),
-        platform.machine(),
-        program_fingerprint,
-        _file_digest(in_file),
-        f"{float(time_limit):.9g}",
-        int(memory_limit),
-        int(output_limit),
-        int(process_limit),
-        f"{float(probe_factor):.9g}",
-    )
-
-
-class SandboxCache:
-    def __init__(
-        self,
-        prob_dir,
-        enabled=True,
-        read_enabled=None,
-        preserve_existing=False,
-    ):
-        self.enabled = enabled
-        self.read_enabled = enabled if read_enabled is None else bool(read_enabled and enabled)
-        self.path = os.path.join(prob_dir, ".probhub", CACHE_FILENAME)
-        self.data = {
-            "schema_version": CACHE_SCHEMA_VERSION,
-            "compile": {},
-            "validator": {},
-            "case": {},
-            "probe": {},
-        }
-        self.dirty = False
-        self.stats = {
-            "enabled": enabled,
-            "read_enabled": self.read_enabled,
-            "mode": "normal" if self.read_enabled else ("refresh" if enabled else "disabled"),
-            "compile_hits": 0,
-            "compile_misses": 0,
-            "validator_hits": 0,
-            "validator_misses": 0,
-            "case_hits": 0,
-            "case_misses": 0,
-            "probe_hits": 0,
-            "probe_misses": 0,
-        }
-        if self.read_enabled or (self.enabled and preserve_existing):
-            self._load()
-
-    def _load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as stream:
-                loaded = json.load(stream)
-            if loaded.get("schema_version") != CACHE_SCHEMA_VERSION:
-                return
-            for section in ("compile", "validator", "case", "probe"):
-                if isinstance(loaded.get(section), dict):
-                    self.data[section] = loaded[section]
-        except (OSError, ValueError, TypeError):
-            pass
-
-    def get(self, section, key):
-        if not self.enabled:
-            return None
-        if not self.read_enabled:
-            self.stats[f"{section}_misses"] += 1
-            return None
-        value = self.data.get(section, {}).get(key)
-        counter = f"{section}_hits" if value is not None else f"{section}_misses"
-        self.stats[counter] += 1
-        return value
-
-    def set(self, section, key, value):
-        if not self.enabled:
-            return
-        values = self.data.setdefault(section, {})
-        values.pop(key, None)
-        values[key] = value
-        limit = CACHE_LIMITS.get(section)
-        if limit and len(values) > limit:
-            for old_key in list(values)[: len(values) - limit]:
-                values.pop(old_key, None)
-        self.dirty = True
-
-    def delete(self, section, key):
-        if not self.enabled:
-            return
-        if self.data.get(section, {}).pop(key, None) is not None:
-            self.dirty = True
-
-    def save(self):
-        if not self.enabled or not self.dirty:
-            return
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        temp_path = self.path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as stream:
-            json.dump(self.data, stream, ensure_ascii=False, separators=(",", ":"))
-        os.replace(temp_path, self.path)
-        self.dirty = False
+    return _judge_execution.valid_sample_answer_summary(value)
 
 
 class Reporter:
@@ -517,6 +141,27 @@ class Reporter:
             print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
+def compiler_identity():
+    """Compatibility wrapper for the Core compiler identity probe."""
+    global _COMPILER_IDENTITY
+    if _COMPILER_IDENTITY is None:
+        _COMPILER_IDENTITY = _judge_runtime.compiler_identity(
+            run_managed_fn=run_managed_to_files
+        )
+    return _COMPILER_IDENTITY
+
+
+def source_fingerprint(src_file, prob_dir, kind=None):
+    """Compatibility wrapper for the Core source/cache identity function."""
+    return _judge_runtime.source_fingerprint(
+        src_file,
+        prob_dir,
+        kind,
+        reference_dir=REFERENCES_DIR,
+        compiler_identity_fn=compiler_identity,
+    )
+
+
 def compile_cpp(
     src_file,
     out_bin,
@@ -526,168 +171,24 @@ def compile_cpp(
     cache=None,
     fingerprint=None,
 ):
+    """Compatibility wrapper preserving the local Judge's callback surface."""
     if reporter is None:
         reporter = Reporter(False)
-    if not os.path.exists(src_file):
-        return False
-    file_name = display_file or os.path.basename(src_file)
-    fingerprint = fingerprint or source_fingerprint(src_file, os.path.dirname(src_file), kind)
-    cache_key = str(file_name).replace(os.sep, "/")
-
-    if cache and cache.enabled:
-        cached = cache.get("compile", cache_key)
-        binary_matches = False
-        if cached and cached.get("fingerprint") == fingerprint and os.path.isfile(out_bin):
-            try:
-                current_identity = binary_identity(out_bin)
-                binary_matches = (
-                    cached.get("binary_digest") == current_identity["digest"]
-                    and (
-                        cached.get("binary_size") is None
-                        or cached.get("binary_size") == current_identity["size"]
-                    )
-                )
-            except OSError:
-                binary_matches = False
-        if binary_matches:
-            reporter.text(f"[*] Compiling {file_name}... cached")
-            reporter.event(
-                "compile",
-                kind=kind or "unknown",
-                file=file_name,
-                ok=True,
-                stderr="",
-                cached=True,
-                binary_digest=current_identity["digest"],
-                binary_size=current_identity["size"],
-            )
-            return current_identity
-        if cached is not None:
-            cache.stats["compile_hits"] -= 1
-            cache.stats["compile_misses"] += 1
-            cache.delete("compile", cache_key)
-
-    reporter.text(f"[*] Compiling {file_name}...")
-    source_dir = os.path.dirname(os.path.abspath(src_file))
-    compile_root = os.path.join(source_dir, ".probhub", "compile")
-    try:
-        os.makedirs(compile_root, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="run-", dir=compile_root) as temp:
-            # MinGW's narrow argv handling cannot reliably open absolute paths
-            # containing non-ASCII characters. The process cwd is established
-            # through the wide Windows API, so compiler path arguments remain
-            # ASCII and relative. Python publishes the binary after success.
-            staged_binary = os.path.join(
-                temp,
-                "program.exe" if platform.system() == "Windows" else "program",
-            )
-            shutil.copyfile(
-                os.path.join(REFERENCES_DIR, "testlib.h"),
-                os.path.join(temp, "testlib.h"),
-            )
-            source_arg = os.path.relpath(os.path.abspath(src_file), source_dir)
-            output_arg = os.path.relpath(staged_binary, source_dir)
-            include_arg = os.path.relpath(temp, source_dir)
-            flags = [
-                "g++", source_arg, "-o", output_arg,
-                "-O2", "-std=c++17", "-I", include_arg,
-            ]
-            if platform.system() == "Windows":
-                flags.insert(4, "-static")
-                if kind == "validator":
-                    # DOMjudge validators run on Linux and accept LF line endings. Emulate
-                    # that behavior so Git-normalized test data is validated consistently.
-                    flags.append("-DFOR_LINUX")
-            stdout_path = os.path.join(temp, "compiler.out")
-            stderr_path = os.path.join(temp, "compiler.stderr")
-            ret = run_managed_to_files(
-                flags,
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                timeout=60.0,
-                memory_limit_mb=2048,
-                output_limit_bytes=8 * 1024 * 1024,
-                process_limit=DEFAULT_PROCESS_LIMIT,
-                cwd=source_dir,
-            )
-            try:
-                with open(stderr_path, "r", encoding="utf-8", errors="replace") as stream:
-                    stderr = stream.read()
-            except OSError:
-                stderr = ""
-            ok = ret["reason"] == "completed" and ret["returncode"] == 0
-            staged_identity = None
-            if ok:
-                staged_identity = binary_identity(staged_binary)
-                published_identity = publish_compiled_binary(
-                    staged_binary,
-                    out_bin,
-                    staged_identity,
-                )
-            else:
-                published_identity = None
-        if ret["reason"] != "completed":
-            stderr = (stderr + "\n" + (ret["message"] or ret["reason"])).strip()
-        reporter.event(
-            "compile",
-            kind=kind or "unknown",
-            file=file_name,
-            ok=ok,
-            stderr=stderr,
-            cached=False,
-            **(
-                {
-                    "binary_digest": published_identity["digest"],
-                    "binary_size": published_identity["size"],
-                }
-                if published_identity is not None
-                else {}
-            ),
-        )
-        if not ok:
-            if cache:
-                cache.delete("compile", cache_key)
-            reporter.text(f"[-] Compile failed:\n{stderr}")
-            return False
-        if cache:
-            cache.set(
-                "compile",
-                cache_key,
-                {
-                    "fingerprint": fingerprint,
-                    "binary_digest": published_identity["digest"],
-                    "binary_size": published_identity["size"],
-                },
-            )
-        return published_identity
-    except BinaryChangedError as e:
-        if cache:
-            cache.delete("compile", cache_key)
-        reporter.event(
-            "compile",
-            kind=kind or "unknown",
-            file=file_name,
-            ok=False,
-            stderr=str(e),
-            cached=False,
-            code="binary_changed",
-            failure_kind="infrastructure",
-        )
-        reporter.text(f"[-] Compile error: {e}")
-        raise
-    except Exception as e:
-        if cache:
-            cache.delete("compile", cache_key)
-        reporter.event(
-            "compile",
-            kind=kind or "unknown",
-            file=file_name,
-            ok=False,
-            stderr=str(e),
-            cached=False,
-        )
-        reporter.text(f"[-] Compile error: {e}")
-        return False
+    return _judge_runtime.compile_cpp(
+        src_file,
+        out_bin,
+        reporter=reporter,
+        kind=kind,
+        display_file=display_file,
+        cache=cache,
+        fingerprint=fingerprint,
+        reference_dir=REFERENCES_DIR,
+        source_fingerprint_fn=source_fingerprint,
+        binary_identity_fn=binary_identity,
+        publish_fn=publish_compiled_binary,
+        run_managed_fn=run_managed_to_files,
+        process_limit=DEFAULT_PROCESS_LIMIT,
+    )
 
 
 def _safe_float(value, default):
@@ -823,27 +324,14 @@ def read_problem_output_limit(prob_dir, config=None):
 
 
 def _failed_status(returncode, stderr, memory_enforced, peak_memory_mb, memory_limit):
-    """MLE requires peak-memory evidence; everything else is RE (matches stress)."""
-    if (
-        memory_enforced
-        and peak_memory_mb is not None
-        and peak_memory_mb >= memory_limit * 0.98
-    ):
-        return "MLE"
-    return "RE"
+    """Compatibility wrapper for the Core result normalizer."""
+    return infer_failed_status(
+        returncode, stderr, memory_enforced, peak_memory_mb, memory_limit
+    )
 
 
 def _remove_file_with_retries(path):
-    for _ in range(20):
-        try:
-            os.remove(path)
-            return
-        except FileNotFoundError:
-            return
-        except PermissionError:
-            time.sleep(0.05)
-        except OSError:
-            return
+    return _judge_execution.remove_file_with_retries(path)
 
 def run_program_to_file(
     bin_path,
@@ -854,86 +342,27 @@ def run_program_to_file(
     output_limit=DEFAULT_OUTPUT_LIMIT,
     process_limit=DEFAULT_PROCESS_LIMIT,
 ):
-    """Run one contestant process with tree-wide time, memory and output controls."""
-    stderr_path = output_file + ".stderr"
-    try:
-        result = run_managed_to_files(
-            [bin_path],
-            input_path=in_file,
-            stdout_path=output_file,
-            stderr_path=stderr_path,
-            timeout=time_limit,
-            memory_limit_mb=memory_limit,
-            output_limit_bytes=int(output_limit * 1024 * 1024),
-            process_limit=process_limit,
-        )
-        try:
-            stderr = open(stderr_path, "r", encoding="utf-8", errors="replace").read().strip()
-        except OSError:
-            stderr = ""
-        details = {
-            "output_bytes": int(result.get("output_bytes") or 0),
-            "termination_reason": result.get("reason"),
-        }
-        reason = result["reason"]
-        if reason == "time_limit":
-            return "TLE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
-        if reason == "output_limit":
-            return "OLE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
-        if reason == "memory_limit":
-            return "MLE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
-        if reason == "process_limit":
-            return "RE", result["time"], result["memory"], result["memory_enforced"], result["message"], details
-        if reason == PROCESS_CLEANUP_FAILED:
-            return "FAIL", result["time"], result["memory"], result["memory_enforced"], result["message"], details
-        if result["returncode"] != 0:
-            status = _failed_status(
-                result["returncode"], stderr, result["memory_enforced"], result["memory"], memory_limit
-            )
-            if status == "MLE" and result.get("reason") != "memory_limit":
-                details["termination_reason"] = "inferred_memory_limit"
-            return status, result["time"], result["memory"], result["memory_enforced"], stderr, details
-        return "AC", result["time"], result["memory"], result["memory_enforced"], "", details
-    except OutputBudgetError as exc:
-        return "FAIL", 0.0, None, False, str(exc), {
-            "output_bytes": 0,
-            "termination_reason": "output_control_error",
-        }
-    except OSError as exc:
-        return "RE", 0.0, None, False, str(exc), {"output_bytes": 0}
-    finally:
-        _remove_file_with_retries(stderr_path)
+    return _judge_execution.run_program_to_file(
+        bin_path,
+        in_file,
+        output_file,
+        time_limit,
+        memory_limit,
+        output_limit,
+        process_limit,
+        run_managed_fn=run_managed_to_files,
+        infer_failed_status_fn=infer_failed_status,
+        cleanup_fn=_remove_file_with_retries,
+    )
 
 
 def _temporary_output_path(bin_path):
-    descriptor, path = tempfile.mkstemp(
-        prefix=".probhub-output-", suffix=".out", dir=os.path.dirname(bin_path)
-    )
-    os.close(descriptor)
-    return path
+    return _judge_execution.temporary_output_path(bin_path)
 
 
 def _probe_status(result, memory_limit):
-    reason = result.get("reason")
-    if reason == "time_limit":
-        return "TLE"
-    if reason == "output_limit":
-        return "OLE"
-    if reason == "memory_limit":
-        return "MLE"
-    if reason == "process_limit":
-        return "RE"
-    if reason == PROCESS_CLEANUP_FAILED:
-        return "FAIL"
-    if result.get("returncode") != 0:
-        return _failed_status(
-            result.get("returncode"),
-            "",
-            bool(result.get("memory_enforced")),
-            result.get("memory"),
-            memory_limit,
-        )
-    return "completed"
+    status = _judge_execution.classify_process_status(result, memory_limit)
+    return "completed" if status == "AC" else status
 
 
 def probe_tle_margin(
@@ -948,75 +377,22 @@ def probe_tle_margin(
     probe_factor,
     cache=None,
 ):
-    """Measure one expected-TLE case beyond the official TL without changing verdicts."""
-    probe_factor = max(float(probe_factor), 1.0)
-    probe_limit = float(time_limit) * probe_factor
-    key = calibration_probe_cache_key(
-        program_fingerprint,
+    return _judge_execution.probe_tle_margin(
+        bin_path,
         in_file,
+        case_name,
+        program_fingerprint,
         time_limit,
         memory_limit,
         output_limit,
         process_limit,
         probe_factor,
+        cache,
+        run_managed_fn=run_managed_to_files,
+        cache_key_fn=calibration_probe_cache_key,
+        output_path_fn=_temporary_output_path,
+        cleanup_fn=_remove_file_with_retries,
     )
-    cached_result = cache.get("probe", key) if cache is not None else None
-    if cached_result is not None:
-        result = dict(cached_result)
-        result["cached"] = True
-        return result
-
-    output_file = _temporary_output_path(bin_path)
-    stderr_path = output_file + ".stderr"
-    try:
-        try:
-            run = run_managed_to_files(
-                [bin_path],
-                input_path=in_file,
-                stdout_path=output_file,
-                stderr_path=stderr_path,
-                timeout=probe_limit,
-                memory_limit_mb=memory_limit,
-                output_limit_bytes=int(output_limit * 1024 * 1024),
-                process_limit=process_limit,
-            )
-        except OSError as exc:
-            result = {
-                "status": "TLE",
-                "case": case_name,
-                "limit": float(time_limit),
-                "observed": None,
-                "limit_ratio": None,
-                "probe_limit": probe_limit,
-                "process_status": "RE",
-                "evidence_kind": "unavailable",
-                "censored": False,
-                "supported": True,
-                "message": str(exc),
-            }
-        else:
-            observed = float(run.get("time") or 0.0)
-            result = {
-                "status": "TLE",
-                "case": case_name,
-                "limit": float(time_limit),
-                "observed": round(observed, 6),
-                "limit_ratio": round(observed / float(time_limit), 6),
-                "probe_limit": probe_limit,
-                "process_status": _probe_status(run, memory_limit),
-                "evidence_kind": (
-                    "lower_bound" if run.get("reason") == "time_limit" else "exact"
-                ),
-                "censored": run.get("reason") == "time_limit",
-                "supported": True,
-                "message": run.get("message", ""),
-            }
-        if cache is not None:
-            cache.set("probe", key, result)
-        return {**result, "cached": False}
-    finally:
-        _remove_file_with_retries(output_file)
-        _remove_file_with_retries(stderr_path)
 
 
 def run_standard_testcase(
@@ -1029,30 +405,20 @@ def run_standard_testcase(
     process_limit=DEFAULT_PROCESS_LIMIT,
     capture_sample_answer=False,
 ):
-    output_file = _temporary_output_path(bin_path)
-    try:
-        status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
-            bin_path, in_file, output_file, time_limit, memory_limit, output_limit, process_limit
-        )
-        if capture_sample_answer:
-            details["sample_answer"] = compare_sample_answer(output_file, ans_file)
-        if status != "AC":
-            return status, elapsed, memory, memory_enforced, message, details
-        with open(ans_file, "r", encoding="utf-8", errors="replace") as answer, open(
-            output_file, "r", encoding="utf-8", errors="replace"
-        ) as actual:
-            matched, message = compare_standard_output(answer.read(), actual.read())
-        status = "AC" if matched else "WA"
-        return status, elapsed, memory, memory_enforced, message, details
-    finally:
-        for _ in range(20):
-            try:
-                os.remove(output_file)
-                break
-            except FileNotFoundError:
-                break
-            except OSError:
-                time.sleep(0.05)
+    return _judge_execution.run_standard_testcase(
+        bin_path,
+        in_file,
+        ans_file,
+        time_limit,
+        memory_limit,
+        output_limit,
+        process_limit,
+        capture_sample_answer,
+        run_program_fn=run_program_to_file,
+        sample_compare_fn=compare_sample_answer,
+        output_path_fn=_temporary_output_path,
+        cleanup_fn=_remove_file_with_retries,
+    )
 
 
 def run_sample_answer_testcase(
@@ -1064,27 +430,19 @@ def run_sample_answer_testcase(
     output_limit=DEFAULT_OUTPUT_LIMIT,
     process_limit=DEFAULT_PROCESS_LIMIT,
 ):
-    """Run the first accepted solution and compare only normalized raw stdout.
-
-    Sample-check deliberately does not invoke a custom Checker. Its sole
-    invariant is that the program reproduces the stored sample answer bytes
-    after newline normalization.
-    """
-    output_file = _temporary_output_path(bin_path)
-    try:
-        status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
-            bin_path,
-            in_file,
-            output_file,
-            time_limit,
-            memory_limit,
-            output_limit,
-            process_limit,
-        )
-        details["sample_answer"] = compare_sample_answer(output_file, ans_file)
-        return status, elapsed, memory, memory_enforced, message, details
-    finally:
-        _remove_file_with_retries(output_file)
+    return _judge_execution.run_sample_answer_testcase(
+        bin_path,
+        in_file,
+        ans_file,
+        time_limit,
+        memory_limit,
+        output_limit,
+        process_limit,
+        run_program_fn=run_program_to_file,
+        sample_compare_fn=compare_sample_answer,
+        output_path_fn=_temporary_output_path,
+        cleanup_fn=_remove_file_with_retries,
+    )
 
 
 def run_custom_testcase(
@@ -1098,88 +456,22 @@ def run_custom_testcase(
     process_limit=DEFAULT_PROCESS_LIMIT,
     capture_sample_answer=False,
 ):
-    """Run a contestant and adapt the shared Checker result to the tuple API."""
-    output_file = _temporary_output_path(bin_path)
-    try:
-        status, elapsed, memory, memory_enforced, message, details = run_program_to_file(
-            bin_path, in_file, output_file, time_limit, memory_limit, output_limit, process_limit
-        )
-        if capture_sample_answer:
-            details["sample_answer"] = compare_sample_answer(output_file, ans_file)
-        if status != "AC":
-            termination_reason = details.get("termination_reason")
-            if not termination_reason:
-                termination_reason = "start_error"
-                details["termination_reason"] = termination_reason
-            details.update({
-                "verdict": status if status != "FAIL" else None,
-                "execution_status": (
-                    "memory_limit" if termination_reason == "inferred_memory_limit"
-                    else termination_reason
-                    if termination_reason in {
-                        "time_limit", "memory_limit", "output_limit", "process_limit",
-                        "output_control_error", PROCESS_CLEANUP_FAILED, "start_error",
-                    }
-                    else "completed"
-                ),
-                "failure_kind": (
-                    "control_failure" if status == "FAIL"
-                    else "startup_failure" if termination_reason == "start_error"
-                    else "resource_limit" if status in {"TLE", "MLE", "OLE"}
-                    or termination_reason == "process_limit"
-                    else "runtime_error"
-                ),
-                "actor": "supervisor" if status == "FAIL" else "contestant",
-            })
-            return status, elapsed, memory, memory_enforced, message, details
-        checker = run_checker_to_files(
-            [checker_bin],
-            in_file,
-            ans_file,
-            output_file,
-            timeout=max(5.0, float(time_limit)),
-            cwd=os.path.dirname(bin_path),
-            memory_limit_mb=memory_limit,
-            output_limit_bytes=min(
-                int(output_limit * 1024 * 1024), MAX_TOOL_DIAGNOSTIC_BYTES
-            ),
-            process_limit=process_limit,
-        )
-        checker_status = checker.get("verdict") or "FAIL"
-        actor = checker.get("actor")
-        failure_kind = checker.get("failure_kind")
-        if checker_status == "AC":
-            actor = "session"
-        elif checker_status == "WA":
-            actor = "contestant"
-            failure_kind = "wrong_answer"
-        details.update({
-            "verdict": checker.get("verdict"),
-            "execution_status": checker.get("execution_status"),
-            "failure_kind": failure_kind,
-            "actor": actor,
-            "termination_reason": checker.get("termination_reason"),
-            "checker_termination_reason": checker.get("termination_reason"),
-            "cleanup": checker.get("cleanup"),
-        })
-        checker_message = checker.get("message") or ""
-        if checker_status == "FAIL":
-            if checker.get("execution_status") == "output_control_error":
-                checker_message = f"checker output control failed: {checker_message}"
-            elif checker.get("execution_status") == "start_error":
-                checker_message = f"checker failed to start: {checker_message}"
-            elif checker.get("termination_reason") != "completed":
-                checker_message = f"checker {checker_message}"
-        return (
-            checker_status,
-            elapsed,
-            memory,
-            memory_enforced,
-            checker_message,
-            details,
-        )
-    finally:
-        _remove_file_with_retries(output_file)
+    return _judge_execution.run_custom_testcase(
+        bin_path,
+        checker_bin,
+        in_file,
+        ans_file,
+        time_limit,
+        memory_limit,
+        output_limit,
+        process_limit,
+        capture_sample_answer,
+        run_program_fn=run_program_to_file,
+        sample_compare_fn=compare_sample_answer,
+        checker_fn=run_checker_to_files,
+        output_path_fn=_temporary_output_path,
+        cleanup_fn=_remove_file_with_retries,
+    )
 
 
 def run_interactive_testcase(
@@ -1194,43 +486,18 @@ def run_interactive_testcase(
     output_limit=DEFAULT_OUTPUT_LIMIT,
     process_limit=DEFAULT_PROCESS_LIMIT,
 ):
-    """Connect contestant and interactor with transcript, idle and total deadlines."""
-    result = execute_interactive_session(
-        [bin_path],
-        [interactor_bin],
+    return _judge_execution.run_interactive_testcase(
+        bin_path,
+        interactor_bin,
         in_file,
         ans_file,
-        work_dir=os.path.dirname(bin_path),
-        time_limit=time_limit,
-        memory_limit_mb=memory_limit,
-        idle_limit=idle_limit,
-        transcript_limit=transcript_limit,
-        output_limit_bytes=int(output_limit * 1024 * 1024),
-        process_limit=process_limit,
-    )
-    details = {
-        "transcript": result.get("transcript", []),
-        "transcript_truncated": result.get("transcript_truncated", False),
-        "output_bytes": result.get("output_bytes"),
-        "termination_reason": result.get("termination_reason"),
-        "verdict": result.get("verdict"),
-        "execution_status": result.get("execution_status"),
-        "failure_kind": result.get("failure_kind"),
-        "actor": result.get("actor"),
-        "cleanup": result.get("cleanup"),
-        "exit_codes": result.get("exit_codes"),
-        "traffic": result.get("traffic"),
-        "resources": result.get("resources"),
-    }
-    if result.get("timeout_kind"):
-        details["timeout_kind"] = result["timeout_kind"]
-    return (
-        result.get("status") or "FAIL",
-        float(result.get("time") or 0.0),
-        result.get("memory"),
-        bool(result.get("memory_enforced")),
-        result.get("message") or "",
-        details,
+        time_limit,
+        memory_limit,
+        idle_limit,
+        transcript_limit,
+        output_limit,
+        process_limit,
+        interactive_fn=execute_interactive_session,
     )
 
 def run_testcase(
@@ -1247,33 +514,7 @@ def run_testcase(
     transcript_limit=65536,
     capture_sample_answer=False,
 ):
-    if judge_type == "custom":
-        status, elapsed, memory, memory_enforced, message, details = run_custom_testcase(
-            bin_path,
-            judge_bin,
-            in_file,
-            ans_file,
-            time_limit,
-            memory_limit,
-            output_limit,
-            process_limit,
-            capture_sample_answer=capture_sample_answer,
-        )
-        return status, elapsed, memory, memory_enforced, message, details
-    if judge_type == "interactive":
-        return run_interactive_testcase(
-            bin_path,
-            judge_bin,
-            in_file,
-            ans_file,
-            time_limit,
-            memory_limit,
-            idle_limit=idle_limit,
-            transcript_limit=transcript_limit,
-            output_limit=output_limit,
-            process_limit=process_limit,
-        )
-    status, elapsed, memory, memory_enforced, message, details = run_standard_testcase(
+    return _judge_execution.run_testcase(
         bin_path,
         in_file,
         ans_file,
@@ -1281,37 +522,23 @@ def run_testcase(
         memory_limit,
         output_limit,
         process_limit,
-        capture_sample_answer=capture_sample_answer,
+        judge_type,
+        judge_bin,
+        idle_limit,
+        transcript_limit,
+        capture_sample_answer,
+        standard_fn=run_standard_testcase,
+        custom_fn=run_custom_testcase,
+        interactive_fn=run_interactive_testcase,
     )
-    return status, elapsed, memory, memory_enforced, message, details
 
 def run_validator(val_bin, in_file, timeout=VALIDATOR_TIMEOUT_SECONDS):
-    """Validate LF-normalized input under the shared process-tree controller."""
-    try:
-        with open(in_file, "rb") as fin:
-            data = fin.read().replace(b"\r\n", b"\n")
-        with tempfile.TemporaryDirectory(prefix="probhub-validator-") as temp:
-            stdout_path = os.path.join(temp, "validator.out")
-            stderr_path = os.path.join(temp, "validator.stderr")
-            result = run_managed_to_files(
-                [val_bin],
-                input_data=data,
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                timeout=timeout,
-                memory_limit_mb=VALIDATOR_MEMORY_LIMIT_MB,
-                output_limit_bytes=VALIDATOR_OUTPUT_LIMIT_BYTES,
-                process_limit=DEFAULT_PROCESS_LIMIT,
-            )
-            try:
-                stderr = open(stderr_path, "r", encoding="utf-8", errors="replace").read().strip()
-            except OSError:
-                stderr = ""
-            if result["reason"] != "completed":
-                return False, result["message"] or result["reason"].replace("_", " ")
-            return result["returncode"] == 0, stderr
-    except OSError as exc:
-        return False, str(exc)
+    return _judge_execution.run_validator(
+        val_bin,
+        in_file,
+        timeout,
+        run_managed_fn=run_managed_to_files,
+    )
 
 
 def _data_groups(config=None):
@@ -1323,160 +550,29 @@ def _testcase_groups(case_name, suite, base_name, groups):
 
 
 def collect_testcases(prob_dir, config=None):
-    testcases = []
-    data_config = (config or {}).get("data") or {}
-    groups = _data_groups(config)
-    for suite, default in (("sample", "data/sample"), ("secret", "data/secret")):
-        data_dir = os.path.join(prob_dir, data_config.get(f"{suite}_dir", default))
-        if not os.path.isdir(data_dir):
-            continue
-        for in_name in sorted([f for f in os.listdir(data_dir) if f.endswith(".in")]):
-            base_name = in_name[:-3]
-            case_name = f"{suite}/{base_name}"
-            testcases.append({
-                "suite": suite,
-                "name": base_name,
-                "case": case_name,
-                "groups": _testcase_groups(case_name, suite, base_name, groups),
-                "in_path": os.path.join(data_dir, in_name),
-                "ans_path": os.path.join(data_dir, f"{base_name}.ans"),
-            })
-    return testcases
+    return _judge_planning.collect_testcases(prob_dir, config)
 
 
 def _select_expectation_cases(kind, entry, testcases, group_definitions):
-    # A full-range accepted remains the correctness baseline even if a
-    # configuration carries expected.groups. Partial accepted entries are
-    # distinguishable by their explicit run_on domain.
-    if kind == "std" and entry.get("run_on") is None:
-        return list(testcases), []
-    return select_expectation_cases(kind, entry, testcases, group_definitions)
+    return _judge_planning.select_solution_expectation_cases(
+        kind, entry, testcases, group_definitions
+    )
 
 
 def _expectation_cases(kind, testcases, expected, group_definitions, program_name):
-    """Compatibility adapter for callers that still pass a split expectation."""
-    return _select_expectation_cases(
-        kind,
-        {"file": program_name, "expected": expected, "run_on": None},
-        testcases,
-        group_definitions,
+    return _judge_planning.expectation_cases(
+        kind, testcases, expected, group_definitions, program_name
     )
 
 
 def _solution_execution_plan(source_groups, testcases, group_definitions):
-    group_names = {group["name"] for group in group_definitions}
-    plans = {"std": [], "brute": [], "wrong": []}
-    errors = []
-    for kind, entries in source_groups.items():
-        for entry in entries:
-            program = str(entry.get("file") or entry.get("path") or "").replace("\\", "/")
-            normalized = {
-                "file": program,
-                "expected": entry.get("expected") or _normalize_expected(kind, None),
-                "run_on": entry.get("run_on"),
-            }
-            run_on = normalized["run_on"]
-            executed, skipped = select_run_cases(normalized, testcases)
-            selected, selected_groups = _select_expectation_cases(
-                kind, normalized, testcases, group_definitions
-            )
-            targeted, target_groups = select_target_cases(
-                normalized, testcases, group_definitions
-            )
-            executed_names = {case["case"] for case in executed}
-            missing = [case["case"] for case in selected if case["case"] not in executed_names]
-            selected_names = {case["case"] for case in selected}
-            missing_targets = [
-                case["case"]
-                for case in targeted
-                if case["case"] not in executed_names
-                and case["case"] not in selected_names
-            ]
-            unknown = sorted(set(run_on or []) - group_names)
-            empty = sorted(
-                name
-                for name in (run_on or [])
-                if not any(name in (case.get("groups") or []) for case in testcases)
-            )
-            reason = None
-            result_code = None
-            if entry.get("run_on_error"):
-                reason = entry["run_on_error"]
-                result_code = "invalid_solution_run_on"
-            elif kind == "std" and entry.get("index") == 0 and run_on is not None:
-                reason = "first accepted solution must run on all cases"
-                result_code = "primary_accepted_run_on_forbidden"
-            elif (
-                kind == "std"
-                and entry.get("index", 0) > 0
-                and run_on is not None
-                and not entry.get("expected_groups_configured")
-            ):
-                reason = "partial accepted solution must explicitly declare expected.groups"
-                result_code = "partial_accepted_expected_groups_required"
-            elif unknown:
-                reason = "run_on references unknown groups: " + ", ".join(unknown)
-                result_code = "solution_run_on_unknown_group"
-            elif empty:
-                reason = "run_on groups match no test cases: " + ", ".join(empty)
-                result_code = "solution_run_on_has_no_cases"
-            elif missing:
-                reason = f"run_on skips {len(missing)} case(s) selected by expectation"
-                result_code = "solution_run_on_expectation_gap"
-            elif missing_targets:
-                reason = (
-                    f"run_on skips {len(missing_targets)} case(s) required by "
-                    "data.groups.targets"
-                )
-                result_code = "solution_run_on_target_gap"
-            plan = {
-                **entry,
-                "program": program,
-                "execution_cases": executed,
-                "skipped_cases": skipped,
-                "expectation_cases": selected,
-                "expectation_groups": selected_groups,
-                "coverage_ok": reason is None,
-                "unexecuted_expected_cases": missing,
-                "unexecuted_target_cases": missing_targets,
-                "target_groups": target_groups,
-            }
-            plans[kind].append(plan)
-            if reason is not None:
-                errors.append({
-                    "kind": kind,
-                    "program": program,
-                    "run_on": list(run_on or []),
-                    "reason": reason,
-                    "result_code": result_code,
-                    "coverage_ok": False,
-                    "unexecuted_expected_cases": missing,
-                    "unexecuted_target_cases": missing_targets,
-                    "target_groups": target_groups,
-                })
-    return plans, errors
+    return _judge_planning.solution_execution_plan(
+        source_groups, testcases, group_definitions
+    )
 
 
 def _result_snapshot(item):
-    if item is None:
-        return None
-    snapshot = {
-        "case": item.get("case"),
-        "groups": list(item.get("groups") or []),
-        "status": item.get("status"),
-        "message": item.get("message", ""),
-    }
-    for key in (
-        "time",
-        "memory",
-        "memory_enforced",
-        "output_bytes",
-        "termination_reason",
-        "cached",
-    ):
-        if key in item:
-            snapshot[key] = item.get(key)
-    return snapshot
+    return _judge_planning.result_snapshot(item)
 
 
 def evaluate_expectation(
@@ -1490,110 +586,21 @@ def evaluate_expectation(
     execution_cases=None,
     skipped_cases=None,
 ):
-    entry = {"file": program_name, "expected": expected, "run_on": run_on}
-    selected_cases, groups = _select_expectation_cases(
-        kind, entry, testcases, group_definitions
+    return _judge_planning.evaluate_expectation(
+        kind,
+        program_name,
+        expected,
+        case_results,
+        testcases,
+        group_definitions,
+        run_on,
+        execution_cases,
+        skipped_cases,
     )
-    if execution_cases is None:
-        execution_cases, inferred_skipped = select_run_cases(entry, testcases)
-        if skipped_cases is None:
-            skipped_cases = inferred_skipped
-    if skipped_cases is None:
-        executed_names = {case["case"] for case in execution_cases}
-        skipped_cases = [case for case in testcases if case["case"] not in executed_names]
-    execution_names = {case["case"] for case in execution_cases}
-    unexecuted_expected = [
-        case["case"] for case in selected_cases if case["case"] not in execution_names
-    ]
-    selected_names = {case["case"] for case in selected_cases}
-    selected_results = [item for item in case_results if item["case"] in selected_names]
-    statuses = set(expected.get("status") or [])
-    forbidden_statuses = set(expected.get("forbid") or [])
-    all_required = bool(expected.get("all"))
-    matched = [item for item in selected_results if item["status"] in statuses]
-    forbidden = [item for item in case_results if item["status"] in forbidden_statuses]
-    status_ok = bool(selected_results) and (
-        len(matched) == len(selected_results) if all_required else bool(matched)
-    )
-    first_non_ac = next((item for item in case_results if item["status"] != "AC"), None)
-    first_expected_match = matched[0] if matched else None
-    first_forbidden = forbidden[0] if forbidden else None
-    return {
-        "kind": kind,
-        "program": program_name,
-        "expected_statuses": sorted(statuses),
-        "forbidden_statuses": sorted(forbidden_statuses),
-        "groups": groups,
-        "run_on": list(run_on or []),
-        "executed_cases": [case["case"] for case in execution_cases],
-        "skipped_cases": [case["case"] for case in skipped_cases],
-        "coverage_ok": not unexecuted_expected,
-        "unexecuted_expected_cases": unexecuted_expected,
-        "all": all_required,
-        "ok": status_ok and not forbidden and not unexecuted_expected,
-        "matched_cases": [item["case"] for item in matched],
-        "selected_cases": [item["case"] for item in selected_results],
-        "forbidden_cases": [item["case"] for item in forbidden],
-        "first_non_ac": _result_snapshot(first_non_ac),
-        "first_expected_match": _result_snapshot(first_expected_match),
-        "first_forbidden": _result_snapshot(first_forbidden),
-    }
 
 
 def _status_only_resource_kill(status, case_result, limits):
-    if case_result is None:
-        return {
-            "status": status,
-            "case": None,
-            "groups": [],
-            "observed": None,
-            "limit": limits[status],
-            "limit_ratio": None,
-            "evidence_kind": "unavailable",
-            "supported": True,
-            "censored": True,
-        }
-    if status == "MLE":
-        observed = case_result.get("memory")
-        termination_reason = case_result.get("termination_reason")
-        supported = (
-            termination_reason == "memory_limit"
-            and bool(case_result.get("memory_enforced"))
-            and observed is not None
-        )
-        evidence_kind = (
-            "lower_bound" if supported
-            else "inferred" if termination_reason == "inferred_memory_limit"
-            else "unavailable"
-        )
-    else:
-        output_bytes = case_result.get("output_bytes")
-        observed = (
-            float(output_bytes) / (1024 * 1024)
-            if isinstance(output_bytes, (int, float)) and output_bytes > 0
-            else None
-        )
-        supported = (
-            case_result.get("termination_reason") == "output_limit"
-            and observed is not None
-        )
-        evidence_kind = "lower_bound" if supported else "unavailable"
-    limit = float(limits[status])
-    return {
-        "status": status,
-        "case": case_result.get("case"),
-        "groups": list(case_result.get("groups") or []),
-        "observed": round(float(observed), 6) if observed is not None else None,
-        "limit": limit,
-        "limit_ratio": (
-            round(float(observed) / limit, 6)
-            if supported and limit > 0
-            else None
-        ),
-        "evidence_kind": evidence_kind,
-        "supported": supported,
-        "censored": True,
-    }
+    return _judge_planning.status_only_resource_kill(status, case_result, limits)
 
 
 def build_solution_calibration(
@@ -1603,58 +610,18 @@ def build_solution_calibration(
     policy,
     resource_kills,
 ):
-    timed = [item for item in case_results if isinstance(item.get("time"), (int, float))]
-    max_item = max(timed, key=lambda item: item["time"]) if timed else None
-    max_time = float(max_item["time"]) if max_item is not None else None
-    ratio = (
-        max_time / float(time_limit)
-        if max_time is not None and float(time_limit) > 0
-        else None
+    return _judge_planning.build_solution_calibration(
+        kind, case_results, time_limit, policy, resource_kills
     )
-    headroom = (
-        float(time_limit) / max_time
-        if max_time is not None and max_time > 0
-        else None
-    )
-    required = policy["accepted_time_multiplier"]
-    return {
-        "schema_version": 1,
-        "target_guarantee": False,
-        "max_time": round(max_time, 6) if max_time is not None else None,
-        "max_time_case": max_item.get("case") if max_item is not None else None,
-        "time_limit": float(time_limit),
-        "time_limit_ratio": round(ratio, 6) if ratio is not None else None,
-        "headroom_factor": round(headroom, 6) if headroom is not None else None,
-        "fresh_cases": sum(1 for item in case_results if not item.get("cached")),
-        "cached_cases": sum(1 for item in case_results if item.get("cached")),
-        "accepted_check": {
-            "applicable": kind == "std",
-            "required_multiplier": required,
-            "ok": (
-                kind != "std"
-                or (headroom is not None and headroom + 1e-12 >= required)
-            ),
-        },
-        "resource_kills": resource_kills,
-    }
 
 
 def cached_case_result(cache, key, require_sample_answer=False):
-    cached = cache.get("case", key)
-    if (
-        cached is not None
-        and require_sample_answer
-        and not valid_sample_answer_summary(
-            (cached.get("details") or {}).get("sample_answer")
-        )
-    ):
-        # A manually edited or partially written entry must never bypass the
-        # strict sample invariant. Count it as a miss and refresh this key.
-        cache.stats["case_hits"] -= 1
-        cache.stats["case_misses"] += 1
-        cache.delete("case", key)
-        return None
-    return cached
+    return _judge_planning.cached_case_result(
+        cache,
+        key,
+        require_sample_answer,
+        sample_validator=valid_sample_answer_summary,
+    )
 
 
 def save_case_result(
@@ -1667,17 +634,15 @@ def save_case_result(
     message,
     details,
 ):
-    cache.set(
-        "case",
+    return _judge_planning.save_case_result(
+        cache,
         key,
-        {
-            "status": status,
-            "time": round(elapsed, 6),
-            "memory": memory,
-            "memory_enforced": memory_enforced,
-            "message": message,
-            "details": details,
-        },
+        status,
+        elapsed,
+        memory,
+        memory_enforced,
+        message,
+        details,
     )
 
 
