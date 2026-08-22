@@ -19,12 +19,28 @@ sys.path.insert(0, PACKAGE_ROOT)
 
 from probhub.calibration import (
     MEASUREMENT_NOTE,
-    SANDBOX_CACHE_SCHEMA_VERSION,
     calibration_policy,
 )
 from probhub.build_lock import workspace_file_lock
 from probhub.errors import ProbHubError
 from probhub.io import read_bounded_text
+from probhub.judge_cache import (
+    CACHE_FILENAME,
+    CACHE_LIMITS,
+    CACHE_SCHEMA_VERSION,
+    SandboxCache,
+    calibration_probe_cache_key,
+    file_digest as _file_digest,
+    hash_parts as _hash_parts,
+    testcase_cache_key,
+    validator_cache_key,
+)
+from probhub.judge_results import (
+    classify_contestant_failure,
+    classify_process_status,
+    infer_failed_status,
+)
+from probhub import judge_runtime as _judge_runtime
 from probhub.output_compare import compare_standard_output
 from probhub.problem_paths import ProblemPathError, resolve_problem_regular_file
 from probhub.special_judges import execute_interactive_session, run_checker_to_files
@@ -58,109 +74,9 @@ DEFAULT_OUTPUT_LIMIT = 64
 MAX_TOOL_DIAGNOSTIC_BYTES = 8 * 1024 * 1024
 PROTOCOL_NAME = "probhub.local_judge"
 PROTOCOL_VERSION = 1
-CACHE_SCHEMA_VERSION = SANDBOX_CACHE_SCHEMA_VERSION
-CACHE_FILENAME = "sandbox-cache-v1.json"
-CACHE_LIMITS = {"validator": 4000, "case": 12000, "probe": 2000}
 SAMPLE_ANSWER_SCHEMA_VERSION = 1
 SAMPLE_OUTPUT_PREVIEW_BYTES = 160
 _COMPILER_IDENTITY = None
-_FILE_DIGEST_CACHE = {}
-
-
-class BinaryChangedError(RuntimeError):
-    pass
-
-
-def binary_identity(path):
-    """Return the published binary identity used by one Judge session."""
-    absolute = os.path.abspath(path)
-    digest = hashlib.sha256()
-    with open(absolute, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-        stat = os.fstat(stream.fileno())
-    return {
-        "path": absolute,
-        "size": int(stat.st_size),
-        "digest": digest.hexdigest(),
-    }
-
-
-def verify_binary_identities(entries):
-    """Check compiled binaries once before the first Judge execution.
-
-    The caller supplies identities captured immediately after compilation (or
-    from a validated cache hit).  A single changed/missing file invalidates the
-    whole Judge session and must not become a contestant verdict.
-    """
-    for entry in entries:
-        expected = entry.get("identity") or {}
-        path = expected.get("path")
-        try:
-            actual = binary_identity(path)
-        except (OSError, TypeError, ValueError) as exc:
-            return {
-                "code": "binary_changed",
-                "failure_kind": "infrastructure",
-                "role": entry.get("role"),
-                "program": entry.get("program"),
-                "path": path,
-                "expected_digest": expected.get("digest"),
-                "actual_digest": None,
-                "message": f"compiled binary is unavailable before first execution: {path} ({exc})",
-            }
-        if (
-            actual.get("digest") != expected.get("digest")
-            or actual.get("size") != expected.get("size")
-        ):
-            return {
-                "code": "binary_changed",
-                "failure_kind": "infrastructure",
-                "role": entry.get("role"),
-                "program": entry.get("program"),
-                "path": path,
-                "expected_digest": expected.get("digest"),
-                "actual_digest": actual.get("digest"),
-                "expected_size": expected.get("size"),
-                "actual_size": actual.get("size"),
-                "message": f"compiled binary changed before first execution: {path}",
-            }
-    return None
-
-
-def publish_compiled_binary(staged_binary, out_bin, staged_identity):
-    """Atomically publish a compiled binary and restore the previous file on mismatch."""
-    previous = staged_binary + ".previous"
-    had_previous = os.path.isfile(out_bin)
-    if had_previous:
-        shutil.copyfile(out_bin, previous)
-    published = False
-    try:
-        os.replace(staged_binary, out_bin)
-        published = True
-        actual = binary_identity(out_bin)
-        if (
-            actual["digest"] != staged_identity["digest"]
-            or actual["size"] != staged_identity["size"]
-        ):
-            raise BinaryChangedError(
-                "published binary identity differs from staged binary"
-            )
-        return actual
-    except Exception:
-        if not published:
-            raise
-        try:
-            if had_previous and os.path.isfile(previous):
-                os.replace(previous, out_bin)
-            elif not had_previous and os.path.lexists(out_bin):
-                os.remove(out_bin)
-        except OSError as rollback_error:
-            raise BinaryChangedError(
-                "compiled binary publish failed and the previous binary could not be restored: "
-                f"{rollback_error}"
-            ) from rollback_error
-        raise
 
 
 def _cancel_signal_handler(_signum, _frame):
@@ -173,44 +89,27 @@ def install_cancellation_handlers():
         signal.signal(signal.SIGBREAK, _cancel_signal_handler)
 
 
-def _hash_parts(*parts):
-    digest = hashlib.sha256()
-    for part in parts:
-        if isinstance(part, bytes):
-            payload = part
-        else:
-            payload = str(part).encode("utf-8")
-        digest.update(len(payload).to_bytes(8, "big"))
-        digest.update(payload)
-    return digest.hexdigest()
+BinaryChangedError = _judge_runtime.BinaryChangedError
 
 
-def _file_digest(path):
-    path = os.path.abspath(path)
-    stat = os.stat(path)
-    cache_key = (
-        path,
-        stat.st_mtime_ns,
-        stat.st_ctime_ns,
-        stat.st_size,
-        getattr(stat, "st_ino", 0),
+def binary_identity(path):
+    """Compatibility wrapper for the Core binary identity primitive."""
+    return _judge_runtime.binary_identity(path)
+
+
+def verify_binary_identities(entries):
+    """Compatibility wrapper for the Core binary identity fence."""
+    return _judge_runtime.verify_binary_identities(entries, identity_fn=binary_identity)
+
+
+def publish_compiled_binary(staged_binary, out_bin, staged_identity):
+    """Compatibility wrapper retaining local identity injection for tests."""
+    return _judge_runtime.publish_compiled_binary(
+        staged_binary,
+        out_bin,
+        staged_identity,
+        identity_fn=binary_identity,
     )
-    cached = _FILE_DIGEST_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    value = _file_digest_uncached(path)
-    if len(_FILE_DIGEST_CACHE) > 4096:
-        _FILE_DIGEST_CACHE.clear()
-    _FILE_DIGEST_CACHE[cache_key] = value
-    return value
-
-
-def _file_digest_uncached(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def normalize_sample_output(payload):
@@ -281,223 +180,6 @@ def valid_sample_answer_summary(value):
     )
 
 
-def compiler_identity():
-    global _COMPILER_IDENTITY
-    if _COMPILER_IDENTITY is not None:
-        return _COMPILER_IDENTITY
-    try:
-        with tempfile.TemporaryDirectory(prefix="probhub-compiler-version-") as temp:
-            stdout_path = os.path.join(temp, "stdout")
-            stderr_path = os.path.join(temp, "stderr")
-            result = run_managed_to_files(
-                ["g++", "--version"],
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                timeout=10,
-                memory_limit_mb=512,
-                output_limit_bytes=1024 * 1024,
-                process_limit=8,
-            )
-            with open(stdout_path, "r", encoding="utf-8", errors="replace") as stream:
-                stdout = stream.read()
-            with open(stderr_path, "r", encoding="utf-8", errors="replace") as stream:
-                stderr = stream.read()
-        if result["reason"] != "completed" or result["returncode"] != 0:
-            raise RuntimeError(result.get("message") or result["reason"])
-        first_line = (stdout or stderr).splitlines()[0]
-        _COMPILER_IDENTITY = first_line.strip()
-    except Exception as exc:
-        _COMPILER_IDENTITY = f"g++-unknown:{exc}"
-    return _COMPILER_IDENTITY
-
-
-def source_fingerprint(src_file, prob_dir, kind=None):
-    src_file = os.path.abspath(src_file)
-    prob_dir = os.path.abspath(prob_dir)
-    dependencies = [src_file]
-    source_text = ""
-    try:
-        with open(src_file, "r", encoding="utf-8", errors="replace") as stream:
-            source_text = stream.read()
-    except OSError:
-        pass
-
-    for root, directories, files in os.walk(prob_dir):
-        directories[:] = [name for name in directories if name != ".probhub"]
-        for name in files:
-            if name.endswith((".h", ".hpp")):
-                dependencies.append(os.path.join(root, name))
-    if "testlib.h" in source_text:
-        dependencies.append(os.path.join(REFERENCES_DIR, "testlib.h"))
-
-    parts = [
-        CACHE_SCHEMA_VERSION,
-        platform.system(),
-        platform.machine(),
-        compiler_identity(),
-        kind or "unknown",
-        "-O2",
-        "-std=c++17",
-        "-static" if platform.system() == "Windows" else "dynamic",
-        "-DFOR_LINUX" if platform.system() == "Windows" and kind == "validator" else "native-lines",
-    ]
-    for path in sorted(set(os.path.abspath(item) for item in dependencies)):
-        if os.path.isfile(path):
-            try:
-                label = os.path.relpath(path, prob_dir).replace(os.sep, "/")
-            except ValueError:
-                label = path.replace(os.sep, "/")
-            parts.extend((label, _file_digest(path)))
-    return _hash_parts(*parts)
-
-
-def validator_cache_key(program_fingerprint, in_file):
-    return _hash_parts(
-        CACHE_SCHEMA_VERSION,
-        "validator",
-        platform.system(),
-        program_fingerprint,
-        _file_digest(in_file),
-    )
-
-
-def testcase_cache_key(
-    program_fingerprint,
-    in_file,
-    ans_file,
-    time_limit,
-    memory_limit,
-    judge_type="standard",
-    judge_fingerprint="",
-    judge_options_fingerprint="",
-):
-    return _hash_parts(
-        CACHE_SCHEMA_VERSION,
-        "case",
-        platform.system(),
-        platform.machine(),
-        program_fingerprint,
-        judge_type,
-        judge_fingerprint,
-        judge_options_fingerprint,
-        _file_digest(in_file),
-        _file_digest(ans_file),
-        f"{float(time_limit):.9g}",
-        int(memory_limit),
-    )
-
-
-def calibration_probe_cache_key(
-    program_fingerprint,
-    in_file,
-    time_limit,
-    memory_limit,
-    output_limit,
-    process_limit,
-    probe_factor,
-):
-    return _hash_parts(
-        CACHE_SCHEMA_VERSION,
-        "calibration-probe",
-        platform.system(),
-        platform.machine(),
-        program_fingerprint,
-        _file_digest(in_file),
-        f"{float(time_limit):.9g}",
-        int(memory_limit),
-        int(output_limit),
-        int(process_limit),
-        f"{float(probe_factor):.9g}",
-    )
-
-
-class SandboxCache:
-    def __init__(
-        self,
-        prob_dir,
-        enabled=True,
-        read_enabled=None,
-        preserve_existing=False,
-    ):
-        self.enabled = enabled
-        self.read_enabled = enabled if read_enabled is None else bool(read_enabled and enabled)
-        self.path = os.path.join(prob_dir, ".probhub", CACHE_FILENAME)
-        self.data = {
-            "schema_version": CACHE_SCHEMA_VERSION,
-            "compile": {},
-            "validator": {},
-            "case": {},
-            "probe": {},
-        }
-        self.dirty = False
-        self.stats = {
-            "enabled": enabled,
-            "read_enabled": self.read_enabled,
-            "mode": "normal" if self.read_enabled else ("refresh" if enabled else "disabled"),
-            "compile_hits": 0,
-            "compile_misses": 0,
-            "validator_hits": 0,
-            "validator_misses": 0,
-            "case_hits": 0,
-            "case_misses": 0,
-            "probe_hits": 0,
-            "probe_misses": 0,
-        }
-        if self.read_enabled or (self.enabled and preserve_existing):
-            self._load()
-
-    def _load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as stream:
-                loaded = json.load(stream)
-            if loaded.get("schema_version") != CACHE_SCHEMA_VERSION:
-                return
-            for section in ("compile", "validator", "case", "probe"):
-                if isinstance(loaded.get(section), dict):
-                    self.data[section] = loaded[section]
-        except (OSError, ValueError, TypeError):
-            pass
-
-    def get(self, section, key):
-        if not self.enabled:
-            return None
-        if not self.read_enabled:
-            self.stats[f"{section}_misses"] += 1
-            return None
-        value = self.data.get(section, {}).get(key)
-        counter = f"{section}_hits" if value is not None else f"{section}_misses"
-        self.stats[counter] += 1
-        return value
-
-    def set(self, section, key, value):
-        if not self.enabled:
-            return
-        values = self.data.setdefault(section, {})
-        values.pop(key, None)
-        values[key] = value
-        limit = CACHE_LIMITS.get(section)
-        if limit and len(values) > limit:
-            for old_key in list(values)[: len(values) - limit]:
-                values.pop(old_key, None)
-        self.dirty = True
-
-    def delete(self, section, key):
-        if not self.enabled:
-            return
-        if self.data.get(section, {}).pop(key, None) is not None:
-            self.dirty = True
-
-    def save(self):
-        if not self.enabled or not self.dirty:
-            return
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        temp_path = self.path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as stream:
-            json.dump(self.data, stream, ensure_ascii=False, separators=(",", ":"))
-        os.replace(temp_path, self.path)
-        self.dirty = False
-
-
 class Reporter:
     def __init__(self, jsonl=False):
         self.jsonl = jsonl
@@ -517,6 +199,27 @@ class Reporter:
             print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
+def compiler_identity():
+    """Compatibility wrapper for the Core compiler identity probe."""
+    global _COMPILER_IDENTITY
+    if _COMPILER_IDENTITY is None:
+        _COMPILER_IDENTITY = _judge_runtime.compiler_identity(
+            run_managed_fn=run_managed_to_files
+        )
+    return _COMPILER_IDENTITY
+
+
+def source_fingerprint(src_file, prob_dir, kind=None):
+    """Compatibility wrapper for the Core source/cache identity function."""
+    return _judge_runtime.source_fingerprint(
+        src_file,
+        prob_dir,
+        kind,
+        reference_dir=REFERENCES_DIR,
+        compiler_identity_fn=compiler_identity,
+    )
+
+
 def compile_cpp(
     src_file,
     out_bin,
@@ -526,168 +229,24 @@ def compile_cpp(
     cache=None,
     fingerprint=None,
 ):
+    """Compatibility wrapper preserving the local Judge's callback surface."""
     if reporter is None:
         reporter = Reporter(False)
-    if not os.path.exists(src_file):
-        return False
-    file_name = display_file or os.path.basename(src_file)
-    fingerprint = fingerprint or source_fingerprint(src_file, os.path.dirname(src_file), kind)
-    cache_key = str(file_name).replace(os.sep, "/")
-
-    if cache and cache.enabled:
-        cached = cache.get("compile", cache_key)
-        binary_matches = False
-        if cached and cached.get("fingerprint") == fingerprint and os.path.isfile(out_bin):
-            try:
-                current_identity = binary_identity(out_bin)
-                binary_matches = (
-                    cached.get("binary_digest") == current_identity["digest"]
-                    and (
-                        cached.get("binary_size") is None
-                        or cached.get("binary_size") == current_identity["size"]
-                    )
-                )
-            except OSError:
-                binary_matches = False
-        if binary_matches:
-            reporter.text(f"[*] Compiling {file_name}... cached")
-            reporter.event(
-                "compile",
-                kind=kind or "unknown",
-                file=file_name,
-                ok=True,
-                stderr="",
-                cached=True,
-                binary_digest=current_identity["digest"],
-                binary_size=current_identity["size"],
-            )
-            return current_identity
-        if cached is not None:
-            cache.stats["compile_hits"] -= 1
-            cache.stats["compile_misses"] += 1
-            cache.delete("compile", cache_key)
-
-    reporter.text(f"[*] Compiling {file_name}...")
-    source_dir = os.path.dirname(os.path.abspath(src_file))
-    compile_root = os.path.join(source_dir, ".probhub", "compile")
-    try:
-        os.makedirs(compile_root, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="run-", dir=compile_root) as temp:
-            # MinGW's narrow argv handling cannot reliably open absolute paths
-            # containing non-ASCII characters. The process cwd is established
-            # through the wide Windows API, so compiler path arguments remain
-            # ASCII and relative. Python publishes the binary after success.
-            staged_binary = os.path.join(
-                temp,
-                "program.exe" if platform.system() == "Windows" else "program",
-            )
-            shutil.copyfile(
-                os.path.join(REFERENCES_DIR, "testlib.h"),
-                os.path.join(temp, "testlib.h"),
-            )
-            source_arg = os.path.relpath(os.path.abspath(src_file), source_dir)
-            output_arg = os.path.relpath(staged_binary, source_dir)
-            include_arg = os.path.relpath(temp, source_dir)
-            flags = [
-                "g++", source_arg, "-o", output_arg,
-                "-O2", "-std=c++17", "-I", include_arg,
-            ]
-            if platform.system() == "Windows":
-                flags.insert(4, "-static")
-                if kind == "validator":
-                    # DOMjudge validators run on Linux and accept LF line endings. Emulate
-                    # that behavior so Git-normalized test data is validated consistently.
-                    flags.append("-DFOR_LINUX")
-            stdout_path = os.path.join(temp, "compiler.out")
-            stderr_path = os.path.join(temp, "compiler.stderr")
-            ret = run_managed_to_files(
-                flags,
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                timeout=60.0,
-                memory_limit_mb=2048,
-                output_limit_bytes=8 * 1024 * 1024,
-                process_limit=DEFAULT_PROCESS_LIMIT,
-                cwd=source_dir,
-            )
-            try:
-                with open(stderr_path, "r", encoding="utf-8", errors="replace") as stream:
-                    stderr = stream.read()
-            except OSError:
-                stderr = ""
-            ok = ret["reason"] == "completed" and ret["returncode"] == 0
-            staged_identity = None
-            if ok:
-                staged_identity = binary_identity(staged_binary)
-                published_identity = publish_compiled_binary(
-                    staged_binary,
-                    out_bin,
-                    staged_identity,
-                )
-            else:
-                published_identity = None
-        if ret["reason"] != "completed":
-            stderr = (stderr + "\n" + (ret["message"] or ret["reason"])).strip()
-        reporter.event(
-            "compile",
-            kind=kind or "unknown",
-            file=file_name,
-            ok=ok,
-            stderr=stderr,
-            cached=False,
-            **(
-                {
-                    "binary_digest": published_identity["digest"],
-                    "binary_size": published_identity["size"],
-                }
-                if published_identity is not None
-                else {}
-            ),
-        )
-        if not ok:
-            if cache:
-                cache.delete("compile", cache_key)
-            reporter.text(f"[-] Compile failed:\n{stderr}")
-            return False
-        if cache:
-            cache.set(
-                "compile",
-                cache_key,
-                {
-                    "fingerprint": fingerprint,
-                    "binary_digest": published_identity["digest"],
-                    "binary_size": published_identity["size"],
-                },
-            )
-        return published_identity
-    except BinaryChangedError as e:
-        if cache:
-            cache.delete("compile", cache_key)
-        reporter.event(
-            "compile",
-            kind=kind or "unknown",
-            file=file_name,
-            ok=False,
-            stderr=str(e),
-            cached=False,
-            code="binary_changed",
-            failure_kind="infrastructure",
-        )
-        reporter.text(f"[-] Compile error: {e}")
-        raise
-    except Exception as e:
-        if cache:
-            cache.delete("compile", cache_key)
-        reporter.event(
-            "compile",
-            kind=kind or "unknown",
-            file=file_name,
-            ok=False,
-            stderr=str(e),
-            cached=False,
-        )
-        reporter.text(f"[-] Compile error: {e}")
-        return False
+    return _judge_runtime.compile_cpp(
+        src_file,
+        out_bin,
+        reporter=reporter,
+        kind=kind,
+        display_file=display_file,
+        cache=cache,
+        fingerprint=fingerprint,
+        reference_dir=REFERENCES_DIR,
+        source_fingerprint_fn=source_fingerprint,
+        binary_identity_fn=binary_identity,
+        publish_fn=publish_compiled_binary,
+        run_managed_fn=run_managed_to_files,
+        process_limit=DEFAULT_PROCESS_LIMIT,
+    )
 
 
 def _safe_float(value, default):
@@ -823,14 +382,10 @@ def read_problem_output_limit(prob_dir, config=None):
 
 
 def _failed_status(returncode, stderr, memory_enforced, peak_memory_mb, memory_limit):
-    """MLE requires peak-memory evidence; everything else is RE (matches stress)."""
-    if (
-        memory_enforced
-        and peak_memory_mb is not None
-        and peak_memory_mb >= memory_limit * 0.98
-    ):
-        return "MLE"
-    return "RE"
+    """Compatibility wrapper for the Core result normalizer."""
+    return infer_failed_status(
+        returncode, stderr, memory_enforced, peak_memory_mb, memory_limit
+    )
 
 
 def _remove_file_with_retries(path):
@@ -887,8 +442,12 @@ def run_program_to_file(
         if reason == PROCESS_CLEANUP_FAILED:
             return "FAIL", result["time"], result["memory"], result["memory_enforced"], result["message"], details
         if result["returncode"] != 0:
-            status = _failed_status(
-                result["returncode"], stderr, result["memory_enforced"], result["memory"], memory_limit
+            status = infer_failed_status(
+                result["returncode"],
+                stderr,
+                result["memory_enforced"],
+                result["memory"],
+                memory_limit,
             )
             if status == "MLE" and result.get("reason") != "memory_limit":
                 details["termination_reason"] = "inferred_memory_limit"
@@ -914,26 +473,8 @@ def _temporary_output_path(bin_path):
 
 
 def _probe_status(result, memory_limit):
-    reason = result.get("reason")
-    if reason == "time_limit":
-        return "TLE"
-    if reason == "output_limit":
-        return "OLE"
-    if reason == "memory_limit":
-        return "MLE"
-    if reason == "process_limit":
-        return "RE"
-    if reason == PROCESS_CLEANUP_FAILED:
-        return "FAIL"
-    if result.get("returncode") != 0:
-        return _failed_status(
-            result.get("returncode"),
-            "",
-            bool(result.get("memory_enforced")),
-            result.get("memory"),
-            memory_limit,
-        )
-    return "completed"
+    status = classify_process_status(result, memory_limit)
+    return "completed" if status == "AC" else status
 
 
 def probe_tle_margin(
@@ -1111,26 +652,7 @@ def run_custom_testcase(
             if not termination_reason:
                 termination_reason = "start_error"
                 details["termination_reason"] = termination_reason
-            details.update({
-                "verdict": status if status != "FAIL" else None,
-                "execution_status": (
-                    "memory_limit" if termination_reason == "inferred_memory_limit"
-                    else termination_reason
-                    if termination_reason in {
-                        "time_limit", "memory_limit", "output_limit", "process_limit",
-                        "output_control_error", PROCESS_CLEANUP_FAILED, "start_error",
-                    }
-                    else "completed"
-                ),
-                "failure_kind": (
-                    "control_failure" if status == "FAIL"
-                    else "startup_failure" if termination_reason == "start_error"
-                    else "resource_limit" if status in {"TLE", "MLE", "OLE"}
-                    or termination_reason == "process_limit"
-                    else "runtime_error"
-                ),
-                "actor": "supervisor" if status == "FAIL" else "contestant",
-            })
+            details.update(classify_contestant_failure(status, termination_reason))
             return status, elapsed, memory, memory_enforced, message, details
         checker = run_checker_to_files(
             [checker_bin],

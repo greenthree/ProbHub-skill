@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from .io import read_bounded_text
+from .judge_results import protocol_outcome
 from .process_control import (
     DEFAULT_PROCESS_LIMIT,
     OutputBudgetError,
@@ -356,36 +357,8 @@ def _command_list(command):
 
 
 def _protocol_outcome(returncode, message, actor):
-    message = (message or "").strip()
-    if returncode in {0, 42}:
-        return {
-            "status": "AC",
-            "verdict": "AC",
-            "execution_status": "completed",
-            "failure_kind": None,
-            "actor": "session",
-            "termination_reason": "completed",
-            "message": message,
-        }
-    if returncode in {1, 2, 43}:
-        return {
-            "status": "WA",
-            "verdict": "WA",
-            "execution_status": "completed",
-            "failure_kind": "wrong_answer",
-            "actor": "contestant",
-            "termination_reason": "completed",
-            "message": message,
-        }
-    return {
-        "status": "FAIL",
-        "verdict": None,
-        "execution_status": "completed",
-        "failure_kind": "judge_failure",
-        "actor": actor,
-        "termination_reason": "completed",
-        "message": message or f"{actor} exited with code {returncode}",
-    }
+    """Compatibility wrapper for the Core protocol normalizer."""
+    return protocol_outcome(returncode, message, actor)
 
 
 def _record_interactive_transcript(transcript, direction, payload, decoder, *, final=False):
