@@ -40,6 +40,8 @@ else:
         validate_npm_registry,
     )
 
+from probhub.dependency_lock import DependencyLockError, load_dependency_lock, validate_target_coverage
+
 
 WINDOWS_NODE_CHILD_LAUNCHER = (
     "const {spawnSync}=require('child_process');"
@@ -300,6 +302,26 @@ def run_clean_install(*, registry_version=None, registry_url=DEFAULT_REGISTRY):
             raise CleanInstallError("installed probhub package is missing the Python bootstrap")
         main_package = _installed_package_metadata(installed_main)
         compat_package = _installed_package_metadata(installed_compat)
+        try:
+            installed_dependency_lock = load_dependency_lock(
+                installed_main / "requirements.lock",
+                source_path=installed_main / "requirements.txt",
+            )
+            validate_target_coverage(installed_dependency_lock)
+        except DependencyLockError as exc:
+            raise CleanInstallError(
+                f"installed Python dependency lock is invalid ({exc.code}): {exc}"
+            ) from exc
+        expected_lock = metadata.get("python_dependency_lock")
+        if (
+            isinstance(expected_lock, dict)
+            and installed_dependency_lock.lock_sha256 != expected_lock.get("sha256")
+        ):
+            raise CleanInstallError(
+                "installed Python dependency lock identity differs from the release gate: "
+                f"expected {expected_lock.get('sha256')}, "
+                f"got {installed_dependency_lock.lock_sha256}"
+            )
         if main_package.get("name") != "probhub" or main_package.get("version") != metadata["version"]:
             raise CleanInstallError(f"installed main package identity mismatch: {main_package!r}")
         if (
@@ -547,6 +569,7 @@ def run_clean_install(*, registry_version=None, registry_url=DEFAULT_REGISTRY):
             "source": source,
             "registry": registry_url if source == "npm-registry" else None,
             "packages": inventories,
+            "python_dependency_lock_sha256": installed_dependency_lock.lock_sha256,
             "documented_install": ["skill-install", "doctor", "ui-check"],
             "workflow": [
                 "doctor", "init", "ui-check", "new", "gen", "judge",

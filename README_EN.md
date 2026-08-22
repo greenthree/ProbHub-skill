@@ -55,7 +55,7 @@ flowchart LR
 
 ### 1. Install the Skill
 
-Install Node.js 18+ (including npm) and Python 3.10+. On Ubuntu, the system Python also needs python3-pip. ProbHub does not require or recommend creating a virtual environment, and it does not recommend writing dependencies into the global system Python directory.
+Install Node.js 18+ (including npm) and CPython 3.10, 3.11, or 3.12 on Windows/Linux x86_64. On Ubuntu, the system Python also needs python3-pip. ProbHub does not require or recommend creating a virtual environment, and it does not recommend writing dependencies into the global system Python directory.
 
 Windows PowerShell:
 
@@ -215,7 +215,7 @@ The normal delivery includes main.pdf, each problem.pdf, and <ID>.zip at the wor
 
 | Tool | Requirement | Use |
 | --- | --- | --- |
-| [Python](https://www.python.org/downloads/) | 3.10+ | Run the ProbHub Core |
+| [Python](https://www.python.org/downloads/) | CPython 3.10–3.12 on Windows/Linux x86_64 | Run the ProbHub Core |
 | [Node.js](https://nodejs.org/) | 18+ | Install npm packages and the Agent Skill |
 | g++ | C++17 | Compile accepted, Validators, and Checkers |
 | [Typst](https://github.com/typst/typst/releases/tag/v0.14.2) | 0.14.2 | Generate PDFs |

@@ -34,7 +34,12 @@ function pythonCandidates(env = process.env) {
 }
 
 function resolvePython(env = process.env) {
-    const probe = 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)';
+    const probe = [
+        'import platform, sys',
+        'version = (sys.version_info.major, sys.version_info.minor)',
+        "supported = ((3, 10) <= version < (3, 13) and sys.implementation.name == 'cpython' and platform.system() in ('Windows', 'Linux') and platform.machine().lower() in ('x86_64', 'amd64'))",
+        'raise SystemExit(0 if supported else 1)',
+    ].join('; ');
     for (const candidate of pythonCandidates(env)) {
         const result = spawnSync(
             candidate.command,

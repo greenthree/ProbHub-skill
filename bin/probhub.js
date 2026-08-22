@@ -11,7 +11,7 @@ const sourceDir = path.join(__dirname, '..');
 const env = pythonEnvironment(process.env);
 const python = resolvePython(env);
 if (!python) {
-    console.error('[ProbHub] Python >= 3.10 was not found. Set PYTHON to the desired interpreter.');
+    console.error('[ProbHub] Supported Python was not found. Use CPython 3.10-3.12 on Windows/Linux x86_64, or set PYTHON to that interpreter.');
     process.exit(1);
 }
 const result = spawnSync(

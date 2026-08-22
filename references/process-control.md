@@ -119,7 +119,7 @@ PDF 解析不会在 CLI 主构建进程或 Flask 请求线程内直接运行。C
 
 mutation 的 Tree-sitter native binding 同样不进入 CLI 主进程。Core 把 accepted 源码复制到临时请求目录，通过独立 Python worker 返回版本化位置 JSON，默认限制为 30 秒、512 MiB、4 MiB stdout/stderr 共享预算和 8 个进程。父进程严格校验协议版本、解析器版本、源码哈希、位置和数量；超时、取消、native 崩溃、资源超限和畸形响应均清理完整进程树并结构化失败，不覆盖最后成功的 mutation evidence。
 
-这层隔离用于避免损坏 PDF 无界占用本地出题流程，不是面向任意敌意文件的强安全容器。正式运行时依赖闭包由 `requirements.txt` 逐项锁定，仓库 CI 在 Windows 与 Ubuntu 上按精确版本审计，并每周自动复查一次。
+这层隔离用于避免损坏 PDF 无界占用本地出题流程，不是面向任意敌意文件的强安全容器。正式运行时依赖闭包由 `requirements.txt` 精确锁版，并由 `requirements.lock` 对允许的 wheel 逐文件锁定 SHA-256；仓库 CI 在 Windows 与 Ubuntu 上按实际环境 marker 对账并每周重新审计漏洞。
 
 ## 8. Stress
 

@@ -8,6 +8,9 @@ name: Mutation benchmark
       - "scripts/local_judge.py"
       - "references/testlib.h"
       - "requirements.txt"
+      - "requirements.lock"
+      - "scripts/update_python_dependency_lock.py"
+      - "tests/test_python_dependency_lock.py"
       - "tests/benchmarks/benchmark_mutation.py"
       - "tests/fixture_support.py"
       - "tests/fixtures/workspaces/mutation/**"
@@ -50,8 +53,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: requirements.lock
       - name: Install pinned Python runtime
-        run: python -m pip install -r requirements.txt
+        run: "python -m pip install --require-hashes --only-binary=:all: -r requirements.lock"
       - name: Assert g++ toolchain is available
         run: g++ --version
       - name: Run sequential shadow scheduler profile matrices

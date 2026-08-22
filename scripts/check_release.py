@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from probhub.dependency_lock import DependencyLockError, load_dependency_lock, validate_target_coverage
 from probhub.process_control import run_managed_to_files
 
 
@@ -63,6 +64,19 @@ def _python_version():
 
 
 def validate_metadata(tag=None, *, require_head_tag=False, require_clean=False):
+    try:
+        dependency_lock = load_dependency_lock(
+            ROOT / "requirements.lock",
+            source_path=ROOT / "requirements.txt",
+        )
+        target_coverage = validate_target_coverage(dependency_lock)
+        audit_dependency_lock = load_dependency_lock(
+            ROOT / "requirements-audit.lock",
+            source_path=ROOT / "requirements-audit.txt",
+        )
+        audit_target_coverage = validate_target_coverage(audit_dependency_lock)
+    except DependencyLockError as exc:
+        raise ReleaseCheckError(f"invalid Python runtime dependency lock ({exc.code}): {exc}") from exc
     main = _load_json("package.json")
     compat = _load_json("compat/probhub-skill/package.json")
     lock = _load_json("package-lock.json")
@@ -137,7 +151,28 @@ def validate_metadata(tag=None, *, require_head_tag=False, require_clean=False):
             raise ReleaseCheckError("failed to inspect the release worktree")
         if status["stdout"].strip():
             raise ReleaseCheckError("release worktree must be clean before npm publish")
-    return {"version": version, "tag": effective_tag, "versions": versions}
+    return {
+        "version": version,
+        "tag": effective_tag,
+        "versions": versions,
+        "python_dependency_lock": {
+            "sha256": dependency_lock.lock_sha256,
+            "requirements": len(dependency_lock.requirements),
+            "artifacts": sum(len(item.artifacts) for item in dependency_lock.requirements),
+            "targets": {name: len(packages) for name, packages in target_coverage.items()},
+        },
+        "python_audit_dependency_lock": {
+            "sha256": audit_dependency_lock.lock_sha256,
+            "requirements": len(audit_dependency_lock.requirements),
+            "artifacts": sum(
+                len(item.artifacts) for item in audit_dependency_lock.requirements
+            ),
+            "targets": {
+                name: len(packages)
+                for name, packages in audit_target_coverage.items()
+            },
+        },
+    }
 
 
 def _parse_npm_json(stdout, command):
@@ -207,8 +242,8 @@ def validate_pack_inventories(
     compat_paths = {entry["path"] for entry in compat.get("files", [])}
     required_main = {
         "LICENSE", "README.md", "CHANGELOG.md", "SKILL.md", "package.json",
-        "requirements.txt", "bin/init.js", "bin/probhub.js", "bin/python.js",
-        "probhub/__init__.py", "probhub/cli.py", "probhub/install_deps.py",
+        "requirements.txt", "requirements.lock", "bin/init.js", "bin/probhub.js", "bin/python.js",
+        "probhub/__init__.py", "probhub/cli.py", "probhub/dependency_lock.py", "probhub/install_deps.py",
         "probhub/install_skill.py", "probhub/process_control.py",
         "probhub/judge_qa.py", "probhub/judge_qa_evidence.py",
         "probhub/judge_qa_runtime.py",

@@ -14,6 +14,10 @@ def _load_workflow(name):
     return yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
+def _step_runs(job):
+    return [step["run"] for step in job["steps"] if isinstance(step, dict) and "run" in step]
+
+
 class WorkflowSecurityTests(unittest.TestCase):
     def test_all_first_party_workflows_parse_and_are_read_only(self):
         workflows = sorted(WORKFLOW_ROOT.glob("*.yml"))
@@ -57,6 +61,43 @@ class WorkflowSecurityTests(unittest.TestCase):
         published = _load_workflow("published-release.yml")
         self.assertEqual(set(published["on"]), {"workflow_dispatch"})
         self.assertEqual(published["permissions"], {"contents": "read"})
+
+    def test_runtime_installers_share_the_hash_locked_identity(self):
+        command = (
+            "python -m pip install --require-hashes "
+            "--only-binary=:all: -r requirements.lock"
+        )
+        ci = _load_workflow("ci.yml")
+        mutation = _load_workflow("mutation-benchmark.yml")
+        published = _load_workflow("published-release.yml")
+
+        self.assertEqual(
+            ci["jobs"]["quality"]["strategy"]["matrix"]["python"],
+            ["3.10", "3.11", "3.12"],
+        )
+        self.assertEqual(
+            ci["jobs"]["python-dependency-audit"]["strategy"]["matrix"]["python"],
+            ["3.10", "3.11", "3.12"],
+        )
+        self.assertIn(command, _step_runs(ci["jobs"]["quality"]))
+        self.assertIn(command, _step_runs(mutation["jobs"]["shadow-matrix"]))
+        self.assertIn(command, _step_runs(published["jobs"]["release-metadata"]))
+
+        workflow_text = "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(WORKFLOW_ROOT.glob("*.yml"))
+        )
+        self.assertNotIn("pip install -r requirements.txt", workflow_text)
+        self.assertNotIn("pip install --require-hashes -r requirements.txt", workflow_text)
+        self.assertNotIn("pip install -r requirements-audit.txt", workflow_text)
+        self.assertNotIn("pip install --upgrade pip", workflow_text)
+        audit_command = (
+            "python -m pip install --require-hashes "
+            "--only-binary=:all: -r requirements-audit.lock"
+        )
+        self.assertIn(
+            audit_command,
+            _step_runs(ci["jobs"]["python-dependency-audit"]),
+        )
 
 
 if __name__ == "__main__":

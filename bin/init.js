@@ -34,7 +34,7 @@ function installPythonDependencies() {
     }
     const python = resolvePython(process.env);
     if (!python) {
-        throw new Error('Python >= 3.10 was not found; set PYTHON to the desired interpreter');
+        throw new Error('Supported Python was not found; use CPython 3.10-3.12 on Windows/Linux x86_64 or set PYTHON to that interpreter');
     }
     runPythonModule(
         python,
@@ -43,7 +43,7 @@ function installPythonDependencies() {
         660000,
         'Python dependency installation failed',
     );
-    console.log('  [+] 已使用 ProbHub CLI 的同一 Python 和受控进程安装 requirements.txt');
+    console.log('  [+] 已使用 ProbHub CLI 的同一 Python 和受控进程安装 SHA-256 锁定依赖');
     return python;
 }
 
@@ -65,7 +65,7 @@ function main() {
     console.log('\n📦 检查 Python 运行环境...');
     let python = resolvePython(process.env);
     if (!python) {
-        throw new Error('Python >= 3.10 was not found; set PYTHON to the desired interpreter');
+        throw new Error('Supported Python was not found; use CPython 3.10-3.12 on Windows/Linux x86_64 or set PYTHON to that interpreter');
     }
     if (!skipPythonDeps) {
         python = installPythonDependencies();
