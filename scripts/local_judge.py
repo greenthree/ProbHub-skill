@@ -25,6 +25,11 @@ from probhub.calibration import (
 from probhub.build_lock import workspace_file_lock
 from probhub.errors import ProbHubError
 from probhub.io import read_bounded_text
+from probhub.judge_results import (
+    classify_contestant_failure,
+    classify_process_status,
+    infer_failed_status,
+)
 from probhub.output_compare import compare_standard_output
 from probhub.problem_paths import ProblemPathError, resolve_problem_regular_file
 from probhub.special_judges import execute_interactive_session, run_checker_to_files
@@ -823,14 +828,10 @@ def read_problem_output_limit(prob_dir, config=None):
 
 
 def _failed_status(returncode, stderr, memory_enforced, peak_memory_mb, memory_limit):
-    """MLE requires peak-memory evidence; everything else is RE (matches stress)."""
-    if (
-        memory_enforced
-        and peak_memory_mb is not None
-        and peak_memory_mb >= memory_limit * 0.98
-    ):
-        return "MLE"
-    return "RE"
+    """Compatibility wrapper for the Core result normalizer."""
+    return infer_failed_status(
+        returncode, stderr, memory_enforced, peak_memory_mb, memory_limit
+    )
 
 
 def _remove_file_with_retries(path):
@@ -887,8 +888,12 @@ def run_program_to_file(
         if reason == PROCESS_CLEANUP_FAILED:
             return "FAIL", result["time"], result["memory"], result["memory_enforced"], result["message"], details
         if result["returncode"] != 0:
-            status = _failed_status(
-                result["returncode"], stderr, result["memory_enforced"], result["memory"], memory_limit
+            status = infer_failed_status(
+                result["returncode"],
+                stderr,
+                result["memory_enforced"],
+                result["memory"],
+                memory_limit,
             )
             if status == "MLE" and result.get("reason") != "memory_limit":
                 details["termination_reason"] = "inferred_memory_limit"
@@ -914,26 +919,8 @@ def _temporary_output_path(bin_path):
 
 
 def _probe_status(result, memory_limit):
-    reason = result.get("reason")
-    if reason == "time_limit":
-        return "TLE"
-    if reason == "output_limit":
-        return "OLE"
-    if reason == "memory_limit":
-        return "MLE"
-    if reason == "process_limit":
-        return "RE"
-    if reason == PROCESS_CLEANUP_FAILED:
-        return "FAIL"
-    if result.get("returncode") != 0:
-        return _failed_status(
-            result.get("returncode"),
-            "",
-            bool(result.get("memory_enforced")),
-            result.get("memory"),
-            memory_limit,
-        )
-    return "completed"
+    status = classify_process_status(result, memory_limit)
+    return "completed" if status == "AC" else status
 
 
 def probe_tle_margin(
@@ -1111,26 +1098,7 @@ def run_custom_testcase(
             if not termination_reason:
                 termination_reason = "start_error"
                 details["termination_reason"] = termination_reason
-            details.update({
-                "verdict": status if status != "FAIL" else None,
-                "execution_status": (
-                    "memory_limit" if termination_reason == "inferred_memory_limit"
-                    else termination_reason
-                    if termination_reason in {
-                        "time_limit", "memory_limit", "output_limit", "process_limit",
-                        "output_control_error", PROCESS_CLEANUP_FAILED, "start_error",
-                    }
-                    else "completed"
-                ),
-                "failure_kind": (
-                    "control_failure" if status == "FAIL"
-                    else "startup_failure" if termination_reason == "start_error"
-                    else "resource_limit" if status in {"TLE", "MLE", "OLE"}
-                    or termination_reason == "process_limit"
-                    else "runtime_error"
-                ),
-                "actor": "supervisor" if status == "FAIL" else "contestant",
-            })
+            details.update(classify_contestant_failure(status, termination_reason))
             return status, elapsed, memory, memory_enforced, message, details
         checker = run_checker_to_files(
             [checker_bin],
