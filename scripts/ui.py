@@ -36,7 +36,6 @@ from probhub.pdf_processing import pdf_page_count as bounded_pdf_page_count
 from probhub.process_control import (
     PROCESS_CLEANUP_FAILED,
     run_managed_to_files,
-    spawn_managed,
     snapshot_process_tree_identities,
     terminate_external_process_tree,
 )
@@ -70,16 +69,15 @@ from probhub.webui_judge_protocol import (
     apply_sandbox_event as core_apply_sandbox_event,
     consume_jsonl_chunk as core_consume_jsonl_chunk,
     empty_sandbox_result as core_empty_sandbox_result,
-    finalize_judge_protocol as core_finalize_judge_protocol,
     sandbox_log_line as core_sandbox_log_line,
     submission_verdict as core_submission_verdict,
 )
 from probhub.workspace import load_workspace, problem_entries
 from probhub.webui_tasks import (
     ACTIVE_TASK_STATUSES as CORE_ACTIVE_TASK_STATUSES,
-    BoundedPipeCapture,
     BoundedTaskExecutor,
     BoundedUtf8Log,
+    JudgeSupervisorLimits,
     acquire_task_lock as core_acquire_task_lock,
     bounded_error_text as core_bounded_error_text,
     claim_task_execution as core_claim_task_execution,
@@ -87,9 +85,11 @@ from probhub.webui_tasks import (
     prune_job_registry as core_prune_job_registry,
     public_job_payload as core_public_job_payload,
     publish_task_progress as core_publish_task_progress,
+    supervise_judge_process as core_supervise_judge_process,
     task_cancel_requested as core_task_cancel_requested,
     task_executor_error as core_task_executor_error,
     task_failure_result as core_task_failure_result,
+    touch_cancel_file as core_touch_cancel_file,
 )
 from probhub.webui_server import BoundedThreadedWSGIServer
 
@@ -681,10 +681,7 @@ def _consume_jsonl_chunk(result, log, state, chunk, *, final=False):
 
 
 def _touch_cancel_file(cancel_file):
-    try:
-        Path(cancel_file).touch(exist_ok=True)
-    except OSError:
-        pass
+    return core_touch_cancel_file(cancel_file)
 
 
 def _supervise_judge_process(
@@ -700,155 +697,25 @@ def _supervise_judge_process(
     cancel_files,
     execution_deadline,
 ):
-    log = BoundedUtf8Log(WEBUI_TASK_LOG_BYTES)
-    parse_state = {
-        "buffer": b"",
-        "event_bytes": 0,
-        "final_seen": False,
-        "protocol_error": None,
-    }
-    return_code = None
-    stop_reason = None
-    stop_started = None
-    last_identity_sample = 0.0
-    known_identities = set()
-    cleanup_failure_message = None
-    managed = None
-    capture = None
-
-    def record_cleanup(cleanup):
-        nonlocal cleanup_failure_message, stop_reason
-        if isinstance(cleanup, dict) and not cleanup.get("ok", False):
-            errors = cleanup.get("errors") or ()
-            cleanup_failure_message = (
-                str(errors[0]) if errors else "process tree cleanup could not be confirmed"
-            )
-            stop_reason = PROCESS_CLEANUP_FAILED
-    if _task_cancel_requested(jobs, lock, job_id):
-        _task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
-        _publish_task_progress(jobs, lock, job_id, result, log)
-        return {"returncode": None, "stop_reason": "cancelled", "logs": log.text}
-    if time.monotonic() >= execution_deadline:
-        _task_failure_result(result, "task_deadline_exceeded", "task exceeded its total deadline")
-        _publish_task_progress(jobs, lock, job_id, result, log)
-        return {"returncode": None, "stop_reason": "deadline", "logs": log.text}
-
-    try:
-        managed = spawn_managed(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=Path.cwd(),
-            env=env,
-            memory_limit_mb=None,
-            process_limit=64,
-        )
-        proc = managed.proc
-        capture = BoundedPipeCapture(
-            proc.stdout,
-            WEBUI_TASK_PROCESS_OUTPUT_BYTES,
-            name=f"probhub-webui-pipe-{job_id[:8]}",
-        ).start()
-        with lock:
-            processes[job_id] = proc
-            cancel_files[job_id] = Path(cancel_file)
-        while True:
-            published = False
-            for chunk in capture.drain_chunks():
-                _consume_jsonl_chunk(result, log, parse_state, chunk)
-                published = True
-            if published:
-                _publish_task_progress(jobs, lock, job_id, result, log)
-
-            now_mono = time.monotonic()
-            if now_mono - last_identity_sample >= 0.05 and proc.poll() is None:
-                managed.sample()
-                last_identity_sample = now_mono
-            if capture.overflow and stop_reason is None:
-                stop_reason = "output_limit"
-                stop_started = now_mono
-                known_identities = snapshot_process_tree_identities(proc.pid)
-            elif _task_cancel_requested(jobs, lock, job_id) and stop_reason is None:
-                stop_reason = "cancelled"
-                stop_started = now_mono
-                known_identities = snapshot_process_tree_identities(proc.pid)
-                _touch_cancel_file(cancel_file)
-            elif now_mono >= execution_deadline and stop_reason is None:
-                stop_reason = "deadline"
-                stop_started = now_mono
-                known_identities = snapshot_process_tree_identities(proc.pid)
-                _touch_cancel_file(cancel_file)
-
-            if stop_reason == "output_limit" and proc.poll() is None:
-                record_cleanup(terminate_external_process_tree(proc, known_identities))
-            elif (
-                stop_reason is not None
-                and proc.poll() is None
-                and now_mono - float(stop_started or now_mono) >= SUBMISSION_FORCE_CANCEL_AFTER
-            ):
-                record_cleanup(terminate_external_process_tree(proc, known_identities))
-
-            return_code = proc.poll()
-            if return_code is not None:
-                break
-            time.sleep(0.05)
-    finally:
-        if managed is not None:
-            if managed.proc.poll() is None:
-                record_cleanup(
-                    terminate_external_process_tree(managed.proc, known_identities)
-                )
-            record_cleanup(managed.terminate())
-            managed.close()
-        if capture is not None:
-            if not capture.join(timeout=2.0):
-                try:
-                    capture.stream.close()
-                except (OSError, ValueError):
-                    pass
-                capture.join(timeout=1.0)
-            for chunk in capture.drain_chunks():
-                _consume_jsonl_chunk(result, log, parse_state, chunk)
-            _consume_jsonl_chunk(result, log, parse_state, b"", final=True)
-            # A short-lived process can exit before the supervisor observes
-            # the reader's overflow flag. Re-check after the pipe is fully
-            # drained so fast output floods cannot bypass the task budget.
-            if capture.overflow and stop_reason is None:
-                stop_reason = "output_limit"
-            try:
-                capture.stream.close()
-            except (OSError, ValueError):
-                pass
-        with lock:
-            processes.pop(job_id, None)
-            cancel_files.pop(job_id, None)
-
-    if stop_reason is None and _task_cancel_requested(jobs, lock, job_id):
-        stop_reason = "cancelled"
-    if stop_reason == PROCESS_CLEANUP_FAILED:
-        _task_failure_result(
-            result,
-            PROCESS_CLEANUP_FAILED,
-            cleanup_failure_message or "process tree cleanup could not be confirmed",
-        )
-    elif stop_reason == "cancelled":
-        _task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
-    elif stop_reason == "deadline":
-        _task_failure_result(result, "task_deadline_exceeded", "task exceeded its execution deadline")
-    elif stop_reason == "output_limit":
-        _task_failure_result(result, "task_output_limit", "task protocol output exceeded its limit")
-    elif (result.get("final") or {}).get("code") == "task_event_limit":
-        stop_reason = "protocol_error"
-    else:
-        stop_reason = core_finalize_judge_protocol(
-            result,
-            parse_state,
-            return_code,
-            read_error=capture is not None and capture.error is not None,
-        )
-    _publish_task_progress(jobs, lock, job_id, result, log)
-    return {"returncode": return_code, "stop_reason": stop_reason, "logs": log.text}
+    return core_supervise_judge_process(
+        job_id,
+        command,
+        env,
+        cancel_file,
+        result,
+        jobs=jobs,
+        lock=lock,
+        processes=processes,
+        cancel_files=cancel_files,
+        execution_deadline=execution_deadline,
+        limits=JudgeSupervisorLimits(
+            log_bytes=WEBUI_TASK_LOG_BYTES,
+            event_bytes=WEBUI_TASK_EVENT_BYTES,
+            final_event_bytes=WEBUI_TASK_FINAL_EVENT_BYTES,
+            process_output_bytes=WEBUI_TASK_PROCESS_OUTPUT_BYTES,
+            force_cancel_after=SUBMISSION_FORCE_CANCEL_AFTER,
+        ),
+    )
 
 
 def _run_sandbox_job(job_id, info):

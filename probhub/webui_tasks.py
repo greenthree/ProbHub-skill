@@ -3,17 +3,57 @@
 from __future__ import annotations
 
 import copy
+import subprocess
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import BinaryIO, Callable
+
+from .process_control import (
+    PROCESS_CLEANUP_FAILED,
+    snapshot_process_tree_identities,
+    spawn_managed,
+    terminate_external_process_tree,
+)
+from .webui_judge_protocol import consume_jsonl_chunk, finalize_judge_protocol
 
 
 DiscardCallback = Callable[[str], None]
 ErrorCallback = Callable[[BaseException], None]
 TaskCallback = Callable[[], None]
 ACTIVE_TASK_STATUSES = frozenset({"queued", "running", "cancelling"})
+
+
+@dataclass(frozen=True)
+class JudgeSupervisorLimits:
+    """Explicit WebUI process and protocol budgets for one Judge task."""
+
+    log_bytes: int
+    event_bytes: int
+    final_event_bytes: int
+    process_output_bytes: int
+    force_cancel_after: float = 3.0
+    process_limit: int = 64
+
+    def __post_init__(self):
+        for field_name in (
+            "log_bytes",
+            "event_bytes",
+            "final_event_bytes",
+            "process_output_bytes",
+            "process_limit",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{field_name} must be a positive integer")
+        if (
+            isinstance(self.force_cancel_after, bool)
+            or not isinstance(self.force_cancel_after, (int, float))
+            or self.force_cancel_after < 0
+        ):
+            raise ValueError("force_cancel_after must be a non-negative number")
 
 
 def task_failure_result(result, code, message, *, status="failed"):
@@ -615,3 +655,233 @@ class BoundedPipeCapture:
     def peak_buffered_bytes(self) -> int:
         with self._lock:
             return self._peak_buffered_bytes
+
+
+def touch_cancel_file(cancel_file) -> None:
+    """Best-effort cooperative cancellation signal for a cancellable worker."""
+
+    try:
+        Path(cancel_file).touch(exist_ok=True)
+    except OSError:
+        pass
+
+
+def supervise_judge_process(
+    job_id,
+    command,
+    env,
+    cancel_file,
+    result,
+    *,
+    jobs,
+    lock,
+    processes,
+    cancel_files,
+    execution_deadline,
+    limits: JudgeSupervisorLimits,
+    cwd=None,
+    spawn_process=None,
+    snapshot_identities=None,
+    terminate_process_tree=None,
+    monotonic_time=None,
+    sleep=None,
+):
+    """Run one cancellable Judge process and publish bounded WebUI progress.
+
+    The adapter owns task registries and display constants. This Core routine
+    owns subprocess containment, protocol draining, cancellation/deadline
+    enforcement, and terminal failure priority.
+    """
+
+    spawn_process = spawn_process or spawn_managed
+    snapshot_identities = snapshot_identities or snapshot_process_tree_identities
+    terminate_process_tree = terminate_process_tree or terminate_external_process_tree
+    monotonic_time = monotonic_time or time.monotonic
+    sleep = sleep or time.sleep
+
+    log = BoundedUtf8Log(limits.log_bytes)
+    parse_state = {
+        "buffer": b"",
+        "event_bytes": 0,
+        "final_seen": False,
+        "protocol_error": None,
+    }
+    return_code = None
+    stop_reason = None
+    stop_started = None
+    last_identity_sample = 0.0
+    known_identities = set()
+    cleanup_failure_message = None
+    managed = None
+    capture = None
+
+    def record_cleanup(cleanup):
+        nonlocal cleanup_failure_message, stop_reason
+        if isinstance(cleanup, dict) and not cleanup.get("ok", False):
+            errors = cleanup.get("errors") or ()
+            cleanup_failure_message = (
+                str(errors[0])
+                if errors
+                else "process tree cleanup could not be confirmed"
+            )
+            stop_reason = PROCESS_CLEANUP_FAILED
+
+    if task_cancel_requested(jobs, lock, job_id):
+        task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
+        publish_task_progress(jobs, lock, job_id, result, log)
+        return {"returncode": None, "stop_reason": "cancelled", "logs": log.text}
+    if monotonic_time() >= execution_deadline:
+        task_failure_result(
+            result,
+            "task_deadline_exceeded",
+            "task exceeded its total deadline",
+        )
+        publish_task_progress(jobs, lock, job_id, result, log)
+        return {"returncode": None, "stop_reason": "deadline", "logs": log.text}
+
+    try:
+        managed = spawn_process(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=Path.cwd() if cwd is None else Path(cwd),
+            env=env,
+            memory_limit_mb=None,
+            process_limit=limits.process_limit,
+        )
+        proc = managed.proc
+        capture = BoundedPipeCapture(
+            proc.stdout,
+            limits.process_output_bytes,
+            name=f"probhub-webui-pipe-{str(job_id)[:8]}",
+        ).start()
+        with lock:
+            processes[job_id] = proc
+            cancel_files[job_id] = Path(cancel_file)
+        while True:
+            published = False
+            for chunk in capture.drain_chunks():
+                consume_jsonl_chunk(
+                    result,
+                    log,
+                    parse_state,
+                    chunk,
+                    event_limit_bytes=limits.event_bytes,
+                    final_event_limit_bytes=limits.final_event_bytes,
+                )
+                published = True
+            if published:
+                publish_task_progress(jobs, lock, job_id, result, log)
+
+            now_mono = monotonic_time()
+            if now_mono - last_identity_sample >= 0.05 and proc.poll() is None:
+                managed.sample()
+                last_identity_sample = now_mono
+            if capture.overflow and stop_reason is None:
+                stop_reason = "output_limit"
+                stop_started = now_mono
+                known_identities = snapshot_identities(proc.pid)
+            elif task_cancel_requested(jobs, lock, job_id) and stop_reason is None:
+                stop_reason = "cancelled"
+                stop_started = now_mono
+                known_identities = snapshot_identities(proc.pid)
+                touch_cancel_file(cancel_file)
+            elif now_mono >= execution_deadline and stop_reason is None:
+                stop_reason = "deadline"
+                stop_started = now_mono
+                known_identities = snapshot_identities(proc.pid)
+                touch_cancel_file(cancel_file)
+
+            if stop_reason == "output_limit" and proc.poll() is None:
+                record_cleanup(terminate_process_tree(proc, known_identities))
+            elif (
+                stop_reason is not None
+                and proc.poll() is None
+                and stop_started is not None
+                and now_mono - stop_started >= limits.force_cancel_after
+            ):
+                record_cleanup(terminate_process_tree(proc, known_identities))
+
+            return_code = proc.poll()
+            if return_code is not None:
+                break
+            sleep(0.05)
+    finally:
+        if managed is not None:
+            if managed.proc.poll() is None:
+                record_cleanup(
+                    terminate_process_tree(managed.proc, known_identities)
+                )
+            record_cleanup(managed.terminate())
+            managed.close()
+        if capture is not None:
+            if not capture.join(timeout=2.0):
+                try:
+                    capture.stream.close()
+                except (OSError, ValueError):
+                    pass
+                capture.join(timeout=1.0)
+            for chunk in capture.drain_chunks():
+                consume_jsonl_chunk(
+                    result,
+                    log,
+                    parse_state,
+                    chunk,
+                    event_limit_bytes=limits.event_bytes,
+                    final_event_limit_bytes=limits.final_event_bytes,
+                )
+            consume_jsonl_chunk(
+                result,
+                log,
+                parse_state,
+                b"",
+                final=True,
+                event_limit_bytes=limits.event_bytes,
+                final_event_limit_bytes=limits.final_event_bytes,
+            )
+            # A short-lived process can exit before overflow is observed in
+            # the monitor loop. Re-check after the reader fully drains.
+            if capture.overflow and stop_reason is None:
+                stop_reason = "output_limit"
+            try:
+                capture.stream.close()
+            except (OSError, ValueError):
+                pass
+        with lock:
+            processes.pop(job_id, None)
+            cancel_files.pop(job_id, None)
+
+    if stop_reason is None and task_cancel_requested(jobs, lock, job_id):
+        stop_reason = "cancelled"
+    if stop_reason == PROCESS_CLEANUP_FAILED:
+        task_failure_result(
+            result,
+            PROCESS_CLEANUP_FAILED,
+            cleanup_failure_message or "process tree cleanup could not be confirmed",
+        )
+    elif stop_reason == "cancelled":
+        task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
+    elif stop_reason == "deadline":
+        task_failure_result(
+            result,
+            "task_deadline_exceeded",
+            "task exceeded its execution deadline",
+        )
+    elif stop_reason == "output_limit":
+        task_failure_result(
+            result,
+            "task_output_limit",
+            "task protocol output exceeded its limit",
+        )
+    elif (result.get("final") or {}).get("code") == "task_event_limit":
+        stop_reason = "protocol_error"
+    else:
+        stop_reason = finalize_judge_protocol(
+            result,
+            parse_state,
+            return_code,
+            read_error=capture is not None and capture.error is not None,
+        )
+    publish_task_progress(jobs, lock, job_id, result, log)
+    return {"returncode": return_code, "stop_reason": stop_reason, "logs": log.text}

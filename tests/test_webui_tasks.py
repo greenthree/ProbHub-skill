@@ -1,4 +1,7 @@
 import io
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -9,12 +12,14 @@ from probhub.webui_tasks import (
     BoundedPipeCapture,
     BoundedTaskExecutor,
     BoundedUtf8Log,
+    JudgeSupervisorLimits,
     acquire_task_lock,
     claim_task_execution,
     discard_queued_job,
     prune_job_registry,
     public_job_payload,
     publish_task_progress,
+    supervise_judge_process,
     task_executor_error,
 )
 
@@ -283,6 +288,185 @@ class BoundedPipeCaptureTests(unittest.TestCase):
         self.assertEqual(capture.retained_bytes, 128)
         self.assertLessEqual(capture.peak_buffered_bytes, 128)
         self.assertTrue(capture.overflow)
+
+
+class JudgeProcessSupervisorTests(unittest.TestCase):
+    @staticmethod
+    def _limits(*, process_output_bytes=4096):
+        return JudgeSupervisorLimits(
+            log_bytes=1024,
+            event_bytes=2048,
+            final_event_bytes=512,
+            process_output_bytes=process_output_bytes,
+            force_cancel_after=0.05,
+        )
+
+    def test_supervisor_limits_reject_boolean_string_and_negative_values(self):
+        invalid_fields = {
+            "log_bytes": True,
+            "event_bytes": "2048",
+            "final_event_bytes": 0,
+            "process_output_bytes": -1,
+            "force_cancel_after": False,
+            "process_limit": 0,
+        }
+        baseline = {
+            "log_bytes": 1024,
+            "event_bytes": 2048,
+            "final_event_bytes": 512,
+            "process_output_bytes": 4096,
+            "force_cancel_after": 0.05,
+            "process_limit": 64,
+        }
+        for field_name, invalid_value in invalid_fields.items():
+            with self.subTest(field=field_name):
+                values = {**baseline, field_name: invalid_value}
+                with self.assertRaises(ValueError):
+                    JudgeSupervisorLimits(**values)
+
+    def test_cancelled_task_does_not_spawn_and_publishes_terminal_progress(self):
+        jobs = {"task": {"status": "cancelling", "cancel_requested": True}}
+        result = {}
+
+        def unexpected_spawn(*_args, **_kwargs):
+            raise AssertionError("cancelled task must not spawn")
+
+        run = supervise_judge_process(
+            "task",
+            [sys.executable, "-c", "raise SystemExit(0)"],
+            os.environ.copy(),
+            Path("cancel.requested"),
+            result,
+            jobs=jobs,
+            lock=threading.Lock(),
+            processes={},
+            cancel_files={},
+            execution_deadline=time.monotonic() + 5,
+            limits=self._limits(),
+            spawn_process=unexpected_spawn,
+        )
+
+        self.assertEqual(run["stop_reason"], "cancelled")
+        self.assertEqual(result["final"]["code"], "cancelled")
+        self.assertEqual(jobs["task"]["result"]["final"]["code"], "cancelled")
+
+    def test_valid_final_event_completes_and_clears_process_registries(self):
+        jobs = {"task": {"status": "running", "cancel_requested": False}}
+        processes = {}
+        cancel_files = {}
+        result = {}
+        command = [
+            sys.executable,
+            "-c",
+            "import json; print(json.dumps({'type':'final','ok':True,"
+            "'status':'passed','code':'all_expectations_met'}), flush=True)",
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            run = supervise_judge_process(
+                "task",
+                command,
+                os.environ.copy(),
+                Path(temp) / "cancel.requested",
+                result,
+                jobs=jobs,
+                lock=threading.Lock(),
+                processes=processes,
+                cancel_files=cancel_files,
+                execution_deadline=time.monotonic() + 5,
+                limits=self._limits(),
+            )
+
+        self.assertIsNone(run["stop_reason"])
+        self.assertEqual(run["returncode"], 0)
+        self.assertEqual(result["final"]["code"], "all_expectations_met")
+        self.assertEqual(processes, {})
+        self.assertEqual(cancel_files, {})
+        self.assertEqual(
+            jobs["task"]["result"]["final"]["code"],
+            "all_expectations_met",
+        )
+
+    def test_fast_output_flood_is_rejected_after_pipe_drain(self):
+        jobs = {"task": {"status": "running", "cancel_requested": False}}
+        result = {}
+        command = [
+            sys.executable,
+            "-c",
+            "import json,sys; print(json.dumps({'type':'final','ok':True,"
+            "'status':'passed','code':'all_expectations_met'}), flush=True); "
+            "sys.stdout.write('x'*65536); sys.stdout.flush()",
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            run = supervise_judge_process(
+                "task",
+                command,
+                os.environ.copy(),
+                Path(temp) / "cancel.requested",
+                result,
+                jobs=jobs,
+                lock=threading.Lock(),
+                processes={},
+                cancel_files={},
+                execution_deadline=time.monotonic() + 5,
+                limits=self._limits(process_output_bytes=256),
+            )
+
+        self.assertEqual(run["stop_reason"], "output_limit")
+        self.assertEqual(result["final"]["code"], "task_output_limit")
+
+    def test_cleanup_failure_overrides_successful_protocol(self):
+        jobs = {"task": {"status": "running", "cancel_requested": False}}
+        processes = {}
+        cancel_files = {}
+        result = {}
+
+        class CleanupFailureManaged:
+            def __init__(self, command, **kwargs):
+                kwargs.pop("memory_limit_mb", None)
+                kwargs.pop("process_limit", None)
+                self.proc = subprocess.Popen(command, **kwargs)
+
+            def sample(self):
+                return None, None
+
+            def terminate(self):
+                self.proc.wait(timeout=5)
+                return {"ok": False, "errors": ["cleanup identity unavailable"]}
+
+            def close(self):
+                return None
+
+        command = [
+            sys.executable,
+            "-c",
+            "import json; print(json.dumps({'type':'final','ok':True,"
+            "'status':'passed','code':'all_expectations_met'}), flush=True)",
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            run = supervise_judge_process(
+                "task",
+                command,
+                os.environ.copy(),
+                Path(temp) / "cancel.requested",
+                result,
+                jobs=jobs,
+                lock=threading.Lock(),
+                processes=processes,
+                cancel_files=cancel_files,
+                execution_deadline=time.monotonic() + 5,
+                limits=self._limits(),
+                spawn_process=CleanupFailureManaged,
+            )
+
+        self.assertEqual(run["stop_reason"], "process_cleanup_failed")
+        self.assertEqual(result["final"]["code"], "process_cleanup_failed")
+        self.assertIn("cleanup identity unavailable", result["final"]["message"])
+        self.assertEqual(processes, {})
+        self.assertEqual(cancel_files, {})
+        self.assertEqual(
+            jobs["task"]["result"]["final"]["code"],
+            "process_cleanup_failed",
+        )
 
 
 if __name__ == "__main__":
