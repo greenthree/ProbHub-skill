@@ -12,15 +12,27 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
+import shutil
 import stat
+import tempfile
 import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from threading import Lock
 
 from .errors import ProbHubError
+from .pdf_processing import pdf_page_count as bounded_pdf_page_count
+from .process_control import OutputBudgetError, run_managed_to_files
 
 
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _PREVIEW_KEY_SCHEMA = "probhub-webui-preview-v1"
+_RENDER_LOCKS = tuple(Lock() for _ in range(64))
+_PDF_HASH_CHUNK_BYTES = 1024 * 1024
+_RENDER_TIMEOUT_SECONDS = 30
+_RENDER_MEMORY_LIMIT_MB = 512
+_RENDER_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
+_RENDER_PROCESS_LIMIT = 8
 
 
 def _is_link_like(path: Path) -> bool:
@@ -233,3 +245,235 @@ def safe_preview_file(preview_root, path: Path) -> Path:
 
     safe_root, resolved_root = _checked_preview_root(preview_root)
     return _check_preview_path(Path(path), safe_root, resolved_root)
+
+
+def _is_regular_file(path: Path) -> bool:
+    try:
+        info = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISREG(info.st_mode) and not (
+        stat.S_ISLNK(info.st_mode)
+        or (reparse_flag and getattr(info, "st_file_attributes", 0) & reparse_flag)
+    )
+
+
+def select_preview_pdf(preview_root, root, workspace, subtitle: str) -> Path | None:
+    """Select the isolated preview PDF, falling back to the formal collection PDF."""
+
+    typst_dir, _ = validate_typst_directory(root, workspace)
+    preview = preview_pdf_path(preview_root, root, workspace, subtitle)
+    if _is_regular_file(preview):
+        return preview
+    formal = typst_dir / "main.pdf"
+    return formal if _is_regular_file(formal) else None
+
+
+def publish_preview_pdf(
+    preview_root,
+    root,
+    workspace,
+    subtitle: str,
+    staged_pdf,
+    *,
+    copy_file_fn=shutil.copyfile,
+    replace_fn=os.replace,
+) -> Path:
+    """Atomically publish a compiled PDF into the process-local preview cache."""
+
+    destination = preview_pdf_path(
+        preview_root,
+        root,
+        workspace,
+        subtitle,
+        create=True,
+    )
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix=".main-",
+        suffix=".pdf.tmp",
+        dir=destination.parent,
+    )
+    os.close(temporary_fd)
+    temporary = Path(temporary_name)
+    try:
+        safe_preview_file(preview_root, temporary)
+        copy_file_fn(Path(staged_pdf), temporary)
+        safe_preview_file(preview_root, destination)
+        replace_fn(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def count_preview_pages(
+    preview_root,
+    root,
+    workspace,
+    subtitle: str,
+    *,
+    page_count_fn=bounded_pdf_page_count,
+) -> int:
+    """Return zero for a missing PDF and otherwise inspect it with the bounded worker."""
+
+    pdf_path = select_preview_pdf(preview_root, root, workspace, subtitle)
+    if pdf_path is None:
+        return 0
+    return page_count_fn(pdf_path)
+
+
+def _render_lock(path: Path) -> Lock:
+    encoded = os.path.normcase(os.path.abspath(os.fspath(path))).encode("utf-8", errors="surrogatepass")
+    index = int.from_bytes(hashlib.sha256(encoded).digest()[:8], "big") % len(_RENDER_LOCKS)
+    return _RENDER_LOCKS[index]
+
+
+def _pdf_content_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(_PDF_HASH_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_render_diagnostic(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-1000:]
+    except OSError:
+        return ""
+
+
+def _render_failure(message, *, pages=None):
+    result = {"status": "render_failed", "error": str(message)[:2000]}
+    if pages is not None:
+        result["pages"] = pages
+    return result
+
+
+def render_preview_page(
+    preview_root,
+    root,
+    workspace,
+    subtitle: str,
+    page: int,
+    *,
+    page_count_fn=bounded_pdf_page_count,
+    run_managed_fn=run_managed_to_files,
+    replace_fn=os.replace,
+):
+    """Render one zero-based page into a content-validated process-local cache.
+
+    The returned status is independent from HTTP so Flask remains a thin
+    presentation adapter. A failed renderer never writes the final PNG.
+    """
+
+    pdf_path = select_preview_pdf(preview_root, root, workspace, subtitle)
+    if pdf_path is None:
+        return {"status": "not_compiled", "pages": 0}
+    try:
+        total = page_count_fn(pdf_path)
+    except Exception as exc:  # The WebUI deliberately keeps malformed PDFs non-fatal.
+        return {"status": "invalid_pdf", "error": str(exc)[:2000]}
+    if isinstance(page, bool) or not isinstance(page, int) or page < 0 or page >= total:
+        return {"status": "page_out_of_range", "pages": total}
+
+    pages_dir = preview_pages_dir(
+        preview_root,
+        root,
+        workspace,
+        subtitle,
+        create=True,
+    )
+    # Include the source PDF identity in the final filename. This keeps page
+    # publication a single atomic replace; a failed replace cannot leave a
+    # newly rendered PNG paired with an old sidecar hash.
+    lock_path = safe_preview_file(preview_root, pages_dir / f"page-{page + 1}")
+    pdf_hash = None
+    png_path = None
+
+    with _render_lock(lock_path):
+        try:
+            pdf_hash = _pdf_content_hash(pdf_path)
+        except OSError as exc:
+            return _render_failure(exc, pages=total)
+        png_path = safe_preview_file(
+            preview_root,
+            pages_dir / f"page-{page + 1}-{pdf_hash}.png",
+        )
+        if png_path.is_file():
+            return {
+                "status": "ok",
+                "path": png_path,
+                "pages": total,
+                "cache": "hit",
+                "pdf_sha256": pdf_hash,
+            }
+
+        render_token = secrets.token_hex(8)
+        prefix = safe_preview_file(
+            preview_root,
+            pages_dir / f".page-{page + 1}-{render_token}",
+        )
+        staged_png = safe_preview_file(preview_root, prefix.with_suffix(".png"))
+        stdout_path = safe_preview_file(preview_root, prefix.with_suffix(".stdout"))
+        stderr_path = safe_preview_file(preview_root, prefix.with_suffix(".stderr"))
+        try:
+            rendered = run_managed_fn(
+                [
+                    "pdftoppm",
+                    "-f", str(page + 1),
+                    "-l", str(page + 1),
+                    "-singlefile",
+                    "-png",
+                    "-r", "144",
+                    str(pdf_path),
+                    str(prefix),
+                ],
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                additional_output_paths=(staged_png,),
+                timeout=_RENDER_TIMEOUT_SECONDS,
+                memory_limit_mb=_RENDER_MEMORY_LIMIT_MB,
+                output_limit_bytes=_RENDER_OUTPUT_LIMIT_BYTES,
+                process_limit=_RENDER_PROCESS_LIMIT,
+                cwd=Path(root),
+            )
+            if rendered.get("reason") != "completed" or rendered.get("returncode") != 0:
+                detail = _read_render_diagnostic(stderr_path)
+                return _render_failure(detail or rendered.get("message") or rendered.get("reason"), pages=total)
+            if not staged_png.is_file():
+                return _render_failure("renderer did not produce a PNG", pages=total)
+            if not _is_regular_file(staged_png):
+                return _render_failure("renderer produced an invalid PNG", pages=total)
+            if staged_png.stat().st_size > _RENDER_OUTPUT_LIMIT_BYTES:
+                return _render_failure("renderer produced an oversized PNG", pages=total)
+            if _pdf_content_hash(pdf_path) != pdf_hash:
+                return _render_failure("PDF changed during page rendering", pages=total)
+            safe_preview_file(preview_root, png_path)
+            replace_fn(staged_png, png_path)
+            # Stale hashed pages are not observable through the API. Remove
+            # them only after the new page has been published successfully.
+            for stale in pages_dir.glob(f"page-{page + 1}-*.png"):
+                if stale != png_path:
+                    try:
+                        stale.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        except (OSError, OutputBudgetError) as exc:
+            return _render_failure(exc, pages=total)
+        finally:
+            for temporary in (staged_png, stdout_path, stderr_path):
+                temporary.unlink(missing_ok=True)
+
+        return {
+            "status": "ok",
+            "path": png_path,
+            "pages": total,
+            "cache": "rendered",
+            "pdf_sha256": pdf_hash,
+        }

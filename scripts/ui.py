@@ -6,7 +6,6 @@ import hmac
 import re
 import secrets
 import subprocess
-import shutil
 import tempfile
 import webbrowser
 import uuid
@@ -53,9 +52,11 @@ from probhub.submissions import (
 )
 from probhub.typesetting import compile_collection
 from probhub.webui_preview import (
+    count_preview_pages,
     preview_pages_dir,
     preview_pdf_path,
-    safe_preview_file,
+    publish_preview_pdf,
+    render_preview_page,
     validate_typst_directory,
 )
 from probhub.webui_workspace import (
@@ -502,29 +503,13 @@ def compile_pdf():
                     snapshot.workspace,
                     snapshot.loaded_problems,
                 )
-                preview_pdf = _preview_pdf_path(
+                publish_preview_pdf(
+                    WEBUI_PREVIEW_ROOT,
+                    root,
+                    snapshot.workspace,
                     subtitle,
-                    # The PDF is compiled from the temporary snapshot, but
-                    # the cache identity must remain tied to the live
-                    # workspace so page requests can find this preview.
-                    root=root,
-                    workspace=snapshot.workspace,
-                    create=True,
+                    staged_pdf,
                 )
-                temporary_fd, temporary_name = tempfile.mkstemp(
-                    prefix=".main-",
-                    suffix=".pdf.tmp",
-                    dir=preview_pdf.parent,
-                )
-                os.close(temporary_fd)
-                temporary = Path(temporary_name)
-                try:
-                    safe_preview_file(WEBUI_PREVIEW_ROOT, temporary)
-                    shutil.copyfile(staged_pdf, temporary)
-                    safe_preview_file(WEBUI_PREVIEW_ROOT, preview_pdf)
-                    os.replace(temporary, preview_pdf)
-                finally:
-                    temporary.unlink(missing_ok=True)
         return jsonify({"success": True, "preview": True})
     except ProbHubError as e:
         detail = analyze_compile_error(str(e))
@@ -1826,15 +1811,18 @@ def save_contest_config(subtitle):
 def pdf_page_count(subtitle):
     """Return the number of pages in main.pdf."""
     try:
-        root, workspace, typst_dir = _schema_typst_dir(subtitle)
-        preview_path = _preview_pdf_path(subtitle, root=root, workspace=workspace)
+        root, workspace, _ = _schema_typst_dir(subtitle)
     except ProbHubError as exc:
         return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
-    pdf_path = str(preview_path if preview_path.is_file() else typst_dir / "main.pdf")
-    if not os.path.exists(pdf_path):
-        return jsonify({"pages": 0})
     try:
-        return jsonify({"pages": bounded_pdf_page_count(pdf_path)})
+        pages = count_preview_pages(
+            WEBUI_PREVIEW_ROOT,
+            root,
+            workspace,
+            subtitle,
+            page_count_fn=bounded_pdf_page_count,
+        )
+        return jsonify({"pages": pages})
     except Exception:
         return jsonify({"pages": 0})
 
@@ -1845,81 +1833,28 @@ def serve_pdf_page(subtitle, page):
     from flask import send_file
 
     try:
-        root, workspace, typst_dir = _schema_typst_dir(subtitle)
-        preview_path = _preview_pdf_path(subtitle, root=root, workspace=workspace)
-    except ProbHubError as exc:
-        return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
-    pdf_path = str(preview_path if preview_path.is_file() else typst_dir / "main.pdf")
-    if not os.path.exists(pdf_path):
-        return "PDF not compiled", 404
-
-    # Validate page number
-    try:
-        total = bounded_pdf_page_count(pdf_path)
-        if page < 0 or page >= total:
-            return "Page out of range", 404
-    except Exception:
-        return "Invalid PDF", 500
-
-    # Page rendering is a read-only WebUI concern; never cache into the workspace.
-    try:
-        preview_dir = _preview_pages_dir(
-            subtitle,
-            root=root,
-            workspace=workspace,
-            create=True,
-        )
-        png_path = safe_preview_file(
+        root, workspace, _ = _schema_typst_dir(subtitle)
+        rendered = render_preview_page(
             WEBUI_PREVIEW_ROOT,
-            preview_dir / f"page-{page + 1}.png",
+            root,
+            workspace,
+            subtitle,
+            page,
+            page_count_fn=bounded_pdf_page_count,
+            run_managed_fn=run_managed_to_files,
         )
     except ProbHubError as exc:
         return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
-
-    # Regenerate if PNG is missing or older than PDF
-    if not os.path.exists(png_path) or os.path.getmtime(png_path) < os.path.getmtime(pdf_path):
-        try:
-            prefix = str(safe_preview_file(WEBUI_PREVIEW_ROOT, png_path.with_suffix("")))
-            stdout_path = safe_preview_file(
-                WEBUI_PREVIEW_ROOT,
-                preview_dir / f"page-{page + 1}.stdout",
-            )
-            stderr_path = safe_preview_file(
-                WEBUI_PREVIEW_ROOT,
-                preview_dir / f"page-{page + 1}.stderr",
-            )
-        except ProbHubError as exc:
-            return jsonify({"success": False, "error": str(exc), "code": exc.code}), 409
-        try:
-            rendered = run_managed_to_files(
-                [
-                    "pdftoppm",
-                    "-f", str(page + 1),
-                    "-l", str(page + 1),
-                    "-singlefile",
-                    "-png",
-                    "-r", "144",
-                    pdf_path,
-                    prefix,
-                ],
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                timeout=30,
-                memory_limit_mb=512,
-                output_limit_bytes=4 * 1024 * 1024,
-                process_limit=8,
-                cwd=Path.cwd(),
-            )
-        except OSError as exc:
-            return f"Render failed: {exc}", 500
-        if rendered["reason"] != "completed" or rendered["returncode"] != 0:
-            detail = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.is_file() else ""
-            return f"Render failed: {detail[-1000:]}", 500
-
-    if not os.path.exists(png_path):
-        return "Render failed", 500
-
-    return send_file(os.path.abspath(png_path), mimetype='image/png')
+    status = rendered["status"]
+    if status == "not_compiled":
+        return "PDF not compiled", 404
+    if status == "page_out_of_range":
+        return "Page out of range", 404
+    if status == "invalid_pdf":
+        return "Invalid PDF", 500
+    if status == "render_failed":
+        return f"Render failed: {rendered.get('error', '')}", 500
+    return send_file(os.path.abspath(rendered["path"]), mimetype='image/png')
 
 
 def open_browser(url="http://127.0.0.1:33933"):
