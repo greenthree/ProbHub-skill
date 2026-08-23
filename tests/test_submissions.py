@@ -417,18 +417,16 @@ class SubmissionUiApiTests(unittest.TestCase):
                 "solutions": {"accepted": accepted},
                 "generators": [accepted[-1]],
             }
+            (problem / "probhub.yaml").write_text(
+                yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
             with (
-                mock.patch.object(
-                    self.ui,
-                    "_load_problem_by_index",
-                    return_value={"problem": {"display_name": "A"}},
-                ),
                 mock.patch.object(
                     self.ui,
                     "_schema_workspace",
                     return_value=(Path(temp), {"problems": [{"id": "A", "directory": "A"}]}),
                 ),
-                mock.patch.object(self.ui, "read_probhub_config_from_dir", return_value=config),
                 mock.patch.object(self.ui, "WEBUI_TASK_INFO_FILES_PER_ROLE", 8),
             ):
                 info = self.ui._sandbox_problem_info("contest", 0)

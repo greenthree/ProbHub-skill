@@ -15,7 +15,6 @@ from pathlib import Path
 from threading import BoundedSemaphore, Lock, Timer
 from urllib.parse import urlsplit
 
-import yaml
 from flask import Flask, g, jsonify, request, render_template_string, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
 
@@ -64,6 +63,7 @@ from probhub.webui_workspace import (
     load_editor_data,
     save_contest_config as save_schema_contest_config,
     save_editor_data,
+    sandbox_problem_info as core_sandbox_problem_info,
     schema_workspace_for_subtitle,
     statement_asset_path,
 )
@@ -293,50 +293,6 @@ def _preview_pages_dir(subtitle, *, root=None, workspace=None, create=False):
     )
 
 
-def problem_limits(problem_entry):
-    problem = (problem_entry or {}).get("problem", {})
-    try:
-        time_limit = float(problem.get("time_limit", 1))
-    except (TypeError, ValueError):
-        time_limit = 1.0
-    try:
-        memory_limit = int(float(problem.get("memory_limit", 256)))
-    except (TypeError, ValueError):
-        memory_limit = 256
-    time_limit = max(time_limit, 0.1)
-    memory_limit = max(memory_limit, 1)
-    if float(time_limit).is_integer():
-        time_limit = int(time_limit)
-    return time_limit, memory_limit
-
-
-def read_probhub_config_from_dir(prob_dir):
-    config_path = os.path.join(prob_dir, "probhub.yaml")
-    if not os.path.isfile(config_path):
-        return None
-    try:
-        with open(config_path, "r", encoding="utf-8") as stream:
-            config = yaml.safe_load(stream) or {}
-    except (OSError, yaml.YAMLError):
-        return None
-    return config if isinstance(config, dict) else None
-
-
-def _config_entry_file(entry):
-    return entry.get("file") if isinstance(entry, dict) else entry
-
-
-def _config_entries(value):
-    if value is None:
-        return []
-    return value if isinstance(value, list) else [value]
-
-
-def _normalized_config_path(entry):
-    path = _config_entry_file(entry)
-    return str(path).replace("\\", "/") if path else None
-
-
 # ==========================================
 # 前端 UI 模板 (TailwindCSS + Alpine.js + SortableJS + Marked + MathJax)
 # ==========================================
@@ -555,87 +511,17 @@ def distribute_pdfs():
         return jsonify({"success": False, "error": str(e)})
 
 
-def _load_problem_by_index(subtitle, index):
-    root, workspace = _schema_workspace(subtitle)
-    entries = problem_entries(workspace)
-    if index < 0 or index >= len(entries):
-        raise ValueError("Problem index out of range")
-    data = load_editor_data(root, workspace)
-    return data[index]
-
-
 def _sandbox_problem_info(subtitle, index):
-    problem = _load_problem_by_index(subtitle, index)
-    display_name = problem.get("problem", {}).get("display_name", "")
     root, workspace = _schema_workspace(subtitle)
-    entries = problem_entries(workspace)
-    prob_dir = str(root / entries[index].get("directory", entries[index]["id"]))
-    info = {
-        "name": display_name,
-        "matched": bool(prob_dir),
-        "dir": prob_dir,
-        "runnable": False,
-        "limits": {"time": problem_limits(problem)[0], "memory": problem_limits(problem)[1]},
-        "data_count": 0,
-        "sample_count": 0,
-        "secret_count": 0,
-        "files": {"validator": False, "std": [], "brute": [], "wrong": [], "other": []},
-        "file_counts": {"std": 0, "brute": 0, "wrong": 0, "other": 0},
-        "files_truncated": False,
-        # The installed Core owns local_judge.py; the workspace may only keep
-        # thin launchers and must not need a copied runtime script.
-        "script_exists": LOCAL_JUDGE_SCRIPT.is_file(),
-    }
-    if not prob_dir:
-        info["reason"] = "no matching directory"
-        return info
-
-    for suite in ("sample", "secret"):
-        data_dir = os.path.join(prob_dir, "data", suite)
-        if os.path.isdir(data_dir):
-            with os.scandir(data_dir) as entries:
-                info[f"{suite}_count"] = sum(
-                    1 for entry in entries if entry.is_file() and entry.name.endswith(".in")
-                )
-    info["data_count"] = info["sample_count"] + info["secret_count"]
-
-    def add_file(role, source):
-        info["file_counts"][role] += 1
-        if len(info["files"][role]) < WEBUI_TASK_INFO_FILES_PER_ROLE:
-            info["files"][role].append(source)
-        else:
-            info["files_truncated"] = True
-
-    config = read_probhub_config_from_dir(prob_dir)
-    if config is None:
-        info["reason"] = "migration_required"
-        return info
-    if config.get("schema_version") != 1:
-        info["reason"] = "unsupported_schema"
-        return info
-
-    judge = config.get("judge") or {}
-    validator = _normalized_config_path(judge.get("validator"))
-    if validator and os.path.isfile(os.path.join(prob_dir, validator)):
-        info["files"]["validator"] = validator
-
-    solutions = config.get("solutions") or {}
-    configured = set()
-    for config_key, display_key in (("accepted", "std"), ("brute", "brute"), ("wrong", "wrong")):
-        for entry in _config_entries(solutions.get(config_key)):
-            source = _normalized_config_path(entry)
-            if source and os.path.isfile(os.path.join(prob_dir, source)):
-                configured.add(source)
-                add_file(display_key, source)
-
-    if info["files"]["validator"]:
-        configured.add(info["files"]["validator"])
-    for entry in _config_entries(config.get("generators")):
-        source = _normalized_config_path(entry)
-        if source and source not in configured and os.path.isfile(os.path.join(prob_dir, source)):
-            add_file("other", source)
-    info["runnable"] = info["script_exists"] and info["data_count"] > 0
-    return info
+    # The Core owns Schema v1 parsing, limits, data accounting and path
+    # validation. This wrapper only adapts the installed WebUI launcher state.
+    return core_sandbox_problem_info(
+        root,
+        workspace,
+        index,
+        script_exists=LOCAL_JUDGE_SCRIPT.is_file(),
+        files_per_role=WEBUI_TASK_INFO_FILES_PER_ROLE,
+    )
 
 
 def _empty_sandbox_result(info):
