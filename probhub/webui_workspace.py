@@ -3,16 +3,22 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import yaml
 
 from .errors import ProbHubError
 from .linting import STATEMENT_ASSET_IGNORED_DIRS, STATEMENT_ASSET_SUFFIXES, lint_workspace
+from .io import read_yaml
 from .metadata import build_meta, natural_key
 from .statement import render_statement
-from .workspace import WORKSPACE_FILE, load_problem, load_workspace, problem_entries
+from .workspace import WORKSPACE_FILE, load_problem, load_workspace, problem_entries, resolve_problem_dir
+
+
+SANDBOX_INFO_DEFAULT_FILES_PER_ROLE = 64
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 def schema_workspace_for_subtitle(root, subtitle):
@@ -92,6 +98,222 @@ def workspace_revision(root, workspace=None):
 
 def full_workspace_revision(root):
     return _hash_files(Path(root).resolve(), [Path(root) / WORKSPACE_FILE])
+
+
+def _sandbox_limits(config):
+    limits = config.get("limits") or {}
+    if not isinstance(limits, dict):
+        limits = {}
+    try:
+        time_limit = float(limits.get("time", 1))
+    except (TypeError, ValueError):
+        time_limit = 1.0
+    try:
+        memory_limit = int(float(limits.get("memory", 256)))
+    except (TypeError, ValueError):
+        memory_limit = 256
+    time_limit = max(time_limit, 0.1)
+    memory_limit = max(memory_limit, 1)
+    if time_limit.is_integer():
+        time_limit = int(time_limit)
+    return time_limit, memory_limit
+
+
+def _safe_problem_directory(problem_dir, value, fallback):
+    """Resolve a configured directory without traversing links or leaving a problem."""
+    value = fallback if value is None else value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().replace("\\", "/")
+    relative = PurePosixPath(normalized)
+    windows = PureWindowsPath(normalized)
+    if (
+        relative.is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        return None
+    current = Path(problem_dir)
+    for part in relative.parts:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError:
+            return None
+        attributes = getattr(info, "st_file_attributes", 0)
+        if stat.S_ISLNK(info.st_mode) or (_REPARSE_POINT and attributes & _REPARSE_POINT):
+            return None
+        if not stat.S_ISDIR(info.st_mode):
+            return None
+    return current
+
+
+def _sandbox_config_entry_file(entry):
+    return entry.get("file") if isinstance(entry, dict) else entry
+
+
+def _sandbox_config_entries(value):
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _sandbox_regular_file(problem_dir, entry):
+    value = _sandbox_config_entry_file(entry)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().replace("\\", "/")
+    relative = PurePosixPath(normalized)
+    windows = PureWindowsPath(normalized)
+    if (
+        relative.is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        return None
+    current = Path(problem_dir)
+    for position, part in enumerate(relative.parts):
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError:
+            return None
+        attributes = getattr(info, "st_file_attributes", 0)
+        if stat.S_ISLNK(info.st_mode) or (_REPARSE_POINT and attributes & _REPARSE_POINT):
+            return None
+        if position < len(relative.parts) - 1:
+            if not stat.S_ISDIR(info.st_mode):
+                return None
+        elif not stat.S_ISREG(info.st_mode):
+            return None
+    if not current.is_file():
+        return None
+    return normalized
+
+
+def sandbox_problem_info(
+    root,
+    workspace,
+    index,
+    *,
+    script_exists=False,
+    files_per_role=None,
+):
+    """Return the read-only problem summary used by the WebUI sandbox picker."""
+    entries = problem_entries(workspace)
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index >= len(entries):
+        raise ValueError("Problem index out of range")
+
+    entry = entries[index]
+    problem_dir = resolve_problem_dir(root, entry)
+    config = None
+    config_reason = None
+    config_relative = _sandbox_regular_file(problem_dir, "probhub.yaml")
+    if config_relative is None:
+        config = {}
+        config_reason = "migration_required"
+    else:
+        try:
+            config = read_yaml(problem_dir / config_relative)
+        except FileNotFoundError:
+            config = {}
+            config_reason = "migration_required"
+        except (OSError, UnicodeError, ProbHubError):
+            config = {}
+            config_reason = "invalid_config"
+    if not isinstance(config, dict):
+        config = {}
+        config_reason = "invalid_config"
+    elif config_reason is None and config.get("id") != entry["id"]:
+        config_reason = "invalid_config"
+    display_name = config.get("display_name") or config.get("name") or entry["id"]
+    if not isinstance(display_name, (str, int, float)):
+        display_name = entry["id"]
+    time_limit, memory_limit = _sandbox_limits(config)
+    info = {
+        "name": display_name,
+        "matched": True,
+        "dir": str(problem_dir),
+        "runnable": False,
+        "limits": {"time": time_limit, "memory": memory_limit},
+        "data_count": 0,
+        "sample_count": 0,
+        "secret_count": 0,
+        "files": {"validator": False, "std": [], "brute": [], "wrong": [], "other": []},
+        "file_counts": {"std": 0, "brute": 0, "wrong": 0, "other": 0},
+        "files_truncated": False,
+        "script_exists": bool(script_exists),
+    }
+
+    data = config.get("data") or {}
+    if not isinstance(data, dict):
+        data = {}
+    for suite, configured_dir, fallback in (
+        ("sample", data.get("sample_dir"), "data/sample"),
+        ("secret", data.get("secret_dir"), "data/secret"),
+    ):
+        data_dir = _safe_problem_directory(problem_dir, configured_dir, fallback)
+        if data_dir is not None:
+            try:
+                with os.scandir(data_dir) as scanned:
+                    info[f"{suite}_count"] = sum(
+                        1
+                        for item in scanned
+                        if item.is_file(follow_symlinks=False) and item.name.endswith(".in")
+                    )
+            except OSError:
+                info[f"{suite}_count"] = 0
+    info["data_count"] = info["sample_count"] + info["secret_count"]
+
+    if config_reason is not None:
+        info["reason"] = config_reason
+        return info
+    if config.get("schema_version") != 1:
+        info["reason"] = "unsupported_schema"
+        return info
+
+    if files_per_role is None:
+        limit = SANDBOX_INFO_DEFAULT_FILES_PER_ROLE
+    else:
+        try:
+            limit = max(int(files_per_role), 0)
+        except (TypeError, ValueError):
+            limit = SANDBOX_INFO_DEFAULT_FILES_PER_ROLE
+    def add_file(role, source):
+        info["file_counts"][role] += 1
+        if len(info["files"][role]) < limit:
+            info["files"][role].append(source)
+        else:
+            info["files_truncated"] = True
+
+    judge = config.get("judge") or {}
+    if not isinstance(judge, dict):
+        judge = {}
+    validator = _sandbox_regular_file(problem_dir, judge.get("validator"))
+    if validator is not None:
+        info["files"]["validator"] = validator
+
+    solutions = config.get("solutions") or {}
+    if not isinstance(solutions, dict):
+        solutions = {}
+    configured = set()
+    for config_key, display_key in (("accepted", "std"), ("brute", "brute"), ("wrong", "wrong")):
+        for entry_value in _sandbox_config_entries(solutions.get(config_key)):
+            source = _sandbox_regular_file(problem_dir, entry_value)
+            if source is not None:
+                configured.add(source.casefold())
+                add_file(display_key, source)
+
+    if validator is not None:
+        configured.add(validator.casefold())
+    for entry_value in _sandbox_config_entries(config.get("generators")):
+        source = _sandbox_regular_file(problem_dir, entry_value)
+        if source is not None and source.casefold() not in configured:
+            add_file("other", source)
+    info["runnable"] = bool(script_exists) and info["data_count"] > 0
+    return info
 
 
 def load_editor_data(root, workspace):
