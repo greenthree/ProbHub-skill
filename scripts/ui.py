@@ -67,6 +67,14 @@ from probhub.webui_workspace import (
     schema_workspace_for_subtitle,
     statement_asset_path,
 )
+from probhub.webui_judge_protocol import (
+    apply_sandbox_event as core_apply_sandbox_event,
+    consume_jsonl_chunk as core_consume_jsonl_chunk,
+    empty_sandbox_result as core_empty_sandbox_result,
+    finalize_judge_protocol as core_finalize_judge_protocol,
+    sandbox_log_line as core_sandbox_log_line,
+    submission_verdict as core_submission_verdict,
+)
 from probhub.workspace import load_workspace, problem_entries
 from probhub.webui_tasks import BoundedPipeCapture, BoundedTaskExecutor, BoundedUtf8Log
 from probhub.webui_server import BoundedThreadedWSGIServer
@@ -525,154 +533,15 @@ def _sandbox_problem_info(subtitle, index):
 
 
 def _empty_sandbox_result(info):
-    return {
-        "problem": info,
-        "limits": info.get("limits", {"time": 1, "memory": 256}),
-        "compiles": [],
-        "validator": [],
-        "cases": [],
-        "groups": [],
-        "expectations": {},
-        "summaries": {},
-        "cache": {},
-        "transcripts": [],
-        "final": None,
-    }
+    return core_empty_sandbox_result(info)
 
 
 def _apply_sandbox_event(result, event):
-    typ = event.get("type")
-    if typ == "limits":
-        result["limits"] = {
-            "time": event.get("time_limit", 1),
-            "memory": event.get("memory_limit", 256),
-            "output": event.get("output_limit", 64),
-            "processes": event.get("process_limit", 32),
-            "judge_type": event.get("judge_type", "standard"),
-            "idle_limit": event.get("idle_limit"),
-            "transcript_limit": event.get("transcript_limit"),
-            "platform": event.get("platform"),
-            "machine": event.get("machine"),
-            "target_guarantee": event.get("target_guarantee", False),
-            "measurement_note": event.get("measurement_note"),
-        }
-    elif typ == "groups":
-        result["groups"] = event.get("groups") or []
-    elif typ == "compile":
-        result["compiles"].append({
-            "kind": event.get("kind"),
-            "file": event.get("file"),
-            "ok": event.get("ok"),
-            "stderr": event.get("stderr", ""),
-            "cached": bool(event.get("cached")),
-        })
-    elif typ == "validator":
-        result["validator"].append({
-            "case": event.get("case"),
-            "ok": bool(event.get("ok")),
-            "cached": bool(event.get("cached")),
-        })
-    elif typ == "case":
-        result["cases"].append({
-            "kind": event.get("kind"),
-            "program": event.get("program"),
-            "case": event.get("case"),
-            "groups": event.get("groups") or [],
-            "status": event.get("status"),
-            "time": float(event.get("time") or 0),
-            "memory": event.get("memory"),
-            "time_limit": event.get("time_limit"),
-            "memory_limit": event.get("memory_limit"),
-            "memory_enforced": event.get("memory_enforced"),
-            "judge_type": event.get("judge_type", "standard"),
-            "message": event.get("message", ""),
-            "timeout_kind": event.get("timeout_kind"),
-            "transcript_truncated": bool(event.get("transcript_truncated")),
-            "output_bytes": event.get("output_bytes"),
-            "termination_reason": event.get("termination_reason"),
-            "cached": bool(event.get("cached")),
-        })
-    elif typ == "transcript":
-        result["transcripts"].append({
-            "kind": event.get("kind"),
-            "program": event.get("program"),
-            "case": event.get("case"),
-            "entries": event.get("entries") or [],
-            "truncated": bool(event.get("truncated")),
-            "cached": bool(event.get("cached")),
-        })
-    elif typ == "summary":
-        program = event.get("program") or f"{event.get('kind', 'unknown')}-summary"
-        result["summaries"][program] = {
-            "kind": event.get("kind"),
-            "program": program,
-            "stats": event.get("stats", {}),
-            "expectation": event.get("expectation") or {},
-            "calibration": event.get("calibration") or {},
-        }
-    elif typ == "expectation":
-        program = event.get("program") or f"{event.get('kind', 'unknown')}-expectation"
-        result["expectations"][program] = {
-            key: value for key, value in event.items()
-            if key not in {"protocol", "protocol_version", "type"}
-        }
-    elif typ == "cache":
-        result["cache"] = {
-            key: value for key, value in event.items()
-            if key not in {"protocol", "protocol_version", "type"}
-        }
-    elif typ == "final":
-        result["final"] = {
-            "ok": bool(event.get("ok")),
-            "status": event.get("status", ""),
-            "code": event.get("code", ""),
-            "message": event.get("message", ""),
-        }
+    return core_apply_sandbox_event(result, event)
 
 
 def _sandbox_log_line(event):
-    typ = event.get("type")
-    if typ == "limits":
-        return (
-            f"[limits:{event.get('judge_type', 'standard')}] "
-            f"{event.get('time_limit', 1):g}s / {event.get('memory_limit', 256)}MB"
-        )
-    if typ == "groups":
-        names = [group.get("name") for group in (event.get("groups") or [])]
-        return f"[groups] {', '.join(name for name in names if name) or 'none'}"
-    if typ == "compile":
-        ok = event.get("ok")
-        status = "SKIP" if ok is None else ("OK" if ok else "FAIL")
-        return f"[compile:{status}] {event.get('kind')} · {event.get('file')}"
-    if typ == "validator":
-        return f"[validator:{'OK' if event.get('ok') else 'FAIL'}] {event.get('case')}"
-    if typ == "case":
-        detail = f" · {event.get('message')}" if event.get("message") else ""
-        return (
-            f"[{event.get('kind')}:{event.get('judge_type', 'standard')}] "
-            f"{event.get('program')} / {event.get('case')} -> {event.get('status')} "
-            f"({float(event.get('time') or 0):.3f}s){detail}"
-        )
-    if typ == "transcript":
-        suffix = " truncated" if event.get("truncated") else ""
-        return (
-            f"[transcript{suffix}] {event.get('program')} / {event.get('case')}: "
-            f"{len(event.get('entries') or [])} chunks"
-        )
-    if typ == "summary":
-        return f"[summary] {event.get('program')}: {event.get('stats')}"
-    if typ == "expectation":
-        state = "PASS" if event.get("ok") else "FAIL"
-        first = event.get("first_forbidden") or event.get("first_expected_match") or event.get("first_non_ac")
-        suffix = f" · first={first.get('case')}:{first.get('status')}" if first else ""
-        return (
-            f"[expectation:{state}] {event.get('program')} "
-            f"status={event.get('expected_statuses') or []} "
-            f"groups={event.get('groups') or ['all']}{suffix}"
-        )
-    if typ == "final":
-        return f"[final:{'OK' if event.get('ok') else 'FAIL'}] {event.get('message')}"
-    return json.dumps(event, ensure_ascii=False)
+    return core_sandbox_log_line(event)
 
 
 ACTIVE_TASK_STATUSES = {"queued", "running", "cancelling"}
@@ -871,57 +740,15 @@ def _publish_task_progress(jobs, lock, job_id, result, log):
 
 
 def _consume_jsonl_chunk(result, log, state, chunk, *, final=False):
-    state["buffer"] += chunk
-    lines = state["buffer"].split(b"\n")
-    state["buffer"] = b"" if final else lines.pop()
-    if final and lines and not lines[-1]:
-        lines.pop()
-    for raw_line in lines:
-        raw_line = raw_line.strip()
-        if not raw_line:
-            continue
-        text = raw_line.decode("utf-8", errors="replace")
-        try:
-            event = json.loads(text)
-        except json.JSONDecodeError:
-            log.append(text)
-            continue
-        event_size = len(raw_line) + 1
-        if event.get("type") == "final":
-            if state.get("protocol_error"):
-                continue
-            if state.get("final_seen"):
-                state["protocol_error"] = "duplicate_final_event"
-                _task_failure_result(
-                    result,
-                    "judge_protocol_error",
-                    "judge emitted more than one final event",
-                )
-                log.append("[final:FAIL] judge emitted more than one final event")
-                continue
-            state["final_seen"] = True
-            if event_size > WEBUI_TASK_FINAL_EVENT_BYTES:
-                state["protocol_error"] = "task_event_limit"
-                result["details_truncated"] = True
-                _task_failure_result(
-                    result,
-                    "task_event_limit",
-                    "judge final event exceeded its limit",
-                )
-                log.append("[final:FAIL] judge final event exceeded its limit")
-                continue
-            _apply_sandbox_event(result, event)
-            log.append(_sandbox_log_line(event))
-            continue
-        if state["event_bytes"] + event_size <= WEBUI_TASK_EVENT_BYTES:
-            _apply_sandbox_event(result, event)
-            state["event_bytes"] += event_size
-            log.append(_sandbox_log_line(event))
-        else:
-            result["details_truncated"] = True
-            if not state.get("detail_limit_reported"):
-                state["detail_limit_reported"] = True
-                log.append("[details truncated: event budget exceeded]")
+    return core_consume_jsonl_chunk(
+        result,
+        log,
+        state,
+        chunk,
+        final=final,
+        event_limit_bytes=WEBUI_TASK_EVENT_BYTES,
+        final_event_limit_bytes=WEBUI_TASK_FINAL_EVENT_BYTES,
+    )
 
 
 def _touch_cancel_file(cancel_file):
@@ -1082,19 +909,15 @@ def _supervise_judge_process(
         _task_failure_result(result, "task_deadline_exceeded", "task exceeded its execution deadline")
     elif stop_reason == "output_limit":
         _task_failure_result(result, "task_output_limit", "task protocol output exceeded its limit")
-    elif capture is not None and capture.error is not None:
-        _task_failure_result(result, "judge_protocol_error", "failed to read judge protocol output")
+    elif (result.get("final") or {}).get("code") == "task_event_limit":
         stop_reason = "protocol_error"
-    elif parse_state.get("protocol_error"):
-        stop_reason = "protocol_error"
-    elif result.get("final") is None:
-        _task_failure_result(result, "missing_final_event", "judge exited without a final event")
-        stop_reason = "protocol_error"
-    elif result["final"].get("code") == "task_event_limit":
-        stop_reason = "protocol_error"
-    elif bool(result["final"].get("ok")) != (return_code == 0):
-        _task_failure_result(result, "judge_protocol_error", "judge final event disagreed with its exit code")
-        stop_reason = "protocol_error"
+    else:
+        stop_reason = core_finalize_judge_protocol(
+            result,
+            parse_state,
+            return_code,
+            read_error=capture is not None and capture.error is not None,
+        )
     _publish_task_progress(jobs, lock, job_id, result, log)
     return {"returncode": return_code, "stop_reason": stop_reason, "logs": log.text}
 
@@ -1321,16 +1144,7 @@ def sandbox_cancel(job_id):
 
 
 def _submission_verdict(result):
-    submission_compiles = [item for item in (result.get("compiles") or []) if item.get("kind") == "std"]
-    if submission_compiles and not submission_compiles[-1].get("ok"):
-        return "CE"
-    statuses = [item.get("status") for item in (result.get("cases") or []) if item.get("status")]
-    if statuses and all(status == "AC" for status in statuses):
-        return "AC"
-    for status in ("FAIL", "RE", "MLE", "OLE", "TLE", "WA"):
-        if status in statuses:
-            return status
-    return "FAIL" if result.get("final") else "PENDING"
+    return core_submission_verdict(result)
 
 
 def _run_submission_job(job_id, info, filename, source):
