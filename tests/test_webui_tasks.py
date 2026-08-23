@@ -1,9 +1,138 @@
 import io
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 
-from probhub.webui_tasks import BoundedPipeCapture, BoundedTaskExecutor, BoundedUtf8Log
+from probhub.webui_tasks import (
+    BoundedPipeCapture,
+    BoundedTaskExecutor,
+    BoundedUtf8Log,
+    acquire_task_lock,
+    claim_task_execution,
+    discard_queued_job,
+    prune_job_registry,
+    public_job_payload,
+    publish_task_progress,
+    task_executor_error,
+)
+
+
+class TaskLifecycleTests(unittest.TestCase):
+    def test_registry_pruning_keeps_active_and_newest_completed(self):
+        jobs = {
+            "active": {"status": "running", "created_at": 1},
+            "expired": {"status": "success", "finished_at": 1},
+            "older": {"status": "failed", "finished_at": 90},
+            "newer": {"status": "success", "finished_at": 95},
+        }
+        prune_job_registry(jobs, result_ttl=50, max_completed=1, now=100)
+        self.assertEqual(set(jobs), {"active", "newer"})
+
+    def test_public_payload_and_progress_are_immutable_snapshots(self):
+        jobs = {"task": {"status": "running", "_deadline_monotonic": 50}}
+        result = {"cases": [{"status": "AC"}]}
+        log = BoundedUtf8Log(64)
+        log.append("running")
+        publish_task_progress(jobs, threading.Lock(), "task", result, log)
+        result["cases"][0]["status"] = "WA"
+        payload = public_job_payload(jobs["task"])
+        self.assertNotIn("_deadline_monotonic", payload)
+        self.assertEqual(payload["result"]["cases"][0]["status"], "AC")
+
+    def test_claim_uses_monotonic_deadline_and_rejects_wall_clock_rollback(self):
+        jobs = {
+            "task": {
+                "status": "queued",
+                "deadline_at": 10**12,
+                "_deadline_monotonic": 50.0,
+                "cancel_requested": False,
+            }
+        }
+        deadline, failure = claim_task_execution(
+            jobs,
+            threading.Lock(),
+            "task",
+            execution_deadline=30,
+            wall_time=lambda: -10**12,
+            monotonic_time=lambda: 51.0,
+        )
+        self.assertIsNone(deadline)
+        self.assertEqual(failure, "deadline")
+
+    def test_discard_queued_submission_publishes_cancelled_cleanup_state(self):
+        jobs = {
+            "task": {
+                "status": "cancelling",
+                "filename": "answer.cpp",
+                "cancel_requested": True,
+                "result": {},
+                "created_at": 90,
+            }
+        }
+        discard_queued_job(
+            jobs,
+            threading.Lock(),
+            "task",
+            "cancelled",
+            submission=True,
+            result_ttl=100,
+            max_completed=4,
+            now=100,
+        )
+        job = jobs["task"]
+        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(job["verdict"], "CANCELLED")
+        self.assertTrue(job["result"]["submission"]["workspace_cleaned"])
+
+    def test_worker_error_reports_submission_cleanup_failure_truthfully(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            task_root = root / ".probhub" / "submissions" / "task"
+            task_root.mkdir(parents=True)
+            jobs = {
+                "task": {
+                    "status": "running",
+                    "filename": "answer.cpp",
+                    "result": {},
+                    "created_at": 90,
+                }
+            }
+            task_executor_error(
+                jobs,
+                threading.Lock(),
+                "task",
+                RuntimeError("boom"),
+                submission=True,
+                workspace_root=root,
+                error_limit_bytes=64,
+                result_ttl=100,
+                max_completed=4,
+                now=100,
+            )
+            job = jobs["task"]
+            self.assertEqual(job["failure_code"], "submission_cleanup_failed")
+            self.assertFalse(job["result"]["submission"]["workspace_cleaned"])
+
+    def test_task_lock_honors_cancellation_before_acquisition(self):
+        task_lock = threading.Lock()
+        task_lock.acquire()
+        try:
+            jobs = {"task": {"cancel_requested": True}}
+            self.assertEqual(
+                acquire_task_lock(
+                    task_lock,
+                    jobs,
+                    threading.Lock(),
+                    "task",
+                    10,
+                    monotonic_time=lambda: 1,
+                ),
+                "cancelled",
+            )
+        finally:
+            task_lock.release()
 
 
 class BoundedTaskExecutorTests(unittest.TestCase):

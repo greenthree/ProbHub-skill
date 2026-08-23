@@ -10,7 +10,6 @@ import tempfile
 import webbrowser
 import uuid
 import time
-import copy
 from pathlib import Path
 from threading import BoundedSemaphore, Lock, Timer
 from urllib.parse import urlsplit
@@ -76,7 +75,22 @@ from probhub.webui_judge_protocol import (
     submission_verdict as core_submission_verdict,
 )
 from probhub.workspace import load_workspace, problem_entries
-from probhub.webui_tasks import BoundedPipeCapture, BoundedTaskExecutor, BoundedUtf8Log
+from probhub.webui_tasks import (
+    ACTIVE_TASK_STATUSES as CORE_ACTIVE_TASK_STATUSES,
+    BoundedPipeCapture,
+    BoundedTaskExecutor,
+    BoundedUtf8Log,
+    acquire_task_lock as core_acquire_task_lock,
+    bounded_error_text as core_bounded_error_text,
+    claim_task_execution as core_claim_task_execution,
+    discard_queued_job as core_discard_queued_job,
+    prune_job_registry as core_prune_job_registry,
+    public_job_payload as core_public_job_payload,
+    publish_task_progress as core_publish_task_progress,
+    task_cancel_requested as core_task_cancel_requested,
+    task_executor_error as core_task_executor_error,
+    task_failure_result as core_task_failure_result,
+)
 from probhub.webui_server import BoundedThreadedWSGIServer
 
 app = Flask(__name__)
@@ -544,28 +558,16 @@ def _sandbox_log_line(event):
     return core_sandbox_log_line(event)
 
 
-ACTIVE_TASK_STATUSES = {"queued", "running", "cancelling"}
+ACTIVE_TASK_STATUSES = set(CORE_ACTIVE_TASK_STATUSES)
 
 
 def _prune_job_registry(jobs):
-    now = time.time()
-    expired = [
-        job_id for job_id, job in jobs.items()
-        if job.get("status") not in ACTIVE_TASK_STATUSES
-        and now - float(job.get("finished_at") or job.get("created_at") or now) >= WEBUI_TASK_RESULT_TTL
-    ]
-    for job_id in expired:
-        jobs.pop(job_id, None)
-    finished = sorted(
-        (
-            (job_id, job)
-            for job_id, job in jobs.items()
-            if job.get("status") not in ACTIVE_TASK_STATUSES
-        ),
-        key=lambda item: float(item[1].get("finished_at") or item[1].get("created_at") or 0),
+    return core_prune_job_registry(
+        jobs,
+        result_ttl=WEBUI_TASK_RESULT_TTL,
+        max_completed=WEBUI_TASK_MAX_COMPLETED,
+        now=time.time(),
     )
-    for job_id, _ in finished[: max(0, len(finished) - WEBUI_TASK_MAX_COMPLETED)]:
-        jobs.pop(job_id, None)
 
 
 def _prune_sandbox_jobs():
@@ -577,29 +579,15 @@ def _prune_submission_jobs():
 
 
 def _task_failure_result(result, code, message, *, status="failed"):
-    if result is None:
-        result = {}
-    result["final"] = {
-        "ok": False,
-        "status": status,
-        "code": code,
-        "message": message,
-    }
-    return result
+    return core_task_failure_result(result, code, message, status=status)
 
 
 def _bounded_error_text(value):
-    log = BoundedUtf8Log(WEBUI_TASK_ERROR_BYTES)
-    log.append(str(value))
-    return log.text
+    return core_bounded_error_text(value, WEBUI_TASK_ERROR_BYTES)
 
 
 def _public_job_payload(job):
-    payload = copy.deepcopy(job)
-    for key in list(payload):
-        if key.startswith("_"):
-            payload.pop(key, None)
-    return payload
+    return core_public_job_payload(job)
 
 
 def _queue_full_response():
@@ -617,100 +605,46 @@ def _queue_full_response():
 
 
 def _discard_queued_job(jobs, lock, job_id, reason, *, submission=False):
-    with lock:
-        job = jobs.get(job_id)
-        if not job or job.get("status") not in {"queued", "cancelling"}:
-            return
-        cancelled = reason in {"cancelled", "shutdown"} or bool(job.get("cancel_requested"))
-        code = "cancelled" if cancelled else "queue_timeout"
-        message = "task cancelled before execution" if cancelled else "task exceeded its queue deadline"
-        result = _task_failure_result(job.get("result"), code, message, status=code)
-        if submission:
-            result.setdefault("submission", {}).update(
-                task_id=job_id,
-                filename=job.get("filename", ""),
-                verdict="CANCELLED" if cancelled else "FAIL",
-                workspace_cleaned=True,
-            )
-        job.update(
-            status="cancelled" if cancelled else "failed",
-            verdict=("CANCELLED" if cancelled else "FAIL") if submission else job.get("verdict"),
-            result=result,
-            logs=message,
-            finished_at=time.time(),
-            failure_code=code,
-        )
-        _prune_job_registry(jobs)
+    return core_discard_queued_job(
+        jobs,
+        lock,
+        job_id,
+        reason,
+        submission=submission,
+        result_ttl=WEBUI_TASK_RESULT_TTL,
+        max_completed=WEBUI_TASK_MAX_COMPLETED,
+        now=time.time(),
+    )
 
 
 def _task_executor_error(jobs, lock, job_id, exc, *, submission=False):
-    with lock:
-        job = jobs.get(job_id)
-        if not job or job.get("status") not in ACTIVE_TASK_STATUSES:
-            return
-        message = _bounded_error_text(f"WebUI task worker failed: {exc}")
-        failure_code = "task_worker_failed"
-        result = job.get("result") or {}
-        if submission:
-            workspace_cleaned = not (Path.cwd() / ".probhub" / "submissions" / job_id).exists()
-            submission_result = result.setdefault("submission", {})
-            submission_result.update(
-                task_id=job_id,
-                filename=job.get("filename", ""),
-                verdict="FAIL",
-                workspace_cleaned=workspace_cleaned,
-            )
-            if not workspace_cleaned:
-                failure_code = "submission_cleanup_failed"
-                submission_result.update(
-                    cleanup_error="submission workspace still exists after worker failure",
-                    original_failure_code="task_worker_failed",
-                )
-        result = _task_failure_result(
-            result,
-            failure_code,
-            "submission workspace cleanup failed" if failure_code == "submission_cleanup_failed" else message,
-        )
-        job.update(
-            status="failed",
-            verdict="FAIL" if submission else job.get("verdict"),
-            result=result,
-            logs=message,
-            finished_at=time.time(),
-            failure_code=failure_code,
-        )
-        _prune_job_registry(jobs)
+    return core_task_executor_error(
+        jobs,
+        lock,
+        job_id,
+        exc,
+        submission=submission,
+        workspace_root=Path.cwd(),
+        error_limit_bytes=WEBUI_TASK_ERROR_BYTES,
+        result_ttl=WEBUI_TASK_RESULT_TTL,
+        max_completed=WEBUI_TASK_MAX_COMPLETED,
+        now=time.time(),
+    )
 
 
 def _task_cancel_requested(jobs, lock, job_id):
-    with lock:
-        return bool(jobs.get(job_id, {}).get("cancel_requested"))
+    return core_task_cancel_requested(jobs, lock, job_id)
 
 
 def _claim_task_execution(jobs, lock, job_id):
-    with lock:
-        job = jobs.get(job_id)
-        if not job:
-            return None, "missing"
-        if job.get("cancel_requested"):
-            return None, "cancelled"
-        now = time.time()
-        now_monotonic = time.monotonic()
-        deadline_monotonic = job.get("_deadline_monotonic")
-        if deadline_monotonic is None:
-            remaining_wall = max(0.0, float(job.get("deadline_at") or now) - now)
-            deadline_monotonic = now_monotonic + remaining_wall
-            job["_deadline_monotonic"] = deadline_monotonic
-        remaining_total = float(deadline_monotonic) - now_monotonic
-        if remaining_total <= 0:
-            return None, "deadline"
-        execution_seconds = min(WEBUI_TASK_EXECUTION_DEADLINE, remaining_total)
-        job.update(
-            status="running",
-            started_at=now,
-            execution_deadline_at=now + execution_seconds,
-        )
-        return now_monotonic + execution_seconds, None
+    return core_claim_task_execution(
+        jobs,
+        lock,
+        job_id,
+        execution_deadline=WEBUI_TASK_EXECUTION_DEADLINE,
+        wall_time=time.time,
+        monotonic_time=time.monotonic,
+    )
 
 
 def _sandbox_problem_lock(problem_dir):
@@ -720,23 +654,18 @@ def _sandbox_problem_lock(problem_dir):
 
 
 def _acquire_problem_lock(lock, jobs, jobs_lock, job_id, execution_deadline):
-    while time.monotonic() < execution_deadline:
-        if _task_cancel_requested(jobs, jobs_lock, job_id):
-            return "cancelled"
-        if lock.acquire(timeout=min(0.05, max(0.001, execution_deadline - time.monotonic()))):
-            return "acquired"
-    return "deadline"
+    return core_acquire_task_lock(
+        lock,
+        jobs,
+        jobs_lock,
+        job_id,
+        execution_deadline,
+        monotonic_time=time.monotonic,
+    )
 
 
 def _publish_task_progress(jobs, lock, job_id, result, log):
-    with lock:
-        job = jobs.get(job_id)
-        if job is not None:
-            job["logs"] = log.text
-            job["logs_truncated"] = log.truncated
-            # The worker keeps mutating its local result between polls. Publish
-            # an immutable snapshot so Flask never deep-copies a changing dict.
-            job["result"] = copy.deepcopy(result)
+    return core_publish_task_progress(jobs, lock, job_id, result, log)
 
 
 def _consume_jsonl_chunk(result, log, state, chunk, *, final=False):
