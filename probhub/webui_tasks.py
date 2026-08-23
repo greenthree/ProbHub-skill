@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 import time
 from collections import deque
@@ -12,6 +13,269 @@ from typing import BinaryIO, Callable
 DiscardCallback = Callable[[str], None]
 ErrorCallback = Callable[[BaseException], None]
 TaskCallback = Callable[[], None]
+ACTIVE_TASK_STATUSES = frozenset({"queued", "running", "cancelling"})
+
+
+def task_failure_result(result, code, message, *, status="failed"):
+    """Attach the stable terminal failure shape to a task result."""
+
+    if result is None:
+        result = {}
+    result["final"] = {
+        "ok": False,
+        "status": status,
+        "code": code,
+        "message": message,
+    }
+    return result
+
+
+def bounded_error_text(value, limit_bytes):
+    """Render an exception or diagnostic within one exact UTF-8 budget."""
+
+    log = BoundedUtf8Log(limit_bytes)
+    log.append(str(value))
+    return log.text
+
+
+def public_job_payload(job):
+    """Return an immutable public snapshot without adapter-private fields."""
+
+    payload = copy.deepcopy(job)
+    for key in list(payload):
+        if str(key).startswith("_"):
+            payload.pop(key, None)
+    return payload
+
+
+def prune_job_registry(
+    jobs,
+    *,
+    result_ttl,
+    max_completed,
+    now=None,
+):
+    """Drop expired results and cap completed records without touching active jobs."""
+
+    current = time.time() if now is None else float(now)
+    expired = [
+        job_id
+        for job_id, job in jobs.items()
+        if job.get("status") not in ACTIVE_TASK_STATUSES
+        and current
+        - float(job.get("finished_at") or job.get("created_at") or current)
+        >= float(result_ttl)
+    ]
+    for job_id in expired:
+        jobs.pop(job_id, None)
+    finished = sorted(
+        (
+            (job_id, job)
+            for job_id, job in jobs.items()
+            if job.get("status") not in ACTIVE_TASK_STATUSES
+        ),
+        key=lambda item: float(
+            item[1].get("finished_at") or item[1].get("created_at") or 0
+        ),
+    )
+    remove_count = max(0, len(finished) - max(0, int(max_completed)))
+    for job_id, _ in finished[:remove_count]:
+        jobs.pop(job_id, None)
+
+
+def task_cancel_requested(jobs, lock, job_id):
+    with lock:
+        return bool(jobs.get(job_id, {}).get("cancel_requested"))
+
+
+def claim_task_execution(
+    jobs,
+    lock,
+    job_id,
+    *,
+    execution_deadline,
+    wall_time=None,
+    monotonic_time=None,
+):
+    """Atomically move a queued task to running using a monotonic deadline."""
+
+    with lock:
+        job = jobs.get(job_id)
+        if not job:
+            return None, "missing"
+        if job.get("cancel_requested"):
+            return None, "cancelled"
+        now = time.time() if wall_time is None else float(wall_time())
+        now_monotonic = (
+            time.monotonic() if monotonic_time is None else float(monotonic_time())
+        )
+        deadline_monotonic = job.get("_deadline_monotonic")
+        if deadline_monotonic is None:
+            remaining_wall = max(0.0, float(job.get("deadline_at") or now) - now)
+            deadline_monotonic = now_monotonic + remaining_wall
+            job["_deadline_monotonic"] = deadline_monotonic
+        remaining_total = float(deadline_monotonic) - now_monotonic
+        if remaining_total <= 0:
+            return None, "deadline"
+        execution_seconds = min(float(execution_deadline), remaining_total)
+        job.update(
+            status="running",
+            started_at=now,
+            execution_deadline_at=now + execution_seconds,
+        )
+        return now_monotonic + execution_seconds, None
+
+
+def acquire_task_lock(
+    task_lock,
+    jobs,
+    jobs_lock,
+    job_id,
+    execution_deadline,
+    *,
+    monotonic_time=None,
+    poll_interval=0.05,
+):
+    """Acquire a per-problem lock while respecting cancellation and deadline."""
+
+    monotonic = monotonic_time or time.monotonic
+    while monotonic() < execution_deadline:
+        if task_cancel_requested(jobs, jobs_lock, job_id):
+            return "cancelled"
+        remaining = max(0.001, execution_deadline - monotonic())
+        if task_lock.acquire(timeout=min(float(poll_interval), remaining)):
+            return "acquired"
+    return "deadline"
+
+
+def publish_task_progress(jobs, lock, job_id, result, log):
+    """Publish an immutable progress snapshot for concurrent HTTP polling."""
+
+    with lock:
+        job = jobs.get(job_id)
+        if job is not None:
+            job["logs"] = log.text
+            job["logs_truncated"] = log.truncated
+            job["result"] = copy.deepcopy(result)
+
+
+def discard_queued_job(
+    jobs,
+    lock,
+    job_id,
+    reason,
+    *,
+    submission=False,
+    result_ttl,
+    max_completed,
+    now=None,
+):
+    """Publish the terminal result for queue timeout, cancellation, or shutdown."""
+
+    current = time.time() if now is None else float(now)
+    with lock:
+        job = jobs.get(job_id)
+        if not job or job.get("status") not in {"queued", "cancelling"}:
+            return
+        cancelled = reason in {"cancelled", "shutdown"} or bool(
+            job.get("cancel_requested")
+        )
+        code = "cancelled" if cancelled else "queue_timeout"
+        message = (
+            "task cancelled before execution"
+            if cancelled
+            else "task exceeded its queue deadline"
+        )
+        result = task_failure_result(job.get("result"), code, message, status=code)
+        if submission:
+            result.setdefault("submission", {}).update(
+                task_id=job_id,
+                filename=job.get("filename", ""),
+                verdict="CANCELLED" if cancelled else "FAIL",
+                workspace_cleaned=True,
+            )
+        job.update(
+            status="cancelled" if cancelled else "failed",
+            verdict=("CANCELLED" if cancelled else "FAIL")
+            if submission
+            else job.get("verdict"),
+            result=result,
+            logs=message,
+            finished_at=current,
+            failure_code=code,
+        )
+        prune_job_registry(
+            jobs,
+            result_ttl=result_ttl,
+            max_completed=max_completed,
+            now=current,
+        )
+
+
+def task_executor_error(
+    jobs,
+    lock,
+    job_id,
+    exc,
+    *,
+    submission=False,
+    workspace_root=None,
+    error_limit_bytes,
+    result_ttl,
+    max_completed,
+    now=None,
+):
+    """Publish a bounded worker failure, preserving submission cleanup truth."""
+
+    current = time.time() if now is None else float(now)
+    with lock:
+        job = jobs.get(job_id)
+        if not job or job.get("status") not in ACTIVE_TASK_STATUSES:
+            return
+        message = bounded_error_text(
+            f"WebUI task worker failed: {exc}", error_limit_bytes
+        )
+        failure_code = "task_worker_failed"
+        result = job.get("result") or {}
+        if submission:
+            if workspace_root is None:
+                raise ValueError("workspace_root is required for submission task errors")
+            task_root = workspace_root / ".probhub" / "submissions" / job_id
+            workspace_cleaned = not task_root.exists()
+            submission_result = result.setdefault("submission", {})
+            submission_result.update(
+                task_id=job_id,
+                filename=job.get("filename", ""),
+                verdict="FAIL",
+                workspace_cleaned=workspace_cleaned,
+            )
+            if not workspace_cleaned:
+                failure_code = "submission_cleanup_failed"
+                submission_result.update(
+                    cleanup_error="submission workspace still exists after worker failure",
+                    original_failure_code="task_worker_failed",
+                )
+        result = task_failure_result(
+            result,
+            failure_code,
+            "submission workspace cleanup failed"
+            if failure_code == "submission_cleanup_failed"
+            else message,
+        )
+        job.update(
+            status="failed",
+            verdict="FAIL" if submission else job.get("verdict"),
+            result=result,
+            logs=message,
+            finished_at=current,
+            failure_code=failure_code,
+        )
+        prune_job_registry(
+            jobs,
+            result_ttl=result_ttl,
+            max_completed=max_completed,
+            now=current,
+        )
 
 
 @dataclass(frozen=True)
