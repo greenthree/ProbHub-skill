@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -17,13 +18,484 @@ from .process_control import (
     spawn_managed,
     terminate_external_process_tree,
 )
-from .webui_judge_protocol import consume_jsonl_chunk, finalize_judge_protocol
+from .submissions import (
+    SubmissionPreparationCancelled,
+    SubmissionPreparationDeadlineExceeded,
+    temporary_submission_workspace,
+)
+from .webui_judge_protocol import (
+    consume_jsonl_chunk,
+    empty_sandbox_result,
+    finalize_judge_protocol,
+    submission_verdict,
+)
 
 
 DiscardCallback = Callable[[str], None]
 ErrorCallback = Callable[[BaseException], None]
 TaskCallback = Callable[[], None]
 ACTIVE_TASK_STATUSES = frozenset({"queued", "running", "cancelling"})
+_UNSET = object()
+
+
+def _publish_terminal_job(
+    jobs,
+    lock,
+    job_id,
+    *,
+    status,
+    result,
+    logs,
+    failure_code=None,
+    verdict=_UNSET,
+    returncode=_UNSET,
+    result_ttl,
+    max_completed,
+    now,
+):
+    """Publish one terminal task snapshot while retaining adapter-owned state."""
+
+    with lock:
+        job = jobs.get(job_id)
+        if job is None:
+            return
+        updates = {
+            "status": status,
+            "result": copy.deepcopy(result),
+            "logs": str(logs),
+            "finished_at": float(now),
+            "failure_code": failure_code,
+        }
+        if verdict is not _UNSET:
+            updates["verdict"] = verdict
+        if returncode is not _UNSET:
+            updates["returncode"] = returncode
+        job.update(updates)
+        prune_job_registry(
+            jobs,
+            result_ttl=result_ttl,
+            max_completed=max_completed,
+            now=now,
+        )
+
+
+def _task_start_failure(
+    jobs,
+    lock,
+    job_id,
+    result,
+    start_failure,
+    *,
+    submission,
+    result_ttl,
+    max_completed,
+    now,
+):
+    """Publish a task that could not leave the queue."""
+
+    if start_failure == "cancelled":
+        discard_queued_job(
+            jobs,
+            lock,
+            job_id,
+            "cancelled",
+            submission=submission,
+            result_ttl=result_ttl,
+            max_completed=max_completed,
+            now=now,
+        )
+        return
+    code = (
+        "task_deadline_exceeded"
+        if start_failure == "deadline"
+        else "task_worker_failed"
+    )
+    message = (
+        "task exceeded its total deadline"
+        if start_failure == "deadline"
+        else "task is unavailable"
+    )
+    result = task_failure_result(result, code, message)
+    verdict = "FAIL" if submission else None
+    if submission:
+        result.setdefault("submission", {}).update(verdict="FAIL")
+    _publish_terminal_job(
+        jobs,
+        lock,
+        job_id,
+        status="failed",
+        result=result,
+        logs=message,
+        failure_code=code,
+        verdict=verdict,
+        result_ttl=result_ttl,
+        max_completed=max_completed,
+        now=now,
+    )
+
+
+def run_sandbox_job(
+    job_id,
+    info,
+    *,
+    jobs,
+    lock,
+    processes,
+    cancel_files,
+    result_factory=empty_sandbox_result,
+    problem_lock_factory,
+    acquire_problem_lock,
+    process_spec_factory,
+    supervise=None,
+    execution_deadline,
+    result_ttl,
+    max_completed,
+    error_limit_bytes,
+    now_fn=None,
+    monotonic_fn=None,
+    temp_directory_factory=tempfile.TemporaryDirectory,
+):
+    """Execute and publish one WebUI sandbox task.
+
+    Flask owns route state and command-path adaptation; this Core function owns
+    queue-to-worker transition, per-problem serialization, supervisor wiring,
+    terminal status publication and failure precedence.
+    """
+
+    now_fn = now_fn or time.time
+    monotonic_fn = monotonic_fn or time.monotonic
+    if supervise is None:
+        supervise = supervise_judge_process
+    result = result_factory(info)
+    problem_lock = None
+    problem_lock_acquired = False
+    try:
+        deadline, start_failure = claim_task_execution(
+            jobs,
+            lock,
+            job_id,
+            execution_deadline=execution_deadline,
+            wall_time=now_fn,
+            monotonic_time=monotonic_fn,
+        )
+        if start_failure is not None:
+            _task_start_failure(
+                jobs,
+                lock,
+                job_id,
+                result,
+                start_failure,
+                submission=False,
+                result_ttl=result_ttl,
+                max_completed=max_completed,
+                now=now_fn(),
+            )
+            return
+        problem_lock = problem_lock_factory(info["dir"])
+        lock_status = acquire_problem_lock(
+            problem_lock,
+            jobs,
+            lock,
+            job_id,
+            deadline,
+        )
+        if lock_status != "acquired":
+            code = "cancelled" if lock_status == "cancelled" else "task_deadline_exceeded"
+            message = (
+                "task cancelled"
+                if lock_status == "cancelled"
+                else "task exceeded its total deadline"
+            )
+            result = task_failure_result(result, code, message, status=code)
+            _publish_terminal_job(
+                jobs,
+                lock,
+                job_id,
+                status="cancelled" if lock_status == "cancelled" else "failed",
+                result=result,
+                logs=message,
+                failure_code=code,
+                result_ttl=result_ttl,
+                max_completed=max_completed,
+                now=now_fn(),
+            )
+            return
+        problem_lock_acquired = True
+        with temp_directory_factory(prefix="probhub-webui-sandbox-control-") as temp:
+            cancel_file = Path(temp) / "cancel.requested"
+            command, env = process_spec_factory(cancel_file, info)
+            run = supervise(
+                job_id,
+                command,
+                env,
+                cancel_file,
+                result,
+                jobs=jobs,
+                lock=lock,
+                processes=processes,
+                cancel_files=cancel_files,
+                execution_deadline=deadline,
+            )
+        final = result.get("final") or {}
+        with lock:
+            job = jobs.get(job_id)
+            cancelled = bool(job and job.get("cancel_requested")) or run.get(
+                "stop_reason"
+            ) == "cancelled" or final.get("status") == "cancelled"
+        if cancelled:
+            task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
+            final = result["final"]
+        final_ok = bool(final.get("ok")) and run.get("returncode") == 0
+        _publish_terminal_job(
+            jobs,
+            lock,
+            job_id,
+            status="cancelled" if cancelled else ("success" if final_ok else "failed"),
+            result=result,
+            logs=run.get("logs", ""),
+            returncode=run.get("returncode"),
+            failure_code=None if final_ok else final.get("code"),
+            result_ttl=result_ttl,
+            max_completed=max_completed,
+            now=now_fn(),
+        )
+    except BaseException as exc:
+        cancelled = task_cancel_requested(jobs, lock, job_id)
+        code = "cancelled" if cancelled else "task_worker_failed"
+        message = "task cancelled" if cancelled else bounded_error_text(exc, error_limit_bytes)
+        result = task_failure_result(result, code, message, status=code)
+        _publish_terminal_job(
+            jobs,
+            lock,
+            job_id,
+            status="cancelled" if cancelled else "failed",
+            result=result,
+            logs=message,
+            failure_code=code,
+            result_ttl=result_ttl,
+            max_completed=max_completed,
+            now=now_fn(),
+        )
+    finally:
+        if problem_lock_acquired:
+            problem_lock.release()
+
+
+def run_submission_job(
+    job_id,
+    info,
+    filename,
+    source,
+    *,
+    workspace_root,
+    jobs,
+    lock,
+    processes,
+    cancel_files,
+    result_factory=empty_sandbox_result,
+    workspace_factory=temporary_submission_workspace,
+    process_spec_factory,
+    supervise=None,
+    verdict_factory=submission_verdict,
+    execution_deadline,
+    result_ttl,
+    max_completed,
+    error_limit_bytes,
+    now_fn=None,
+    monotonic_fn=None,
+):
+    """Prepare, run and publish one isolated uploaded submission task."""
+
+    now_fn = now_fn or time.time
+    monotonic_fn = monotonic_fn or time.monotonic
+    if supervise is None:
+        supervise = supervise_judge_process
+    workspace_root = Path(workspace_root).resolve()
+    result = result_factory(info)
+    result["submission"] = {
+        "task_id": job_id,
+        "filename": filename,
+        "workspace_cleaned": False,
+    }
+    task_root = workspace_root / ".probhub" / "submissions" / job_id
+
+    def publish_failure(code, message, *, status="failed", verdict="FAIL", logs=None):
+        result["submission"].update(
+            workspace_cleaned=not task_root.exists(),
+            verdict=verdict,
+        )
+        task_failure_result(result, code, message, status=status)
+        _publish_terminal_job(
+            jobs,
+            lock,
+            job_id,
+            status="cancelled" if status == "cancelled" else "failed",
+            verdict=verdict,
+            result=result,
+            logs=message if logs is None else logs,
+            failure_code=code,
+            result_ttl=result_ttl,
+            max_completed=max_completed,
+            now=now_fn(),
+        )
+
+    try:
+        deadline, start_failure = claim_task_execution(
+            jobs,
+            lock,
+            job_id,
+            execution_deadline=execution_deadline,
+            wall_time=now_fn,
+            monotonic_time=monotonic_fn,
+        )
+        if start_failure is not None:
+            if start_failure == "cancelled":
+                discard_queued_job(
+                    jobs,
+                    lock,
+                    job_id,
+                    "cancelled",
+                    submission=True,
+                    result_ttl=result_ttl,
+                    max_completed=max_completed,
+                    now=now_fn(),
+                )
+                return
+            code = "task_deadline_exceeded" if start_failure == "deadline" else "task_worker_failed"
+            message = "task exceeded its total deadline" if start_failure == "deadline" else "task is unavailable"
+            publish_failure(code, message)
+            return
+
+        prepared = None
+        try:
+            with workspace_factory(
+                workspace_root,
+                info["dir"],
+                job_id,
+                filename,
+                source,
+                cancel_requested=lambda: task_cancel_requested(jobs, lock, job_id),
+                deadline_monotonic=deadline,
+            ) as prepared:
+                cancel_file = prepared.root / "cancel.requested"
+                command, env = process_spec_factory(cancel_file, prepared)
+                run = supervise(
+                    job_id,
+                    command,
+                    env,
+                    cancel_file,
+                    result,
+                    jobs=jobs,
+                    lock=lock,
+                    processes=processes,
+                    cancel_files=cancel_files,
+                    execution_deadline=deadline,
+                )
+        finally:
+            if prepared is not None:
+                workspace_cleaned = bool(prepared.cleanup_succeeded)
+                result["submission"]["workspace_cleaned"] = workspace_cleaned
+                if prepared.cleanup_error:
+                    result["submission"]["cleanup_error"] = bounded_error_text(
+                        prepared.cleanup_error, error_limit_bytes
+                    )
+            else:
+                workspace_cleaned = not task_root.exists()
+                result["submission"]["workspace_cleaned"] = workspace_cleaned
+
+        with lock:
+            job = jobs.get(job_id)
+            cancel_requested = bool(job and job.get("cancel_requested"))
+        final = result.get("final") or {}
+        cancelled = cancel_requested or run.get("stop_reason") == "cancelled" or final.get("status") == "cancelled"
+        deadline_failed = run.get("stop_reason") == "deadline" or monotonic_fn() >= deadline
+        infrastructure_failed = run.get("stop_reason") in {
+            "deadline", "output_limit", "missing", "protocol_error", PROCESS_CLEANUP_FAILED,
+        }
+        if not workspace_cleaned:
+            original = "cancelled" if cancelled else (
+                "task_deadline_exceeded" if deadline_failed else final.get("code")
+            )
+            if original:
+                result["submission"]["original_failure_code"] = original
+            task_failure_result(result, "submission_cleanup_failed", "submission workspace cleanup failed")
+            verdict = "FAIL"
+            infrastructure_failed = True
+            cancelled = False
+        elif cancelled:
+            task_failure_result(result, "cancelled", "task cancelled", status="cancelled")
+            verdict = "CANCELLED"
+        elif deadline_failed:
+            task_failure_result(result, "task_deadline_exceeded", "task exceeded its total deadline")
+            verdict = "FAIL"
+            infrastructure_failed = True
+        else:
+            verdict = verdict_factory(result)
+        result["submission"]["verdict"] = verdict
+        _publish_terminal_job(
+            jobs,
+            lock,
+            job_id,
+            status="cancelled" if cancelled else ("failed" if infrastructure_failed else "completed"),
+            verdict=verdict,
+            result=result,
+            logs=run.get("logs", ""),
+            returncode=run.get("returncode"),
+            failure_code=(result.get("final") or {}).get("code") or None,
+            result_ttl=result_ttl,
+            max_completed=max_completed,
+            now=now_fn(),
+        )
+    except SubmissionPreparationCancelled as exc:
+        workspace_cleaned = not task_root.exists()
+        code = "cancelled" if workspace_cleaned else "submission_cleanup_failed"
+        if not workspace_cleaned:
+            result["submission"].update(
+                cleanup_error="submission workspace still exists after cancellation",
+                original_failure_code="cancelled",
+            )
+        publish_failure(
+            code,
+            "task cancelled" if workspace_cleaned else "submission workspace cleanup failed",
+            status="cancelled" if workspace_cleaned else "failed",
+            verdict="CANCELLED" if workspace_cleaned else "FAIL",
+            logs=bounded_error_text(exc, error_limit_bytes),
+        )
+    except SubmissionPreparationDeadlineExceeded as exc:
+        workspace_cleaned = not task_root.exists()
+        code = "task_deadline_exceeded" if workspace_cleaned else "submission_cleanup_failed"
+        if not workspace_cleaned:
+            result["submission"].update(
+                cleanup_error="submission workspace still exists after deadline",
+                original_failure_code="task_deadline_exceeded",
+            )
+        publish_failure(
+            code,
+            "task exceeded its total deadline" if workspace_cleaned else "submission workspace cleanup failed",
+            verdict="FAIL",
+            logs=bounded_error_text(exc, error_limit_bytes),
+        )
+    except BaseException as exc:
+        cancelled = task_cancel_requested(jobs, lock, job_id)
+        workspace_cleaned = not task_root.exists()
+        code = "cancelled" if cancelled else "task_worker_failed"
+        message = "task cancelled" if cancelled else bounded_error_text(exc, error_limit_bytes)
+        verdict = "CANCELLED" if cancelled else "FAIL"
+        if not workspace_cleaned:
+            result["submission"].update(
+                original_failure_code=code,
+                cleanup_error="submission workspace still exists after failure",
+            )
+            code = "submission_cleanup_failed"
+            message = "submission workspace cleanup failed"
+            verdict = "FAIL"
+            cancelled = False
+        publish_failure(
+            code,
+            message,
+            status="cancelled" if cancelled else "failed",
+            verdict=verdict,
+        )
 
 
 @dataclass(frozen=True)

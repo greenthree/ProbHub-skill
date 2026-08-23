@@ -6,7 +6,9 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 from probhub.webui_tasks import (
     BoundedPipeCapture,
@@ -19,6 +21,8 @@ from probhub.webui_tasks import (
     prune_job_registry,
     public_job_payload,
     publish_task_progress,
+    run_sandbox_job,
+    run_submission_job,
     supervise_judge_process,
     task_executor_error,
 )
@@ -138,6 +142,194 @@ class TaskLifecycleTests(unittest.TestCase):
             )
         finally:
             task_lock.release()
+
+
+class TaskOrchestrationTests(unittest.TestCase):
+    @staticmethod
+    def _queued_job(*, submission=False):
+        job = {
+            "status": "queued",
+            "cancel_requested": False,
+            "created_at": 10,
+            "deadline_at": 200,
+            "_deadline_monotonic": 200,
+        }
+        if submission:
+            job.update(filename="answer.cpp", verdict="PENDING")
+        return job
+
+    def test_sandbox_success_is_published_by_core_and_releases_problem_lock(self):
+        jobs = {"task": self._queued_job()}
+        registry_lock = threading.Lock()
+        problem_lock = threading.Lock()
+        seen = {}
+
+        def supervise(job_id, command, env, cancel_file, result, **kwargs):
+            seen.update(
+                job_id=job_id,
+                command=command,
+                cancel_file=cancel_file,
+                deadline=kwargs["execution_deadline"],
+            )
+            result["final"] = {
+                "ok": True,
+                "status": "passed",
+                "code": "all_expectations_met",
+                "message": "passed",
+            }
+            return {"returncode": 0, "stop_reason": None, "logs": "done"}
+
+        run_sandbox_job(
+            "task",
+            {"dir": "A", "limits": {}},
+            jobs=jobs,
+            lock=registry_lock,
+            processes={},
+            cancel_files={},
+            problem_lock_factory=lambda _path: problem_lock,
+            acquire_problem_lock=lambda lock, *_args: (
+                "acquired" if lock.acquire(blocking=False) else "deadline"
+            ),
+            process_spec_factory=lambda cancel_file, _info: (
+                ["judge", "A"],
+                {"PROBHUB_CANCEL_FILE": str(cancel_file)},
+            ),
+            supervise=supervise,
+            execution_deadline=30,
+            result_ttl=100,
+            max_completed=4,
+            error_limit_bytes=128,
+            now_fn=lambda: 10,
+            monotonic_fn=lambda: 100,
+        )
+
+        self.assertEqual(jobs["task"]["status"], "success")
+        self.assertEqual(jobs["task"]["returncode"], 0)
+        self.assertIsNone(jobs["task"]["failure_code"])
+        self.assertEqual(seen["command"], ["judge", "A"])
+        self.assertTrue(problem_lock.acquire(blocking=False))
+        problem_lock.release()
+
+    def test_submission_success_maps_verdict_and_publishes_cleanup_truth(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            jobs = {"task": self._queued_job(submission=True)}
+
+            @contextmanager
+            def workspace_factory(*_args, **_kwargs):
+                prepared = SimpleNamespace(
+                    root=root / ".probhub" / "submissions" / "task",
+                    problem_dir=root / "prepared",
+                    cleanup_succeeded=None,
+                    cleanup_error=None,
+                )
+                prepared.root.mkdir(parents=True)
+                try:
+                    yield prepared
+                finally:
+                    prepared.root.rmdir()
+                    prepared.cleanup_succeeded = True
+
+            def supervise(_job_id, _command, _env, _cancel_file, result, **_kwargs):
+                result["cases"] = [{"status": "AC"}]
+                result["final"] = {
+                    "ok": True,
+                    "status": "passed",
+                    "code": "all_expectations_met",
+                    "message": "passed",
+                }
+                return {"returncode": 0, "stop_reason": None, "logs": "accepted"}
+
+            run_submission_job(
+                "task",
+                {"dir": str(root / "A"), "limits": {}},
+                "answer.cpp",
+                b"int main(){}",
+                workspace_root=root,
+                jobs=jobs,
+                lock=threading.Lock(),
+                processes={},
+                cancel_files={},
+                workspace_factory=workspace_factory,
+                process_spec_factory=lambda _cancel_file, prepared: (
+                    ["judge", str(prepared.problem_dir)],
+                    {},
+                ),
+                supervise=supervise,
+                execution_deadline=30,
+                result_ttl=100,
+                max_completed=4,
+                error_limit_bytes=128,
+                now_fn=lambda: 10,
+                monotonic_fn=lambda: 100,
+            )
+
+            job = jobs["task"]
+            self.assertEqual(job["status"], "completed")
+            self.assertEqual(job["verdict"], "AC")
+            self.assertEqual(job["returncode"], 0)
+            self.assertTrue(job["result"]["submission"]["workspace_cleaned"])
+
+    def test_submission_cleanup_failure_overrides_cancelled_supervisor(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            task_root = root / ".probhub" / "submissions" / "task"
+            jobs = {"task": self._queued_job(submission=True)}
+
+            @contextmanager
+            def workspace_factory(*_args, **_kwargs):
+                prepared = SimpleNamespace(
+                    root=task_root,
+                    problem_dir=root / "prepared",
+                    cleanup_succeeded=None,
+                    cleanup_error=None,
+                )
+                task_root.mkdir(parents=True)
+                try:
+                    yield prepared
+                finally:
+                    prepared.cleanup_succeeded = False
+                    prepared.cleanup_error = "busy"
+
+            def supervise(_job_id, _command, _env, _cancel_file, result, **_kwargs):
+                result["final"] = {
+                    "ok": False,
+                    "status": "cancelled",
+                    "code": "cancelled",
+                    "message": "cancelled",
+                }
+                return {"returncode": 1, "stop_reason": "cancelled", "logs": "cancelled"}
+
+            run_submission_job(
+                "task",
+                {"dir": str(root / "A"), "limits": {}},
+                "answer.cpp",
+                b"int main(){}",
+                workspace_root=root,
+                jobs=jobs,
+                lock=threading.Lock(),
+                processes={},
+                cancel_files={},
+                workspace_factory=workspace_factory,
+                process_spec_factory=lambda _cancel_file, _prepared: (["judge"], {}),
+                supervise=supervise,
+                execution_deadline=30,
+                result_ttl=100,
+                max_completed=4,
+                error_limit_bytes=128,
+                now_fn=lambda: 10,
+                monotonic_fn=lambda: 100,
+            )
+
+            job = jobs["task"]
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["verdict"], "FAIL")
+            self.assertEqual(job["failure_code"], "submission_cleanup_failed")
+            self.assertEqual(
+                job["result"]["submission"]["original_failure_code"],
+                "cancelled",
+            )
+            self.assertFalse(job["result"]["submission"]["workspace_cleaned"])
 
 
 class BoundedTaskExecutorTests(unittest.TestCase):
