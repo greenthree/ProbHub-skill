@@ -685,9 +685,7 @@ def _worker_entry(task, cancel_event, connection):
         if (task.synthetic or {}).get("cleanup_failure"):
             Path(task.worker_root).mkdir(parents=True, exist_ok=True)
             raise OSError("synthetic cleanup failure")
-        shutil.rmtree(task.worker_root, ignore_errors=False)
-    except FileNotFoundError:
-        pass
+        _remove_worker_tree(task.worker_root)
     except OSError as exc:
         cleanup_error = exc
         result = _failure_result(task, "worker_cleanup_failed", exc)
@@ -734,12 +732,9 @@ def _cancelled_record(task, code, message, *, descendants_cleaned=True):
 
 def _parent_cleanup_worker(task):
     try:
-        shutil.rmtree(task.worker_root)
-    except FileNotFoundError:
-        pass
+        return _remove_worker_tree(task.worker_root)
     except OSError:
         return False
-    return not Path(task.worker_root).exists()
 
 
 def _synthetic_registered_pids(task):
@@ -781,6 +776,22 @@ def _capture_process_identities(pids):
     for pid in pids:
         identities.update(snapshot_process_tree_identities(pid))
     return identities
+
+
+def _remove_worker_tree(path):
+    """Remove a finished worker tree, allowing Windows handles to settle."""
+    attempts = 40 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except PermissionError:
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(0.05)
+    return not Path(path).exists()
 
 
 def _stop_worker(process, known_identities=(), *, allow_descendant_claim=True):
@@ -1452,6 +1463,16 @@ def _comparison_signature(report):
     ]
 
 
+def _classification_signature(report):
+    return [
+        {
+            "id": item.get("id"),
+            "classification": item.get("classification"),
+        }
+        for item in report.get("mutations", [])
+    ]
+
+
 def _resource_summary(mutations, resource_peak=None):
     case_times = []
     case_memories = []
@@ -1718,8 +1739,10 @@ def run_matrix(
         raise ValueError("jobs matrix values must be unique")
     runs = []
     reference = None
+    reference_diagnostics = None
     reference_identity = None
     equivalent = True
+    diagnostics_equivalent = True
     identities_equivalent = True
     for repetition in range(repetitions):
         offset = repetition % len(jobs_values)
@@ -1734,12 +1757,18 @@ def run_matrix(
                 cache_profile=cache_profile,
                 profile_name=profile_name,
             )
-            signature = _comparison_signature(report)
+            signature = _classification_signature(report)
+            diagnostic_signature = _comparison_signature(report)
             identity = _comparison_identity(report)
             if reference is None:
                 reference = signature
+                reference_diagnostics = diagnostic_signature
                 reference_identity = identity
             equivalent = equivalent and signature == reference
+            diagnostics_equivalent = (
+                diagnostics_equivalent
+                and diagnostic_signature == reference_diagnostics
+            )
             identities_equivalent = (
                 identities_equivalent and identity == reference_identity
             )
@@ -1770,8 +1799,11 @@ def run_matrix(
         "cache_profile": cache_profile,
         "results_equivalent": equivalent and identities_equivalent,
         "classifications_equivalent": equivalent,
+        "diagnostics_equivalent": diagnostics_equivalent,
         "identities_equivalent": identities_equivalent,
-        "reference_signature": reference or [],
+        "reference_signature": reference_diagnostics or [],
+        "reference_classification_signature": reference or [],
+        "reference_diagnostic_signature": reference_diagnostics or [],
         "reference_identity": reference_identity or {},
         "summary": by_jobs,
         "runs": runs,

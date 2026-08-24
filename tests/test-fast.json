@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "tests": [
+    "test_builder_fingerprint.py",
+    "test_core.py",
+    "test_dependency_audit.py",
+    "test_judge_cache.py",
+    "test_judge_planning.py",
+    "test_judge_results.py",
+    "test_mutation_config.py",
+    "test_problem_paths.py",
+    "test_report.py",
+    "test_source_diagnostics.py",
+    "test_transactions.py",
+    "test_workflow_security.py"
+  ]
+}

@@ -709,6 +709,7 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertEqual(calls, [1, 2, 4, 2, 4, 1, 4, 1, 2])
         self.assertTrue(report["results_equivalent"])
         self.assertTrue(report["classifications_equivalent"])
+        self.assertTrue(report["diagnostics_equivalent"])
         self.assertTrue(report["identities_equivalent"])
         self.assertEqual(report["summary"]["1"]["speedup_vs_jobs_1"], 1.0)
         self.assertFalse(report["summary"]["1"]["statistics_meaningful"])
@@ -719,7 +720,7 @@ class SpawnSchedulerTests(unittest.TestCase):
         self.assertIsNone(report["summary"]["1"]["p95_wall_seconds"])
         self.assertIsNone(report["summary"]["1"]["iqr_wall_seconds"])
 
-    def test_matrix_rejects_equal_hit_counts_with_different_cases(self):
+    def test_matrix_observes_different_hit_cases_without_failing_classification(self):
         cases = iter(("sample/a", "secret/a"))
 
         def fake_run(**kwargs):
@@ -757,7 +758,44 @@ class SpawnSchedulerTests(unittest.TestCase):
                 mutant_timeout=10,
             )
 
+        self.assertTrue(report["results_equivalent"])
+        self.assertTrue(report["classifications_equivalent"])
+        self.assertFalse(report["diagnostics_equivalent"])
+
+    def test_matrix_rejects_classification_drift(self):
+        classifications = iter(("killed", "survived"))
+
+        def fake_run(**kwargs):
+            return {
+                "wall_seconds": float(kwargs["jobs"]),
+                "mutants_per_second": 1.0,
+                "mutations": [{
+                    "id": "m1",
+                    "classification": next(classifications),
+                    "final_code": "expectation_not_met",
+                    "hit_cases": [],
+                    "hit_cases_total": 0,
+                }],
+                "hashes": {
+                    "source": "source",
+                    "data": "data",
+                    "plan": "plan",
+                    "baseline": "baseline",
+                },
+            }
+
+        with patch("benchmark_mutation.run_benchmark", side_effect=fake_run):
+            report = benchmark.run_matrix(
+                jobs_values=(1, 2),
+                repetitions=1,
+                timeout=10,
+                max_mutants=1,
+                operators=None,
+                mutant_timeout=10,
+            )
+
         self.assertFalse(report["results_equivalent"])
+        self.assertFalse(report["classifications_equivalent"])
 
     def test_matrix_rejects_identity_drift_between_runs(self):
         plans = iter(("plan-a", "plan-b"))
@@ -786,6 +824,7 @@ class SpawnSchedulerTests(unittest.TestCase):
             )
 
         self.assertTrue(report["classifications_equivalent"])
+        self.assertTrue(report["diagnostics_equivalent"])
         self.assertFalse(report["identities_equivalent"])
         self.assertFalse(report["results_equivalent"])
 
