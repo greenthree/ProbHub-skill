@@ -50,6 +50,20 @@ def _validate_test_names(names: list[object], *, label: str) -> list[str]:
     return result
 
 
+def _is_regular_test_file(path: Path) -> bool:
+    """Return whether path is a non-linked regular test source file."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def _repository_test_names() -> list[str]:
+    return sorted(
+        path.name
+        for path in TESTS_ROOT.glob("test_*.py")
+        if _is_regular_test_file(path)
+    )
+
+
 def load_shards(path: Path = MANIFEST_PATH) -> dict[str, list[str]]:
     """Load and fully validate the explicit shard manifest."""
 
@@ -72,7 +86,7 @@ def load_shards(path: Path = MANIFEST_PATH) -> dict[str, list[str]]:
     if len(set(assigned)) != len(assigned):
         duplicates = sorted({name for name in assigned if assigned.count(name) > 1})
         raise TestShardError(f"test files assigned to multiple shards: {duplicates}")
-    actual = sorted(path.name for path in TESTS_ROOT.glob("test_*.py"))
+    actual = _repository_test_names()
     listed = sorted(assigned)
     if listed != actual:
         missing = sorted(set(actual) - set(listed))
@@ -91,7 +105,7 @@ def load_fast_tests(path: Path = FAST_MANIFEST_PATH) -> list[str]:
 
     payload = _read_manifest(path)
     names = _validate_test_names(payload.get("tests"), label=path.name)
-    actual = {candidate.name for candidate in TESTS_ROOT.glob("test_*.py")}
+    actual = set(_repository_test_names())
     unknown = sorted(set(names) - actual)
     if unknown:
         raise TestShardError(f"fast test manifest contains unknown files: {unknown}")
@@ -102,7 +116,13 @@ def _suite_for(names: list[str]) -> unittest.TestSuite:
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for name in names:
-        suite.addTests(loader.discover(str(TESTS_ROOT), pattern=name))
+        path = TESTS_ROOT / name
+        if not _is_regular_test_file(path):
+            raise TestShardError(f"test source is not a regular file: {name}")
+        discovered = loader.discover(str(TESTS_ROOT), pattern=name)
+        if discovered.countTestCases() == 0:
+            raise TestShardError(f"test source contains no test cases: {name}")
+        suite.addTests(discovered)
     return suite
 
 
@@ -134,10 +154,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.validate:
             print(json.dumps({"ok": True, "shards": shards, "fast": load_fast_tests()}, ensure_ascii=False))
             return 0
+        return run_tests(names, verbosity=1 if args.quiet else 2)
     except TestShardError as exc:
         print(f"test shard manifest error: {exc}", file=sys.stderr)
         return 2
-    return run_tests(names, verbosity=1 if args.quiet else 2)
 
 
 if __name__ == "__main__":
