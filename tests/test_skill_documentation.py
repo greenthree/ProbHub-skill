@@ -17,6 +17,7 @@ class SkillDocumentationTests(unittest.TestCase):
                     continue
                 resolved = (document.parent / target).resolve()
                 with self.subTest(document=document.name, target=target):
+                    self.assertTrue(resolved.is_relative_to(ROOT), f"link escapes package root: {target}")
                     self.assertTrue(resolved.is_file(), f"missing local link: {target}")
 
     def test_skill_routes_low_frequency_details_to_references(self):

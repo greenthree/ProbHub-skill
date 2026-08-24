@@ -135,4 +135,4 @@ probhub verify-package L01.zip --require-pdf --problem L01
 - 不提交 `.exe`、缓存、stress 反例、上传任务目录、预览缓存、checkpoint/generation/evidence。
 - 不把本机 Windows 测量写成 Linux/DOMjudge 的性能承诺，也不把“已知错解全被击杀”写成“没有未知错解”。
 
-完成任务后，按 [AGENTS.md](../AGENTS.md) 的交接模板记录当前分支、提交、修改文件、测试、PR/CI、phtest 状态、未提交改动、风险和下一条命令。
+完成任务后，按当前工作区的协作规则记录分支、提交、修改文件、测试、PR/CI、真实工作区状态、未提交改动、风险和下一条命令。
