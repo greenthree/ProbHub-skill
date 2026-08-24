@@ -21,7 +21,7 @@
 
 ## 按任务读取
 
-- **第一次接管/创作题目**：`SKILL.md` → `workspace-schema-v1.md` → `verification-modes.md`；多组数据再读 `aggregate-limit-derivation.md`。
+- **第一次接管/创作题目**：`SKILL.md` → `problem-creation-walkthrough.md` → `workspace-schema-v1.md` → `verification-modes.md`；多组数据再读 `aggregate-limit-derivation.md`。
 - **运行或排查命令**：`SKILL.md` → `cli.md`；遇到进程/资源问题再读 `process-control.md`，遇到 stress 再读 `stress.md`。
 - **Custom/Interactor**：`SKILL.md` → `checker-interactor.md`；执行 Judge QA 前确认题目级 `judge.qa.schema_version: 1`。
 - **并行出题/封题**：`SKILL.md` → `generations.md`；正式构建前回到 `cli.md` 的 `build` 和 `verify-package` 章节。
@@ -41,6 +41,7 @@
 | `verification-modes.md` | 快速/普通/完整模式和交接记录 |
 | `mutation-testing.md` | std 语法变异、预算、evidence 和 survivor 处置 |
 | `generations.md` | checkpoint、seal、隔离完整试卷和并行出题 |
+| `problem-creation-walkthrough.md` | standard、custom、interactive 从设计到交付的可执行主线 |
 | `aggregate-limit-derivation.md` | `T_max`、复杂度、累计约束和校准方法 |
 | `data-groups-expectations.md` | 数据组、运行域、已知错解期望 |
 | `mistake-taxonomy.md` | 思路/复杂度/实现错解分类与数据强度 |
