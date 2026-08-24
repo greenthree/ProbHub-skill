@@ -50,6 +50,25 @@ def _fail(message: str, code: str = "invalid_preview_path"):
     raise ProbHubError(message, code=code)
 
 
+def _comparison_path(path: Path) -> str:
+    """Normalize Windows extended-length paths for containment checks."""
+
+    value = os.path.normpath(os.path.abspath(os.fspath(path)))
+    if os.name == "nt":
+        if value.startswith("\\\\?\\UNC\\"):
+            value = "\\\\" + value[8:]
+        elif value.startswith("\\\\?\\"):
+            value = value[4:]
+    return os.path.normcase(value)
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        return os.path.commonpath((_comparison_path(path), _comparison_path(root))) == _comparison_path(root)
+    except (TypeError, ValueError, OSError):
+        return False
+
+
 def _resolved_directory(path: Path, *, label: str) -> tuple[Path, Path]:
     """Return the caller spelling and resolved directory after link checks."""
 
@@ -100,7 +119,8 @@ def _validate_relative_path(root: Path, resolved_root: Path, value, *, label: st
             _fail(f"{label} must not traverse a link or reparse point", "invalid_workspace_path")
     try:
         resolved = candidate.resolve(strict=True)
-        resolved.relative_to(resolved_root)
+        if not _is_within(resolved, resolved_root):
+            raise ValueError
     except (OSError, RuntimeError, ValueError) as exc:
         _fail(f"{label} must resolve inside the workspace", "invalid_workspace_path")
         raise AssertionError from exc
@@ -191,7 +211,8 @@ def _check_preview_path(path: Path, root: Path, resolved_root: Path) -> Path:
             _fail("WebUI preview path must not traverse a link or reparse point")
     try:
         resolved = absolute.resolve(strict=False)
-        resolved.relative_to(resolved_root)
+        if not _is_within(resolved, resolved_root):
+            raise ValueError
     except (OSError, RuntimeError, ValueError) as exc:
         _fail("WebUI preview path resolves outside the preview root")
         raise AssertionError from exc

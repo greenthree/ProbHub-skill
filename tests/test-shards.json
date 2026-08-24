@@ -9,7 +9,6 @@
         "test_calibration.py",
         "test_core.py",
         "test_data_groups.py",
-        "test_datagen.py",
         "test_dependency_audit.py",
         "test_generations.py",
         "test_judge_cache.py",
@@ -29,8 +28,7 @@
         "test_transactions.py",
         "test_typeset_transaction.py",
         "test_typesetting_config.py",
-        "test_typst_pdf_integration.py",
-        "test_workspace_fixtures.py"
+        "test_typst_pdf_integration.py"
       ]
     },
     {
@@ -45,7 +43,8 @@
         "test_standard_output.py",
         "test_stress.py",
         "test_stress_against.py",
-        "test_submissions.py"
+        "test_submissions.py",
+        "test_workspace_fixtures.py"
       ]
     },
     {
@@ -67,6 +66,7 @@
       "id": "webui-and-delivery",
       "tests": [
         "test_npm_packages.py",
+        "test_datagen.py",
         "test_pdf_boundaries.py",
         "test_pdf_processing.py",
         "test_published_release.py",
