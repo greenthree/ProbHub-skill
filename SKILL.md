@@ -25,6 +25,7 @@ description: 当用户需要创作或维护算法竞赛题目、运行 ProbHub �
 | Checker、浮点题、Interactor、Judge QA | [checker-interactor](references/checker-interactor.md) | Validator、协议、fixture、`judge.qa.schema_version: 1`、QA evidence 和清理均通过 |
 | stress、反例重放、生成器或进程限制 | [stress](references/stress.md)、[process-control](references/process-control.md) | infrastructure、取消、超时和后代清理不能算作通过 |
 | 多组数据、`T_max`、总量约束 | [aggregate-limit-derivation](references/aggregate-limit-derivation.md) | 题面与 Validator 实际累计、校验同一上限 |
+| 算法设计、约束反推、题面表达与风险 | [problem-design-principles](references/problem-design-principles.md) | 设计建议、人工证明、Core 证据和目标平台校准分开记录 |
 | 数据组、错解期望、运行域 | [data-groups-expectations](references/data-groups-expectations.md)、[mistake-taxonomy](references/mistake-taxonomy.md) | 每个目标错解有定向数据，不能把“已知错解全死”说成不存在未知错解 |
 | 从想法到交付的分题型完整流程 | [problem-creation-walkthrough](references/problem-creation-walkthrough.md) | 命令、成功判据、失败重跑点和写入边界与当前 CLI 一致 |
 | checkpoint、seal、并行出题、完整试卷预览 | [generations](references/generations.md) | checkpoint/sealed revision 有效；单题可结束，不等待其他题 |
@@ -64,7 +65,7 @@ description: 当用户需要创作或维护算法竞赛题目、运行 ProbHub �
 
 只要任务不是纯只读审计，就沿着下面主线推进；每一步失败都先修复根因，再进入下一步：
 
-1. **设计**：明确目标算法、证明、复杂度、边界、典型错法和数据职责；多组数据先读取 [累计约束指南](references/aggregate-limit-derivation.md)。
+1. **设计**：先读取 [算法设计指导](references/problem-design-principles.md)，记录轻量 `design_intent`，明确目标算法、证明、复杂度、边界、典型错法和数据职责；多组数据再读取 [累计约束指南](references/aggregate-limit-derivation.md)。
 2. **骨架与规范源**：`probhub init` 后用 `probhub new <ID>`，只写 `workspace.yaml`、`probhub.yaml`、`problem.md`、`code/`、`data/` 和 Schema 允许的 Judge QA 素材。
 3. **静态检查**：`probhub lint <ID>`。题面有总量承诺时，查看 JSON 的 `constraint_reconciliation.aggregate_constraints`；`statement_only`、`aggregate_constraint_mismatch` 或 `dynamic` 都要人工处理，不能因为 lint 仍是 warning 就封题。
 4. **样例和数据**：`probhub sample-check <ID>`，再用 `probhub gen <ID> --apply` 生成可复现数据；每个 `.in` 必须有同名 `.ans`，Validator 必须真正限制题面声明的字段和累计量。

@@ -14,6 +14,7 @@
 | 进程树、资源控制和取消 | [`process-control.md`](process-control.md) | 失败表只保留处理结论 |
 | checkpoint、seal、generation 和并行语义 | [`generations.md`](generations.md) | CLI/Skill 只保留交接主线 |
 | 多组数据累计上限推导 | [`aggregate-limit-derivation.md`](aggregate-limit-derivation.md) | 只保留必须触发该文档的门禁 |
+| 算法设计、约束反推与题面表达 | [`problem-design-principles.md`](problem-design-principles.md) | 不把设计建议冒充证明或 Core 证据 |
 | 数据组、运行域和期望状态 | [`data-groups-expectations.md`](data-groups-expectations.md) | 不在 Skill 中重复制表格式 |
 | 错解枚举和数据强度 | [`mistake-taxonomy.md`](mistake-taxonomy.md) | 不把启发式写成硬约束 |
 | Agent 模式、独立上下文和 mutation 适用性 | [`verification-modes.md`](verification-modes.md)、[`mutation-testing.md`](mutation-testing.md) | Skill 只保留决策表 |
@@ -21,7 +22,7 @@
 
 ## 按任务读取
 
-- **第一次接管/创作题目**：`SKILL.md` → `problem-creation-walkthrough.md` → `workspace-schema-v1.md` → `verification-modes.md`；多组数据再读 `aggregate-limit-derivation.md`。
+- **第一次接管/创作题目**：`SKILL.md` → `problem-design-principles.md` → `problem-creation-walkthrough.md` → `workspace-schema-v1.md` → `verification-modes.md`；多组数据再读 `aggregate-limit-derivation.md`。
 - **运行或排查命令**：`SKILL.md` → `cli.md`；遇到进程/资源问题再读 `process-control.md`，遇到 stress 再读 `stress.md`。
 - **Custom/Interactor**：`SKILL.md` → `checker-interactor.md`；执行 Judge QA 前确认题目级 `judge.qa.schema_version: 1`。
 - **并行出题/封题**：`SKILL.md` → `generations.md`；正式构建前回到 `cli.md` 的 `build` 和 `verify-package` 章节。
