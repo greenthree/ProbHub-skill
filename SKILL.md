@@ -26,6 +26,7 @@ description: 当用户需要创作或维护算法竞赛题目、运行 ProbHub �
 | stress、反例重放、生成器或进程限制 | [stress](references/stress.md)、[process-control](references/process-control.md) | infrastructure、取消、超时和后代清理不能算作通过 |
 | 多组数据、`T_max`、总量约束 | [aggregate-limit-derivation](references/aggregate-limit-derivation.md) | 题面与 Validator 实际累计、校验同一上限 |
 | 数据组、错解期望、运行域 | [data-groups-expectations](references/data-groups-expectations.md)、[mistake-taxonomy](references/mistake-taxonomy.md) | 每个目标错解有定向数据，不能把“已知错解全死”说成不存在未知错解 |
+| 从想法到交付的分题型完整流程 | [problem-creation-walkthrough](references/problem-creation-walkthrough.md) | 命令、成功判据、失败重跑点和写入边界与当前 CLI 一致 |
 | checkpoint、seal、并行出题、完整试卷预览 | [generations](references/generations.md) | checkpoint/sealed revision 有效；单题可结束，不等待其他题 |
 | std mutation | [mutation-testing](references/mutation-testing.md) | 只作为补充证据，人工审查 survivor 和 exclusions |
 
@@ -69,7 +70,7 @@ description: 当用户需要创作或维护算法竞赛题目、运行 ProbHub �
 4. **样例和数据**：`probhub sample-check <ID>`，再用 `probhub gen <ID> --apply` 生成可复现数据；每个 `.in` 必须有同名 `.ans`，Validator 必须真正限制题面声明的字段和累计量。
 5. **Judge**：`probhub judge <ID> --no-cache`。成功必须有退出码 `0` 和最终事件 `all_expectations_met`；Checker/Interactor 题还要按路由执行 Judge QA。
 6. **差分与对抗验证**：按验证模式运行固定 seed stress、独立解题/证明、错解审查和适用的 mutation；反例先 replay，再修复或固化为 secret 数据。
-7. **并行交接**：`probhub checkpoint <ID>`，完成门禁后 `probhub seal <ID> --no-cache --seed 12345`。seal 生成隔离的完整试卷 generation，题目任务不等待其他题。
+7. **并行交接**：`probhub checkpoint <ID>`，完成门禁后 `probhub seal <ID> --no-cache --seed 12345`。seal 生成隔离的当前工作区 generation；若其他题尚未 checkpoint，会明确返回 `placeholder`/`complete=false`，题目任务不等待其他题。
 8. **正式交付**：所有题目有效 sealed 后只执行一次多题 `probhub build <ID...> --no-cache`，随后 `status`、`verify-package --require-pdf` 和 PDF QA。不要让各任务排队执行单题正式 build。
 
 常用入口：
