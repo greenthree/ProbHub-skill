@@ -10,6 +10,7 @@ from . import __version__
 from .build_lock import workspace_build_lock, workspace_file_lock
 from .builder_fingerprint import compute_builder_fingerprint
 from .building import build_workspace, package_workspace, typeset_workspace
+from .cli_output import render_human_result
 from .doctor import run_doctor
 from .errors import ProbHubError
 from .generations import (
@@ -73,6 +74,17 @@ def emit(data, json_output=False):
             print(data)
         else:
             print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def emit_result(data, args, renderer=None):
+    """Select presentation without changing the structured result."""
+    output_format = getattr(args, "output_format", None)
+    if renderer is not None and not args.json_output and output_format != "json":
+        print(renderer(data, args), end="")
+    elif output_format == "text" and not args.json_output:
+        print(render_human_result(data, getattr(args, "command", None)), end="")
+    else:
+        emit(data, args.json_output or output_format == "json")
 
 
 def workspace_context(args, allow_empty=False):
@@ -814,6 +826,12 @@ def build_parser():
     parser = argparse.ArgumentParser(prog="probhub", description="ProbHub deterministic problem build system")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--json", action="store_true", dest="json_output", help="emit JSON")
+    parser.add_argument(
+        "--format",
+        choices=("json", "text"),
+        dest="output_format",
+        help="output format; text is a bounded human-readable summary",
+    )
     parser.add_argument("--workspace", help="workspace path or a path inside it")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -928,23 +946,25 @@ def main(argv=None):
     try:
         result = args.handler(args)
         renderer = getattr(args, "renderer", None)
-        if renderer is not None and not args.json_output:
-            print(renderer(result, args), end="")
-        else:
-            emit(result, args.json_output)
+        emit_result(result, args, renderer)
         return 0 if result.get("ok", True) else 1
     except ProbHubError as exc:
         result = {"ok": False, "error": str(exc)}
         if exc.code:
             result["code"] = exc.code
-        emit(result, args.json_output)
+        result.update({
+            key: value
+            for key, value in exc.details.items()
+            if key not in {"ok", "error", "code"}
+        })
+        emit_result(result, args)
         return 1
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        emit(
+        emit_result(
             {"ok": False, "code": "internal_error", "error": str(exc)},
-            args.json_output,
+            args,
         )
         return 1
 

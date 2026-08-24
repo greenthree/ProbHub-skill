@@ -296,7 +296,16 @@ class CoreWorkspaceTests(unittest.TestCase):
             self.assertTrue(lint["ok"], lint)
             meta = build_meta(problem, config)
             self.assertEqual(meta["problem"]["samples"], [{"input": "1", "output": "1"}])
-            self.assertEqual(problem_status(problem, config)["state"], "never-built")
+            initial_status = problem_status(problem, config)
+            self.assertEqual(initial_status["state"], "never-built")
+            manifest_diagnostic = next(
+                item for item in initial_status["diagnostics"]
+                if item["code"] == "build_manifest_missing"
+            )
+            self.assertEqual(
+                manifest_diagnostic["remediation"]["action_code"],
+                "refresh_sealed_revision",
+            )
             (problem / "problem.pdf").write_bytes(b"%PDF-1.4\n")
             (root / "A.zip").write_bytes(b"zip")
             manifest = {

@@ -341,6 +341,16 @@ WEBUI_PUBLIC_ASSETS = frozenset(
 )
 HTML_TEMPLATE = WEBUI_TEMPLATE_PATH.read_text(encoding="utf-8")
 
+
+def _probhub_error_payload(error):
+    payload = {"success": False, "error": str(error), "code": error.code}
+    payload.update({
+        key: value
+        for key, value in (getattr(error, "details", {}) or {}).items()
+        if key not in {"success", "error", "code"}
+    })
+    return payload
+
 # ==========================================
 # 后端 API 路由
 # ==========================================
@@ -415,7 +425,7 @@ def save_data():
         return jsonify({"success": True, "problems": problems})
     except ProbHubError as e:
         status = 409 if e.code in {"source_conflict", "build_busy", "migration_required", "unknown_subtitle"} else 400
-        return jsonify({"success": False, "error": str(e), "code": e.code}), status
+        return jsonify(_probhub_error_payload(e)), status
     except Exception as e:
         print(f"[-] Save Data Error: {e}")
         return jsonify({"success": False, "error": str(e)})
@@ -528,7 +538,7 @@ def distribute_pdfs():
         })
     except ProbHubError as e:
         status = 409 if e.code in {"artifact_busy", "build_busy", "inputs_changed", "migration_required", "unknown_subtitle"} else 400
-        return jsonify({"success": False, "error": str(e), "code": e.code}), status
+        return jsonify(_probhub_error_payload(e)), status
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -1298,7 +1308,7 @@ def save_contest_config(subtitle):
         raise
     except ProbHubError as e:
         status = 409 if e.code in {"source_conflict", "build_busy", "migration_required", "unknown_subtitle"} else 400
-        return jsonify({"success": False, "error": str(e), "code": e.code}), status
+        return jsonify(_probhub_error_payload(e)), status
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 

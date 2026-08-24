@@ -42,6 +42,7 @@ from .linting import (
     lint_workspace,
 )
 from .package_tools import build_verified_package, generate_domjudge_config, validate_output_validator_source
+from .remediation import remediation_for_error
 from .typesetting import compile_collection, extract_problem_pdfs, is_temporary_typst_source
 from .transactions import (
     TRANSACTION_PHASE_COMMITTED,
@@ -223,10 +224,17 @@ def require_collection_sealed(plan):
         checkpoints[problem_id] = checkpoint
 
     if rejected:
+        first_problem_id = rejected[0].split(":", 1)[0]
         raise ProbHubError(
             "formal build requires current sealed revisions for every collection problem: "
             + "; ".join(rejected),
             code="sealed_revision_required",
+            details={
+                "remediation": remediation_for_error(
+                    "sealed_revision_required",
+                    problem_id=first_problem_id,
+                )
+            },
         )
     return checkpoints
 
@@ -285,9 +293,16 @@ def assert_collection_seals_unchanged(plan, checkpoints):
         elif (qa_error := _sealed_judge_qa_error(item, checkpoint)) is not None:
             rejected.append(f"{problem_id}: {qa_error}")
     if rejected:
+        first_problem_id = rejected[0].split(":", 1)[0]
         raise ProbHubError(
             "sealed build evidence changed during the run: " + "; ".join(rejected),
             code="sealed_revision_changed",
+            details={
+                "remediation": remediation_for_error(
+                    "sealed_revision_changed",
+                    problem_id=first_problem_id,
+                )
+            },
         )
 
 

@@ -23,6 +23,7 @@ from .judge_qa import (
 from .metadata import build_meta, normalize_display_name
 from .mutation_config import inspect_mutation_config
 from .problem_paths import ProblemPathError, resolve_problem_regular_file
+from .remediation import attach_remediations
 from .solutions import analyze_solution_verification
 from .source_diagnostics import diagnose_source, format_diagnostic
 from .statement import parse_statement
@@ -674,7 +675,15 @@ def lint_problem(root, workspace, entry):
         data_hash,
     )
     warnings.extend(calibration["warnings"])
-    diagnostics = [
+    for section in (calibration, constraint_reconciliation, judge_qa_evidence):
+        section["diagnostics"] = attach_remediations(
+            section.get("diagnostics"),
+            problem_id=entry["id"],
+            problem_dir=problem_dir,
+            config=config,
+        )
+    judge_qa["evidence"] = judge_qa_evidence
+    diagnostics = attach_remediations([
         *calibration["diagnostics"],
         *constraint_reconciliation["diagnostics"],
         *(solution_verification.get("diagnostics") or []),
@@ -682,7 +691,7 @@ def lint_problem(root, workspace, entry):
         *judge_qa_evidence["diagnostics"],
         *mutation_config["diagnostics"],
         *source_diagnostics,
-    ]
+    ], problem_id=entry["id"], problem_dir=problem_dir, config=config)
     return {
         "id": entry["id"],
         "ok": not errors,
@@ -810,6 +819,31 @@ def problem_status(
         current["data_hash"],
     )
     judge_qa["evidence"] = judge_qa_evidence
+
+    def status_diagnostics(state, stale_fields=None):
+        diagnostics = [
+            *calibration["diagnostics"],
+            *judge_qa_evidence["diagnostics"],
+        ]
+        if state == "never-built":
+            diagnostics.append({
+                "code": "build_manifest_invalid" if manifest_error else "build_manifest_missing",
+                "severity": "warning",
+                "message": manifest_error or "formal build artifacts have not been published",
+            })
+        elif state == "stale":
+            diagnostics.append({
+                "code": "build_manifest_stale",
+                "severity": "warning",
+                "message": "formal build artifacts are stale: " + ", ".join(stale_fields or []),
+                "stale_fields": list(stale_fields or []),
+            })
+        return attach_remediations(
+            diagnostics,
+            problem_id=config.get("id"),
+            problem_dir=problem_dir,
+            config=config,
+        )
     if root is not None and workspace is not None:
         current["workspace_hash"] = (
             compute_workspace_hash(root, workspace)
@@ -836,6 +870,19 @@ def problem_status(
             current["source_hash"],
             current["data_hash"],
         )
+        calibration["diagnostics"] = attach_remediations(
+            calibration["diagnostics"],
+            problem_id=config.get("id"),
+            problem_dir=problem_dir,
+            config=config,
+        )
+        judge_qa_evidence["diagnostics"] = attach_remediations(
+            judge_qa_evidence["diagnostics"],
+            problem_id=config.get("id"),
+            problem_dir=problem_dir,
+            config=config,
+        )
+        judge_qa["evidence"] = judge_qa_evidence
         return {
             "state": "never-built",
             **({"manifest_error": manifest_error} if manifest_error else {}),
@@ -854,10 +901,7 @@ def problem_status(
                 *calibration["warnings"],
                 *judge_qa_evidence["warnings"],
             ],
-            "diagnostics": [
-                *calibration["diagnostics"],
-                *judge_qa_evidence["diagnostics"],
-            ],
+            "diagnostics": status_diagnostics("never-built"),
             "calibration": calibration,
             "judge_qa": judge_qa,
         }
@@ -889,6 +933,19 @@ def problem_status(
         current["source_hash"],
         current["data_hash"],
     )
+    calibration["diagnostics"] = attach_remediations(
+        calibration["diagnostics"],
+        problem_id=config.get("id"),
+        problem_dir=problem_dir,
+        config=config,
+    )
+    judge_qa_evidence["diagnostics"] = attach_remediations(
+        judge_qa_evidence["diagnostics"],
+        problem_id=config.get("id"),
+        problem_dir=problem_dir,
+        config=config,
+    )
+    judge_qa["evidence"] = judge_qa_evidence
     return {
         "state": "stale" if stale else "current",
         "stale_fields": stale,
@@ -908,10 +965,7 @@ def problem_status(
             *calibration["warnings"],
             *judge_qa_evidence["warnings"],
         ],
-        "diagnostics": [
-            *calibration["diagnostics"],
-            *judge_qa_evidence["diagnostics"],
-        ],
+        "diagnostics": status_diagnostics("stale" if stale else "current", stale),
         "calibration": calibration,
         "judge_qa": judge_qa,
     }

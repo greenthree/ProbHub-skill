@@ -167,6 +167,8 @@ validation: custom interactive
 
 `output_validators/` 是生成物，不要手工修改。修改 Checker/Interactor 后重新执行 `probhub judge <ID>` 和 `probhub build <ID>`。
 
+<a id="judge-qa-active-testing"></a>
+
 ## 3.1 Judge QA 主动测试
 
 新题或修改过 Checker/Interactor 后，在 `probhub.yaml` 中增加 `judge.qa`，并把测试素材放在题目目录内：

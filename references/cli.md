@@ -51,7 +51,24 @@ probhub --workspace C:\path\to\workspace --json status L01
 
 - `--workspace <path>`：显式指定工作区根目录或其内部路径。
 - `--json`：输出单个 JSON 文档，适合脚本集成。
+- `--format text`：输出有界的人类可读摘要；必须写在子命令前。默认输出和 `--json` 保持 JSON 兼容。
 - `--version`：输出版本号并退出。
+
+人类摘要只展示命令状态、每题首要结果、最多三条诊断和下一条建议命令；完整诊断、路径和证据仍通过 `--json` 获取。摘要不使用 ANSI 颜色，因此在 PowerShell、Ubuntu、重定向文件和非 TTY 中语义一致。
+
+诊断可能包含可选的 `remediation` 附加对象。它只描述稳定、可确定的下一步，不会自动修改文件或替代正确性审查：
+
+```json
+{
+  "action_code": "refresh_calibration_evidence",
+  "command": ["probhub", "judge", "L01", "--no-cache"],
+  "description": "Rerun the complete local Judge calibration after reviewing the diagnostic.",
+  "documentation": "references/cli.md#9-judge",
+  "manual_review_required": false
+}
+```
+
+`command` 是当前 CLI 的参数数组，`target_path`（存在时）始终是题目目录内的相对路径。涉及题面/Validator 契约、Checker/Interactor fixture 或 Judge QA evidence 的提示会设置 `manual_review_required: true`；这类提示不能被脚本当作自动修复完成。未知 `action_code` 必须忽略，原有 `code`、严重级别和退出码不变。
 
 - 退出码 `0`：命令声明的验收条件满足。
 - 非 `0`：失败、状态过期、包验证失败或参数错误。
@@ -257,6 +274,8 @@ probhub sample-check [ID...] [--no-cache]
 
 交互题返回成功但 `applicable: false` / `sample_check_not_applicable`。命令可复用并更新忽略的编译/样例 case cache；`--no-cache` 强制重跑当前样例但保留无关缓存项。它不运行完整 Judge、不发布或覆盖 `judge-evidence-v2.json`，也不写规范源、PDF、ZIP、metadata 或 Manifest。完整 `judge`、`seal` 与 `build` 同样执行该样例不变量，因此错误 `.ans` 会在正式交付前被确定性拦截。
 
+<a id="judge"></a>
+
 ## 9. `judge`
 
 ```powershell
@@ -386,6 +405,8 @@ probhub judge L01 --no-cache
 
 缓存事件包含 `mode`、`compile_hits/misses`、`validator_hits/misses`、`case_hits/misses` 和 `probe_hits/misses`。进程树、OLE、校准探针或资源限制语义变化会提升缓存 Schema，防止旧结果绕过新策略。
 
+<a id="judge-qa"></a>
+
 ## 9.1 `judge-qa`
 
 ```powershell
@@ -509,6 +530,8 @@ probhub stress L01 --replay "L01/.probhub/stress/<artifact>/input.in"
 
 多题执行只有全部题目通过才返回 `0`。完整字段、Generator 示例、Checker 调用、反例文件和失败 reason 见 `references/stress.md`。
 
+<a id="checkpoint-seal-assemble"></a>
+
 ## 10.1 `checkpoint`、`seal` 与 `assemble`
 
 并行开发期间发布当前题目的不可变草稿：
@@ -585,6 +608,8 @@ probhub package L01 --allow-missing-pdf
 默认要求已有 `problem.pdf`。`--allow-missing-pdf` 只用于尚未排版的中间状态，不用于正式交付。
 
 `package` 不执行 judge 或 typeset，也不写 meta、PDF、Manifest；它只 lint/打包所选题目。正式流程优先使用 `build`。
+
+<a id="build"></a>
 
 ## 13. `build`
 

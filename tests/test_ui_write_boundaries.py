@@ -408,6 +408,27 @@ class UiWriteBoundaryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["code"], "artifact_busy")
 
+    def test_schema_distribute_preserves_core_remediation_details(self):
+        remediation = {
+            "action_code": "refresh_sealed_revision",
+            "command": ["probhub", "seal", "A", "--no-cache", "--seed", "12345"],
+            "description": "Refresh the sealed revision.",
+            "documentation": "references/cli.md#13-build",
+            "manual_review_required": False,
+        }
+        with mock.patch.object(
+            self.ui,
+            "build_workspace",
+            side_effect=self.ui.ProbHubError(
+                "sealed revision required",
+                code="sealed_revision_required",
+                details={"remediation": remediation},
+            ),
+        ):
+            response = self.client.post("/api/distribute", json={"subtitle": "Contest"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["remediation"], remediation)
+
     def test_schema_preview_reports_build_conflict_as_http_409(self):
         with mock.patch.object(
             self.ui,

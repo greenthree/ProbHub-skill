@@ -570,9 +570,15 @@ def save_editor_data(root, workspace, submitted):
         if lint["ok"]:
             return
         errors = list(lint.get("errors", []))
+        diagnostics = []
         for result in lint.get("problems", []):
             errors.extend(f"{result['id']}: {error}" for error in result.get("errors", []))
-        raise ProbHubError("saved sources failed lint: " + "; ".join(errors), code="invalid_editor_payload")
+            diagnostics.extend(result.get("diagnostics", []))
+        raise ProbHubError(
+            "saved sources failed lint: " + "; ".join(errors),
+            code="invalid_editor_payload",
+            details={"diagnostics": diagnostics[:16]},
+        )
 
     _commit_changes(changes, validate=validate_saved_sources)
     _, saved_workspace = load_workspace(root)
