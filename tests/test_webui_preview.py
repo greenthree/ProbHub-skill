@@ -19,6 +19,7 @@ from probhub.webui_preview import (
     validate_typst_directory,
     workspace_preview_key,
 )
+import probhub.webui_preview as webui_preview
 
 
 class WebUiPreviewPathTests(unittest.TestCase):
@@ -88,6 +89,14 @@ class WebUiPreviewPathTests(unittest.TestCase):
         self.assertEqual(pages.name, ".pages")
         self.assertEqual(pages.parent.parent, self.preview_root)
         self.assertNotIn("Contest", pages.parts)
+
+    def test_extended_length_prefix_is_normalized_for_containment(self):
+        if os.name != "nt":
+            self.skipTest("Windows path representation only")
+        nested = self.preview_root / "nested"
+        nested.mkdir()
+        extended = Path("\\\\?\\" + str(nested))
+        self.assertTrue(webui_preview._is_within(extended, self.preview_root))
 
 
 class WebUiPreviewArtifactTests(unittest.TestCase):
