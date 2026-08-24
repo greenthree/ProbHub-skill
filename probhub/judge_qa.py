@@ -8,6 +8,7 @@ from .judge_qa_evidence import (
     validate_judge_qa_evidence_document,
 )
 from .problem_paths import ProblemPathError, resolve_problem_regular_file
+from .remediation import attach_remediations
 
 
 JUDGE_QA_SCHEMA_VERSION = 1
@@ -728,7 +729,12 @@ def inspect_judge_qa(problem_dir, config, *, check=None):
             "files": len(resolved_files),
             "total_bytes": total_bytes,
         },
-        "diagnostics": diagnostics,
+        "diagnostics": attach_remediations(
+            diagnostics,
+            problem_id=config.get("id") if isinstance(config, dict) else None,
+            problem_dir=problem_dir,
+            config=config,
+        ),
     }
 
 

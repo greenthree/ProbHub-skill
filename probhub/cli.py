@@ -952,6 +952,11 @@ def main(argv=None):
         result = {"ok": False, "error": str(exc)}
         if exc.code:
             result["code"] = exc.code
+        result.update({
+            key: value
+            for key, value in exc.details.items()
+            if key not in {"ok", "error", "code"}
+        })
         emit_result(result, args)
         return 1
     except KeyboardInterrupt:

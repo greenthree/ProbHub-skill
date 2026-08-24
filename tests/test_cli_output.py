@@ -1,11 +1,18 @@
 import io
 import json
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from probhub.cli import build_parser, main
 from probhub.cli_output import render_human_result
+from probhub.remediation import (
+    attach_remediations,
+    remediation_for_diagnostic,
+    remediation_summary,
+)
 
 
 class CliOutputTests(unittest.TestCase):
@@ -96,6 +103,94 @@ class CliOutputTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("ProbHub: FAILED", output.getvalue())
         self.assertNotIn(json.dumps(payload), output.getvalue())
+
+    def test_known_diagnostic_gets_bounded_actionable_remediation(self):
+        diagnostic = {
+            "code": "calibration_evidence_missing",
+            "severity": "warning",
+            "message": "evidence is missing",
+        }
+        enriched = attach_remediations([diagnostic], problem_id="L01")
+        remediation = enriched[0]["remediation"]
+        self.assertEqual(remediation["action_code"], "refresh_calibration_evidence")
+        self.assertEqual(remediation["command"], ["probhub", "judge", "L01", "--no-cache"])
+        self.assertFalse(remediation["manual_review_required"])
+        self.assertIn("probhub judge L01 --no-cache", remediation_summary(remediation))
+        self.assertEqual(build_parser().parse_args(remediation["command"][1:]).command, "judge")
+
+    def test_unknown_remediation_is_ignored_and_paths_are_not_escaped(self):
+        self.assertIsNone(remediation_summary({"action_code": "write_arbitrary_file"}))
+        diagnostic = {
+            "code": "constraint_mismatch",
+            "severity": "warning",
+            "message": "mismatch",
+        }
+        remediation = remediation_for_diagnostic(
+            diagnostic,
+            problem_id="L01",
+            problem_dir="C:/workspace/L01",
+            config={"judge": {"validator": "../../outside.cpp"}},
+        )
+        self.assertNotIn("target_path", remediation)
+        self.assertTrue(remediation["manual_review_required"])
+
+    def test_constraint_remediation_uses_problem_local_validator(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            validator = problem / "code/validator.cpp"
+            validator.parent.mkdir()
+            validator.write_text("int main() {}\n", encoding="utf-8")
+            remediation = remediation_for_diagnostic(
+                {"code": "constraint_statement_only"},
+                problem_id="L01",
+                problem_dir=problem,
+                config={"judge": {"validator": "code/validator.cpp"}},
+            )
+        self.assertEqual(remediation["action_code"], "review_constraint_contract")
+        self.assertEqual(remediation["target_path"], "code/validator.cpp")
+        self.assertTrue(remediation["manual_review_required"])
+        self.assertEqual(build_parser().parse_args(remediation["command"][1:]).command, "lint")
+
+    def test_judge_qa_fixture_remediation_requires_manual_review(self):
+        with tempfile.TemporaryDirectory() as temp:
+            problem = Path(temp)
+            (problem / "probhub.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+            remediation = remediation_for_diagnostic(
+                {"code": "judge_qa_fixture_path_outside"},
+                problem_id="L01",
+                problem_dir=problem,
+            )
+        self.assertEqual(remediation["action_code"], "repair_judge_qa_fixtures")
+        self.assertEqual(remediation["target_path"], "probhub.yaml")
+        self.assertTrue(remediation["manual_review_required"])
+        self.assertEqual(build_parser().parse_args(remediation["command"][1:]).command, "lint")
+
+    def test_judge_qa_evidence_remediation_uses_no_cache_command(self):
+        remediation = remediation_for_diagnostic(
+            {"code": "judge_qa_evidence_stale"},
+            problem_id="L01",
+        )
+        self.assertEqual(remediation["action_code"], "refresh_judge_qa_evidence")
+        self.assertEqual(
+            remediation["command"],
+            ["probhub", "judge-qa", "L01", "--no-cache"],
+        )
+        self.assertTrue(remediation["manual_review_required"])
+        self.assertEqual(
+            build_parser().parse_args(remediation["command"][1:]).command,
+            "judge-qa",
+        )
+
+    def test_manifest_remediation_refreshes_seal_without_targeting_generated_file(self):
+        remediation = remediation_for_diagnostic(
+            {"code": "build_manifest_stale"},
+            problem_id="L01",
+        )
+        self.assertEqual(remediation["action_code"], "refresh_sealed_revision")
+        self.assertNotIn("target_path", remediation)
+        args = build_parser().parse_args(remediation["command"][1:])
+        self.assertEqual(args.command, "seal")
+        self.assertTrue(args.no_cache)
 
 
 if __name__ == "__main__":

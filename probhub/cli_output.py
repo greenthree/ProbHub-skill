@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .remediation import remediation_summary
+
 
 _MAX_PROBLEMS = 5
 _MAX_DIAGNOSTICS = 3
@@ -78,7 +80,9 @@ def _diagnostic_text(item):
             location = f"{location or '<source>'}:{diagnostic['line']}"
         suffix = f" [{location}]" if location else ""
         prefix = f"{code}: " if code else ""
-        structured.append((label, f"{prefix}{message}{suffix}"))
+        remediation = remediation_summary(diagnostic.get("remediation"))
+        remedy_suffix = f" Fix: {remediation}" if remediation else ""
+        structured.append((label, f"{prefix}{message}{suffix}{remedy_suffix}"))
     def normalize(message):
         message = str(message)
         if message.startswith("[") and "] " in message:
@@ -129,6 +133,9 @@ def render_human_result(result, command=None):
         lines.append(f"Code: {result['code']}")
     if result.get("error"):
         lines.append(f"Error: {result['error']}")
+    remediation = remediation_summary(result.get("remediation"))
+    if remediation:
+        lines.append(f"Fix: {remediation}")
 
     for label, message in _diagnostic_text(result)[:_MAX_DIAGNOSTICS]:
         lines.append(f"{label}: {message}")

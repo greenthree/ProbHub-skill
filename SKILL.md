@@ -72,6 +72,8 @@ probhub --format text lint L01
 probhub --json lint L01
 ```
 
+诊断若带有 `remediation`，只把它当作稳定的下一步提示：执行前仍需检查 `manual_review_required`、题面/代码语义和命令结果。它不会自动写入规范源，也不能证明题目正确；未知动作码安全忽略。
+
 摘要只负责展示 Core 已生成的状态、首要诊断和建议命令，不替代 JSON 证据、退出码或最终事件。
 
 ## 3.2 单题、多题和全工作区
