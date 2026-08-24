@@ -151,6 +151,8 @@ WebUI 支持题面、样例、限制、封面和题序编辑，以及实时预�
 
 Agent 和 WebUI 都调用同一套 Core。常用命令：
 
+命令默认输出结构化 JSON；需要快速人工查看时，在子命令前使用 `--format text`。脚本集成继续使用 `--json`，两者不会改变命令的退出码或验证深度。
+
 | 命令 | 用途 |
 | --- | --- |
 | <code>probhub doctor</code> | 检查 Python、Node.js、npm、g++、Typst、字体和依赖 |

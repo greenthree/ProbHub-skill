@@ -65,6 +65,15 @@ python <Skill目录>/scripts/probhub.py --workspace <工作区> <command>
 probhub --workspace <工作区路径> build L01
 ```
 
+需要给出终端用户摘要时，在子命令前加 `--format text`；默认输出和 `--json` 仍是结构化 JSON，适合脚本读取：
+
+```powershell
+probhub --format text lint L01
+probhub --json lint L01
+```
+
+摘要只负责展示 Core 已生成的状态、首要诊断和建议命令，不替代 JSON 证据、退出码或最终事件。
+
 ## 3.2 单题、多题和全工作区
 
 ```powershell

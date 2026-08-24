@@ -51,7 +51,10 @@ probhub --workspace C:\path\to\workspace --json status L01
 
 - `--workspace <path>`：显式指定工作区根目录或其内部路径。
 - `--json`：输出单个 JSON 文档，适合脚本集成。
+- `--format text`：输出有界的人类可读摘要；必须写在子命令前。默认输出和 `--json` 保持 JSON 兼容。
 - `--version`：输出版本号并退出。
+
+人类摘要只展示命令状态、每题首要结果、最多三条诊断和下一条建议命令；完整诊断、路径和证据仍通过 `--json` 获取。摘要不使用 ANSI 颜色，因此在 PowerShell、Ubuntu、重定向文件和非 TTY 中语义一致。
 
 - 退出码 `0`：命令声明的验收条件满足。
 - 非 `0`：失败、状态过期、包验证失败或参数错误。
