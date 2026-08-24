@@ -310,11 +310,12 @@ ProbHub 适用于本地、单用户、可信的出题环境，WebUI 也只用于
 
 ~~~bash
 npm ci
+npm run check:fast
 npm run check
 npm run pack:check
 ~~~
 
-check 会检查 Python、Node.js、WebUI 静态资源并运行测试；pack:check 会验证两个 npm 包的内容。可复用的 standard、custom、float、interactive 和 stress 工作区位于 tests/fixtures/。
+`check:fast` 使用显式的快速测试清单，适合修改后的即时反馈；`check` 才是提交、发布和 CI 的完整门禁。测试分片只在源码仓库中使用，发布的 npm 包不包含测试文件。`pack:check` 会验证两个 npm 包的内容。可复用的 standard、custom、float、interactive 和 stress 工作区位于 tests/fixtures/。
 
 贡献代码或报告问题，请使用 [GitHub Issues](https://github.com/greenthree/ProbHub-skill/issues)。版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 

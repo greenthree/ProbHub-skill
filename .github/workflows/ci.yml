@@ -24,6 +24,29 @@ permissions:
   contents: read
 
 jobs:
+  quality-static:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Assert g++ toolchain is available
+        run: g++ --version
+      - run: "python -m pip install --require-hashes --only-binary=:all: -r requirements.lock"
+      - run: npm ci
+      - name: Run platform-independent checks once
+        run: npm run check:static
+
   quality:
     if: github.event_name != 'schedule'
     strategy:
@@ -31,7 +54,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.10", "3.11", "3.12"]
+        shard: [core, execution, mutation-and-qa, webui-and-delivery]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v7
@@ -41,13 +66,14 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.lock
       - uses: actions/setup-node@v7
+        if: matrix.shard == 'webui-and-delivery'
         with:
           node-version: "20"
           cache: npm
       - name: Assert g++ toolchain is available
         run: g++ --version
       - name: Install pinned Typst (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.shard == 'core' && runner.os == 'Linux'
         run: |
           curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
             -o "$RUNNER_TEMP/typst.tar.xz" \
@@ -56,7 +82,7 @@ jobs:
           tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: Install pinned Typst (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.shard == 'core' && runner.os == 'Windows'
         shell: pwsh
         run: |
           $ProgressPreference = 'SilentlyContinue'
@@ -78,6 +104,7 @@ jobs:
           Expand-Archive -Path $archive -DestinationPath "$env:RUNNER_TEMP"
           Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\typst-x86_64-pc-windows-msvc"
       - name: Verify bundled CJK font and Typst smoke compile
+        if: matrix.shard == 'core'
         shell: pwsh
         run: |
           $expected = "typst $($env:TYPST_VERSION.Substring(1))"
@@ -102,12 +129,17 @@ jobs:
             throw 'Typst smoke compilation failed'
           }
       - run: "python -m pip install --require-hashes --only-binary=:all: -r requirements.lock"
-      - run: npm ci
+      - name: Install Node dependencies for delivery tests
+        if: matrix.shard == 'webui-and-delivery'
+        run: npm ci
+      - name: Rebuild WebUI assets for delivery tests
+        if: matrix.shard == 'webui-and-delivery'
+        run: npm run webui:build
       - name: Record managed short-process startup benchmark
+        if: matrix.shard == 'execution'
         run: python scripts/benchmark_process_startup.py --rounds 40 --warmup 5
-      - run: npm run check
-      - name: Verify both npm package contents
-        run: npm run pack:check
+      - name: Run explicit test shard
+        run: python -m probhub.test_shards --shard "${{ matrix.shard }}"
 
   clean-install-e2e:
     if: github.event_name != 'schedule'

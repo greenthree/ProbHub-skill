@@ -312,11 +312,12 @@ ProbHub is for a local, single-user, trusted setting, and the WebUI is intended 
 
 ~~~bash
 npm ci
+npm run check:fast
 npm run check
 npm run pack:check
 ~~~
 
-check validates Python, Node.js, WebUI assets, and the test suite. pack:check validates both npm package inventories. Reusable standard, custom, float, interactive, and stress workspaces are under tests/fixtures/.
+`check:fast` runs an explicit small test set for immediate feedback after source changes; `check` remains the complete submission, release, and CI gate. Test shards are only used in the source repository; published npm packages do not contain test files. `pack:check` validates both npm package inventories. Reusable standard, custom, float, interactive, and stress workspaces are under tests/fixtures/.
 
 Please use [GitHub Issues](https://github.com/greenthree/ProbHub-skill/issues) for bugs and suggestions. See [CHANGELOG.md](CHANGELOG.md) for release history.
 

@@ -99,6 +99,51 @@ class WorkflowSecurityTests(unittest.TestCase):
             _step_runs(ci["jobs"]["python-dependency-audit"]),
         )
 
+    def test_ci_shards_keep_full_platform_matrix_and_parallel_static_gate(self):
+        ci = _load_workflow("ci.yml")
+        self.assertIn("quality-static", ci["jobs"])
+        quality = ci["jobs"]["quality"]
+        matrix = quality["strategy"]["matrix"]
+        self.assertEqual(matrix["os"], ["ubuntu-latest", "windows-latest"])
+        self.assertEqual(matrix["python"], ["3.10", "3.11", "3.12"])
+        self.assertEqual(
+            matrix["shard"],
+            ["core", "execution", "mutation-and-qa", "webui-and-delivery"],
+        )
+        self.assertNotIn("needs", quality)
+        node_steps = [
+            step for step in quality["steps"]
+            if step.get("uses") == "actions/setup-node@v7"
+        ]
+        self.assertEqual(len(node_steps), 1)
+        self.assertEqual(
+            node_steps[0].get("if"),
+            "matrix.shard == 'webui-and-delivery'",
+        )
+        npm_steps = [
+            step for step in quality["steps"]
+            if step.get("run") == "npm ci"
+        ]
+        self.assertEqual(len(npm_steps), 1)
+        self.assertEqual(
+            npm_steps[0].get("if"),
+            "matrix.shard == 'webui-and-delivery'",
+        )
+        self.assertIn(
+            'python -m probhub.test_shards --shard "${{ matrix.shard }}"',
+            _step_runs(quality),
+        )
+        benchmark_steps = [
+            step for step in quality["steps"]
+            if step.get("run")
+            == "python scripts/benchmark_process_startup.py --rounds 40 --warmup 5"
+        ]
+        self.assertEqual(len(benchmark_steps), 1)
+        self.assertEqual(
+            benchmark_steps[0].get("if"),
+            "matrix.shard == 'execution'",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

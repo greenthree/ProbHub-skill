@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "shards": [
+    {
+      "id": "core",
+      "tests": [
+        "test_batch_build.py",
+        "test_builder_fingerprint.py",
+        "test_calibration.py",
+        "test_core.py",
+        "test_data_groups.py",
+        "test_datagen.py",
+        "test_dependency_audit.py",
+        "test_generations.py",
+        "test_judge_cache.py",
+        "test_judge_planning.py",
+        "test_judge_results.py",
+        "test_judge_runtime.py",
+        "test_package_tools.py",
+        "test_problem_paths.py",
+        "test_python_dependency_lock.py",
+        "test_report.py",
+        "test_sample_check.py",
+        "test_scaffold.py",
+        "test_solution_verification.py",
+        "test_source_diagnostics.py",
+        "test_statement_consistency.py",
+        "test_test_shards.py",
+        "test_transactions.py",
+        "test_typeset_transaction.py",
+        "test_typesetting_config.py",
+        "test_typst_pdf_integration.py",
+        "test_workspace_fixtures.py"
+      ]
+    },
+    {
+      "id": "execution",
+      "tests": [
+        "test_judge_execution.py",
+        "test_judging.py",
+        "test_local_judge_layout.py",
+        "test_local_judge_protocol.py",
+        "test_process_control.py",
+        "test_special_judges.py",
+        "test_standard_output.py",
+        "test_stress.py",
+        "test_stress_against.py",
+        "test_submissions.py"
+      ]
+    },
+    {
+      "id": "mutation-and-qa",
+      "tests": [
+        "test_judge_qa_cli.py",
+        "test_judge_qa_evidence.py",
+        "test_judge_qa_execution.py",
+        "test_judge_qa_schema.py",
+        "test_mutation.py",
+        "test_mutation_benchmark.py",
+        "test_mutation_config.py",
+        "test_mutation_mixed_fixture.py",
+        "test_mutation_syntax.py",
+        "test_sandbox_cache.py"
+      ]
+    },
+    {
+      "id": "webui-and-delivery",
+      "tests": [
+        "test_npm_packages.py",
+        "test_pdf_boundaries.py",
+        "test_pdf_processing.py",
+        "test_published_release.py",
+        "test_skill_install.py",
+        "test_ui_security.py",
+        "test_ui_theme.py",
+        "test_ui_write_boundaries.py",
+        "test_webui_judge_protocol.py",
+        "test_webui_preview.py",
+        "test_webui_runtime.py",
+        "test_webui_server.py",
+        "test_webui_tasks.py",
+        "test_webui_workspace.py",
+        "test_workflow_security.py"
+      ]
+    }
+  ]
+}
