@@ -1,0 +1,6 @@
+# Host-plane Bundle patch. The tool registry remains scoped by the active
+# Harness composition; this row only loads the adapter and its two read-only
+# tools. Long-running ProbHub commands are intentionally not part of P0.
+- insert:
+    - id: dsh-probhub
+      name: dsh-probhub
