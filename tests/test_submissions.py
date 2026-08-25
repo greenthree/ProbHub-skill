@@ -29,7 +29,20 @@ from probhub.submissions import (
     temporary_submission_workspace,
     validate_cpp_upload,
 )
-from probhub.webui_tasks import BoundedTaskExecutor
+from probhub.webui_judge_protocol import (
+    consume_jsonl_chunk,
+    empty_sandbox_result,
+    submission_verdict,
+)
+from probhub.webui_tasks import (
+    BoundedTaskExecutor,
+    BoundedUtf8Log,
+    claim_task_execution,
+    prune_job_registry,
+    publish_task_progress,
+    task_cancel_requested,
+    task_executor_error,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -279,14 +292,14 @@ class SubmissionUiApiTests(unittest.TestCase):
             self.assertFalse(response.get_json()["success"])
 
     def test_verdict_distinguishes_compile_error_and_runtime_results(self):
-        self.assertEqual(self.ui._submission_verdict({"compiles": [{"kind": "std", "ok": False}]}), "CE")
-        self.assertEqual(self.ui._submission_verdict({"compiles": [{"kind": "std", "ok": True}], "cases": [{"status": "AC"}]}), "AC")
-        self.assertEqual(self.ui._submission_verdict({"compiles": [{"kind": "std", "ok": True}], "cases": [{"status": "OLE"}]}), "OLE")
+        self.assertEqual(submission_verdict({"compiles": [{"kind": "std", "ok": False}]}), "CE")
+        self.assertEqual(submission_verdict({"compiles": [{"kind": "std", "ok": True}], "cases": [{"status": "AC"}]}), "AC")
+        self.assertEqual(submission_verdict({"compiles": [{"kind": "std", "ok": True}], "cases": [{"status": "OLE"}]}), "OLE")
 
     def test_jsonl_details_and_visible_log_have_hard_limits(self):
         info = self._problem_info(Path("A"))
-        result = self.ui._empty_sandbox_result(info)
-        log = self.ui.BoundedUtf8Log(96)
+        result = empty_sandbox_result(info)
+        log = BoundedUtf8Log(96)
         state = {"buffer": b"", "event_bytes": 0}
         events = b"".join(
             json.dumps({
@@ -299,8 +312,14 @@ class SubmissionUiApiTests(unittest.TestCase):
             }).encode("utf-8") + b"\n"
             for index in range(20)
         )
-        with mock.patch.object(self.ui, "WEBUI_TASK_EVENT_BYTES", 256):
-            self.ui._consume_jsonl_chunk(result, log, state, events, final=True)
+        consume_jsonl_chunk(
+            result,
+            log,
+            state,
+            events,
+            final=True,
+            event_limit_bytes=256,
+        )
         self.assertTrue(result["details_truncated"])
         self.assertLess(len(result["cases"]), 20)
         self.assertTrue(log.truncated)
@@ -308,24 +327,30 @@ class SubmissionUiApiTests(unittest.TestCase):
 
     def test_oversized_final_event_is_replaced_by_bounded_failure(self):
         info = self._problem_info(Path("A"))
-        result = self.ui._empty_sandbox_result(info)
-        log = self.ui.BoundedUtf8Log(256)
+        result = empty_sandbox_result(info)
+        log = BoundedUtf8Log(256)
         state = {"buffer": b"", "event_bytes": 0}
         event = json.dumps({
             "type": "final",
             "ok": True,
             "message": "x" * 1024,
         }).encode("utf-8") + b"\n"
-        with mock.patch.object(self.ui, "WEBUI_TASK_FINAL_EVENT_BYTES", 128):
-            self.ui._consume_jsonl_chunk(result, log, state, event, final=True)
+        consume_jsonl_chunk(
+            result,
+            log,
+            state,
+            event,
+            final=True,
+            final_event_limit_bytes=128,
+        )
         self.assertTrue(result["details_truncated"])
         self.assertEqual(result["final"]["code"], "task_event_limit")
         self.assertLessEqual(log.size_bytes, 256)
 
     def test_protocol_error_is_sticky_across_later_final_events(self):
         info = self._problem_info(Path("A"))
-        result = self.ui._empty_sandbox_result(info)
-        log = self.ui.BoundedUtf8Log(512)
+        result = empty_sandbox_result(info)
+        log = BoundedUtf8Log(512)
         state = {"buffer": b"", "event_bytes": 0, "final_seen": False, "protocol_error": None}
         oversized = json.dumps({
             "type": "final",
@@ -338,16 +363,22 @@ class SubmissionUiApiTests(unittest.TestCase):
             "status": "passed",
             "code": "all_expectations_met",
         }).encode("utf-8") + b"\n"
-        with mock.patch.object(self.ui, "WEBUI_TASK_FINAL_EVENT_BYTES", 128):
-            self.ui._consume_jsonl_chunk(result, log, state, oversized + valid, final=True)
+        consume_jsonl_chunk(
+            result,
+            log,
+            state,
+            oversized + valid,
+            final=True,
+            final_event_limit_bytes=128,
+        )
         self.assertEqual(state["protocol_error"], "task_event_limit")
         self.assertEqual(result["final"]["code"], "task_event_limit")
         self.assertFalse(result["final"]["ok"])
 
     def test_duplicate_final_event_is_a_sticky_protocol_error(self):
         info = self._problem_info(Path("A"))
-        result = self.ui._empty_sandbox_result(info)
-        log = self.ui.BoundedUtf8Log(512)
+        result = empty_sandbox_result(info)
+        log = BoundedUtf8Log(512)
         state = {"buffer": b"", "event_bytes": 0, "final_seen": False, "protocol_error": None}
         valid = json.dumps({
             "type": "final",
@@ -355,7 +386,7 @@ class SubmissionUiApiTests(unittest.TestCase):
             "status": "passed",
             "code": "all_expectations_met",
         }).encode("utf-8") + b"\n"
-        self.ui._consume_jsonl_chunk(result, log, state, valid + valid, final=True)
+        consume_jsonl_chunk(result, log, state, valid + valid, final=True)
         self.assertEqual(state["protocol_error"], "duplicate_final_event")
         self.assertEqual(result["final"]["code"], "judge_protocol_error")
         self.assertFalse(result["final"]["ok"])
@@ -369,11 +400,14 @@ class SubmissionUiApiTests(unittest.TestCase):
                 "cancel_requested": False,
             }
         }
-        with (
-            mock.patch.object(self.ui.time, "time", return_value=-10**12),
-            mock.patch.object(self.ui.time, "monotonic", return_value=51.0),
-        ):
-            deadline, failure = self.ui._claim_task_execution(jobs, threading.Lock(), "task")
+        deadline, failure = claim_task_execution(
+            jobs,
+            threading.Lock(),
+            "task",
+            execution_deadline=self.ui.WEBUI_TASK_EXECUTION_DEADLINE,
+            wall_time=lambda: -10**12,
+            monotonic_time=lambda: 51.0,
+        )
         self.assertIsNone(deadline)
         self.assertEqual(failure, "deadline")
 
@@ -391,8 +425,15 @@ class SubmissionUiApiTests(unittest.TestCase):
 
     def test_worker_exception_text_is_bounded_in_result_and_logs(self):
         jobs = {"task": {"status": "running", "result": None}}
-        with mock.patch.object(self.ui, "WEBUI_TASK_ERROR_BYTES", 128):
-            self.ui._task_executor_error(jobs, threading.Lock(), "task", RuntimeError("x" * 4096))
+        task_executor_error(
+            jobs,
+            threading.Lock(),
+            "task",
+            RuntimeError("x" * 4096),
+            error_limit_bytes=128,
+            result_ttl=self.ui.WEBUI_TASK_RESULT_TTL,
+            max_completed=self.ui.WEBUI_TASK_MAX_COMPLETED,
+        )
         self.assertLessEqual(len(jobs["task"]["logs"].encode("utf-8")), 128)
         self.assertLessEqual(
             len(jobs["task"]["result"]["final"]["message"].encode("utf-8")),
@@ -695,7 +736,7 @@ class SubmissionUiApiTests(unittest.TestCase):
             with self.ui.SANDBOX_LOCK:
                 self.ui.SANDBOX_JOBS[job_id]["status"] = "running"
             sandbox_started.set()
-            while not self.ui._task_cancel_requested(
+            while not task_cancel_requested(
                 self.ui.SANDBOX_JOBS, self.ui.SANDBOX_LOCK, job_id
             ):
                 time.sleep(0.01)
@@ -819,8 +860,8 @@ class SubmissionUiApiTests(unittest.TestCase):
     def test_progress_publication_snapshots_mutable_result(self):
         jobs = {"task": {"status": "running"}}
         result = {"cases": []}
-        log = self.ui.BoundedUtf8Log(64)
-        self.ui._publish_task_progress(jobs, threading.Lock(), "task", result, log)
+        log = BoundedUtf8Log(64)
+        publish_task_progress(jobs, threading.Lock(), "task", result, log)
         result["cases"].append({"status": "AC"})
         self.assertEqual(jobs["task"]["result"], {"cases": []})
 
@@ -834,8 +875,11 @@ class SubmissionUiApiTests(unittest.TestCase):
             for index in range(15)
         }
         jobs["active"] = {"status": "running", "created_at": 0.0}
-        with mock.patch.object(self.ui, "WEBUI_TASK_MAX_COMPLETED", 5):
-            self.ui._prune_job_registry(jobs)
+        prune_job_registry(
+            jobs,
+            result_ttl=self.ui.WEBUI_TASK_RESULT_TTL,
+            max_completed=5,
+        )
         self.assertIn("active", jobs)
         self.assertEqual(sum(job["status"] == "completed" for job in jobs.values()), 5)
         self.assertEqual(len(jobs), 6)
@@ -1173,7 +1217,10 @@ class SubmissionUiApiTests(unittest.TestCase):
         info = self._problem_info(Path("A"), 30)
         with (
             mock.patch.object(self.ui, "_sandbox_problem_info", return_value=info),
-            mock.patch.object(self.ui, "temporary_submission_workspace", blocked_preparation),
+            mock.patch(
+                "probhub.webui_tasks.temporary_submission_workspace",
+                blocked_preparation,
+            ),
         ):
             response = self.client.post(
                 "/api/submission/run",

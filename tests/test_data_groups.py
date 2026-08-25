@@ -13,6 +13,11 @@ import yaml
 
 from probhub.io import write_yaml
 from probhub.linting import lint_workspace
+from probhub.webui_judge_protocol import (
+    apply_sandbox_event,
+    empty_sandbox_result,
+    sandbox_log_line,
+)
 from probhub.workspace import load_workspace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -205,19 +210,13 @@ class DataGroupLintTests(unittest.TestCase):
 
 
 class SandboxUiEventTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        ui_spec = importlib.util.spec_from_file_location("data_group_ui", ROOT / "scripts" / "ui.py")
-        cls.ui = importlib.util.module_from_spec(ui_spec)
-        ui_spec.loader.exec_module(cls.ui)
-
     def test_group_and_expectation_events_are_preserved(self):
-        result = self.ui._empty_sandbox_result({"limits": {"time": 1, "memory": 256}})
-        self.ui._apply_sandbox_event(result, {
+        result = empty_sandbox_result({"limits": {"time": 1, "memory": 256}})
+        apply_sandbox_event(result, {
             "type": "groups",
             "groups": [{"name": "overflow", "patterns": ["secret/overflow*"], "targets": ["code/wrong.cpp"]}],
         })
-        self.ui._apply_sandbox_event(result, {
+        apply_sandbox_event(result, {
             "type": "case",
             "kind": "wrong",
             "program": "code/wrong.cpp",
@@ -236,8 +235,8 @@ class SandboxUiEventTests(unittest.TestCase):
             "ok": True,
             "first_expected_match": {"case": "secret/overflow1", "status": "WA"},
         }
-        self.ui._apply_sandbox_event(result, expectation)
-        self.ui._apply_sandbox_event(result, {
+        apply_sandbox_event(result, expectation)
+        apply_sandbox_event(result, {
             "type": "summary",
             "kind": "wrong",
             "program": "code/wrong.cpp",
@@ -249,7 +248,7 @@ class SandboxUiEventTests(unittest.TestCase):
         self.assertEqual(result["cases"][0]["groups"], ["overflow"])
         self.assertTrue(result["expectations"]["code/wrong.cpp"]["ok"])
         self.assertEqual(result["summaries"]["code/wrong.cpp"]["calibration"]["max_time"], 0.01)
-        self.assertIn("expectation:PASS", self.ui._sandbox_log_line(expectation))
+        self.assertIn("expectation:PASS", sandbox_log_line(expectation))
 
 
 @unittest.skipUnless(shutil.which("g++"), "g++ is required for data-group integration tests")
