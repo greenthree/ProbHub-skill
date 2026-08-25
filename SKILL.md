@@ -106,7 +106,7 @@ probhub verify-package L01.zip --require-pdf --problem L01
 - 题面必须只有一个 H1，H2 依次为题目描述、输入格式、输出格式且非空；关键定义、范围、字符集、可行性、误差、交互查询与终止规则就近说明。
 - Standard 题使用唯一答案的严格逐行比较（只忽略整体首尾空白和行尾空格/Tab）；非唯一、浮点或需要 Token 语义时使用 Custom Checker；交互题使用 Interactor。
 - Validator 负责输入格式和全部约束；Checker/Interactor 只负责输出或协议判定。官方 Judge/Validator/Checker/Interactor 的 `FAIL`、进程控制失败、清理失败、OLE/TLE/MLE 不得当作错解被击杀。
-- 多组数据必须根据复杂度、测试需求、联合最坏输入和目标平台校准选择 `5 <= T_max <= 100000` 的候选上限；需要累计限制时，题面写出总点数/边数/长度等上限，Validator 必须使用足够宽的累加类型，在多测循环前初始化、对每组目标量恰好累计一次，并在读完后用 `ensuref` 或等价逻辑拒绝超过题面同值的输入。只看到变量名或同一常量不算实际执行约束。
+- 多组数据的 `T_max` 由题意、单组固定成本、accepted/Validator/Checker/Interactor 复杂度、测试职责、累计规模、I/O 和目标平台校准共同推导；`5..100000` 只是常见候选区间，越界时记录理由和风险，不机械拒绝。需要累计限制时，题面与 Validator 必须使用同一上限；Validator 必须使用足够宽的累加类型，在多测循环前初始化、对每组目标量恰好累计一次，并在读完后用 `ensuref` 或等价逻辑拒绝超过题面同值的输入。只有这些执行门槛和联合边界校准通过，才可 seal。
 - `data.groups` 和 `solutions.*[].expected` 只描述已知错解/参考解的执行域与宿命；目标错解应有定向数据，不能把期望矩阵解释为开放世界正确性证明。
 - Secret 数据优先使用 `data.recipes`，生成器 stdout 只写一个测试点并由 `{seed}`/`{round}` 控制；交互题答案由协议定义，当前不走普通 `gen`/stress。
 

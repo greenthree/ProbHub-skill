@@ -42,6 +42,11 @@ class SkillDocumentationTests(unittest.TestCase):
 
         self.assertIn("references/index.md", skill)
 
+        for phase in ("### 1. 设计", "### 2. 骨架与规范源", "### 3. 执行", "### 4. 验证"):
+            with self.subTest(phase=phase):
+                self.assertIn(phase, index)
+        self.assertIn("按需追加", index)
+
         self.assertIn("judge.qa.schema_version: 1", skill)
         self.assertIn("all_expectations_met", skill)
         self.assertIn("基础设施", skill)

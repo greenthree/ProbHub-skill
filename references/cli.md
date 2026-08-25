@@ -162,7 +162,7 @@ probhub gen L05 --case max01    # 只处理指定配方（可重复）
 - 生成器/Validator 单次运行默认 60s 超时（`data.gen_tool_timeout` 可覆盖，≤3600s）；进程数遵循 `limits.processes`。
 - 交互题（`judge.type: interactive`）不支持 `gen`：答案由 Interactor 协议定义，不能靠把输入喂给 accepted 产生（报 `gen_unsupported`）。
 - 生成证据（generator/args/输入与答案哈希）写入本地 `.probhub/gen-manifest.json`，属本地产物不提交。`--case` 局部运行按 case 合并进既有 manifest，不影响其他 case 的记录；配方被删除的 case 在下次 `--apply` 时从 manifest 移除。
-- 没有配方的 secret 测试点由 lint 以 warning 报告；数量低于数据强度纪律（`references/mistake-taxonomy.md`）时同样给 warning。
+- 没有配方的 secret 测试点由 lint 以 warning 报告；数据职责、错解击杀和资源校准由 [`mistake-taxonomy.md`](mistake-taxonomy.md) 的覆盖规则以及实际 Judge 证据审查，不以统一文件数量代替覆盖质量。
 - accepted 改动后重跑 `gen`：plan 会把所有答案变化列为 `changed` 并给出新旧哈希——先审阅差异再 `--apply`。
 
 ## 6. `doctor`
