@@ -4,8 +4,16 @@
 
 ## [Unreleased]
 
-- Python 运行时依赖新增跨平台 wheel SHA-256 锁：Windows/Linux x86_64 的 CPython 3.10、3.11、3.12 共用同一 `requirements.lock`，安装器先下载并逐文件复核临时 wheelhouse，再仅从本地目录强制安装；缺失 hash、字节变化、sdist、目标不支持或下载失败均在修改依赖前 fail closed。常规 CI、mutation、发布后验证、npm 包门禁与 clean-install 统一使用该身份，Python 3.12 纳入正式矩阵。
-- `pip-audit` 的 CI 专用完整闭包也使用独立 hash lock；单一维护命令会重新下载并计算所有允许 wheel、输出结构化差异并原子更新，离线检查对账 source hash、marker 和六个正式目标。漏洞审计现在严格要求返回的包名与版本集合等于当前 marker 生效的运行时锁，空、缺失、额外或漂移结果均失败。
+## [0.7.0] - 2026-08-25
+
+- Judge 执行、预览产物、工作区信息、协议处理、任务生命周期和监督逻辑统一为 Python Core 模块；CLI、WebUI 和 Skill 复用这些底层能力，WebUI 仍保留路由适配与任务编排。
+- WebUI 增加 HTTP 任务准入、预览缓存路径和上传边界保护；Judge 增加二进制身份围栏，改进 Windows/Linux 后代进程清理、取消和有界诊断，构建与评测失败时保留可追溯的结构化结果。
+- Python 运行时依赖改为跨平台 wheel SHA-256 锁：Windows/Linux x86_64 的 CPython 3.10、3.11、3.12 共用同一 `requirements.lock`，安装器和 clean-install 在修改依赖前验证完整字节身份；CI 的 `pip-audit` 闭包使用独立锁并 fail closed。
+- CI 改为测试分片和更明确的静态、快速、发布后检查；分片清单拒绝目录和空测试套件绕过，发布验证从官方 npm registry 进行双包 clean-install，未降低平台或测试覆盖。
+- CLI 增加结构化输出、Judge 规划/缓存/结果汇总和补救诊断，便于 Agent、WebUI 与自动化工具区分成功、失败、取消、超时和基础设施故障。
+- Skill 与 reference 重组为按任务路由的文档，并新增标准题、Checker、Interactor 的出题 walkthrough、算法设计/约束反推/题面表达指导，以及 Judge QA fixture 示例；这些指导明确区分人工设计判断与 Core 可验证证据。
+- Checker/Interactor Judge QA 扩展两层判定、协议状态机、主动鲁棒性探针和独立 fixture 场景，继续使用 Schema v1 路径、大小、数量、哈希和 evidence 边界。
+- README 增加中英文双语入口和面向用户的安装、使用、验证说明；兼容包仍只精确依赖同版本主包，不复制 Core 或 WebUI。
 
 ## [0.6.9] - 2026-08-17
 
