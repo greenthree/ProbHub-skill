@@ -107,8 +107,32 @@ class UiWriteBoundaryTests(unittest.TestCase):
         before = self.file_state()
         self.assertEqual(self.client.get("/api/subtitles").status_code, 200)
         self.assertEqual(self.client.get("/api/data?subtitle=Contest").status_code, 200)
+        health = self.client.get("/api/health?subtitle=Contest")
+        self.assertEqual(health.status_code, 200, health.get_data(as_text=True))
+        payload = health.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual([item["id"] for item in payload["problems"]], ["A"])
+        self.assertIn("lint", payload["problems"][0])
+        self.assertIn("constraints", payload["problems"][0])
+        self.assertIn("checkpoint", payload["problems"][0])
+        self.assertIn("artifacts", payload["problems"][0])
+        self.assertNotIn("secret/1", health.get_data(as_text=True))
         self.assertEqual(self.client.get("/api/config/Contest").status_code, 200)
         self.assertEqual(self.client.get("/api/pdf-pages/Contest").status_code, 200)
+        self.assertEqual(self.file_state(), before)
+
+    def test_health_empty_workspace_is_read_only_and_explicit(self):
+        workspace = read_yaml(self.root / ".probhub/workspace.yaml")
+        workspace["problems"] = []
+        write_yaml(self.root / ".probhub/workspace.yaml", workspace)
+        before = self.file_state()
+        response = self.client.get("/api/health?subtitle=Contest")
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["problems"], [])
+        self.assertEqual(payload["summary"]["problems"], 0)
         self.assertEqual(self.file_state(), before)
 
     def test_old_workspace_is_rejected_without_legacy_fallback_or_writes(self):
@@ -129,6 +153,7 @@ class UiWriteBoundaryTests(unittest.TestCase):
             requests = [
                 self.client.get("/api/subtitles"),
                 self.client.get("/api/data?subtitle=Contest"),
+                self.client.get("/api/health?subtitle=Contest"),
                 self.client.post("/api/data", json={"subtitle": "Contest", "problems": []}),
                 self.client.post("/api/compile", json={"subtitle": "Contest"}),
                 self.client.post("/api/distribute", json={"subtitle": "Contest"}),

@@ -57,6 +57,7 @@ from probhub.webui_workspace import (
     schema_workspace_for_subtitle,
     statement_asset_path,
 )
+from probhub.webui_health import HEALTH_SCHEMA_VERSION, build_health_summary
 from probhub.workspace import load_workspace, problem_entries
 from probhub.webui_tasks import (
     BoundedTaskExecutor,
@@ -289,6 +290,7 @@ def _probhub_error_payload(error):
     })
     return payload
 
+
 # ==========================================
 # 后端 API 路由
 # ==========================================
@@ -336,6 +338,45 @@ def get_data():
     except Exception as e:
         print(f"[-] Data Load Error: {e}")
         return jsonify({"success": False, "error": str(e), "code": "data_load_failed"}), 500
+
+
+@app.route('/api/health', methods=['GET'])
+def get_health():
+    """Return a read-only, bounded projection of Core health state."""
+    subtitle = request.args.get('subtitle')
+    if not subtitle:
+        return jsonify({
+            "success": True,
+            "schema_version": HEALTH_SCHEMA_VERSION,
+            "workspace": {},
+            "summary": {},
+            "problems": [],
+            "generation": {"state": "none", "ok": False, "missing": []},
+            "diagnostics": [],
+        })
+    try:
+        if not (Path.cwd() / ".probhub" / "workspace.yaml").is_file():
+            raise ProbHubError(
+                "Workspace Schema v1 is required; migrate this old workspace first",
+                code="migration_required",
+            )
+        root, workspace = load_workspace(Path.cwd(), allow_empty=True)
+        typst_dir = Path((workspace.get("typst") or {}).get("directory", "typst-statement/正式赛"))
+        if subtitle and typst_dir.name != subtitle:
+            raise ProbHubError(f"unknown Schema v1 subtitle: {subtitle}", code="unknown_subtitle")
+        selected = request.args.getlist("problem") or None
+        return jsonify(build_health_summary(root, workspace, selected))
+    except ProbHubError as exc:
+        status = 409 if exc.code in {"migration_required", "unknown_subtitle", "recovery_required"} else 400
+        return jsonify({"success": False, "error": str(exc), "code": exc.code}), status
+    except Exception as exc:
+        # Fail closed: never turn a malformed Core result into a partial
+        # success that the dashboard might mistake for a delivery decision.
+        return jsonify({
+            "success": False,
+            "error": "health summary unavailable",
+            "code": "health_failed",
+        }), 500
 
 
 @app.route('/api/problem-assets/<subtitle>/<problem_id>/<path:asset_path>', methods=['GET'])

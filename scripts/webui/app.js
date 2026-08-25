@@ -68,6 +68,9 @@
                 problems: [],
                 selectedIdx: null,
                 activePage: 'layout',
+                health: null,
+                healthLoading: false,
+                healthError: '',
                 isCompiling: false,
                 isDistributing: false,
                 sandboxRunning: false,
@@ -231,6 +234,7 @@
                     this.loadConfig();
                     this.pdfRefresh = Date.now();
                     this.loadPdfPages();
+                    this.loadHealth();
                 },
 
                 initSortable() {
@@ -437,6 +441,74 @@
                 openSandbox() {
                     this.activePage = 'sandbox';
                     this.refreshSandboxInfo();
+                },
+
+                openHealth() {
+                    this.activePage = 'health';
+                    this.loadHealth();
+                },
+
+                loadHealth() {
+                    if (!this.currentSubtitle) {
+                        this.health = null;
+                        return;
+                    }
+                    const subtitle = this.currentSubtitle;
+                    this.healthLoading = true;
+                    this.healthError = '';
+                    fetch(`/api/health?subtitle=${encodeURIComponent(subtitle)}`)
+                        .then(res => res.json().then(data => ({ok: res.ok, data})))
+                        .then(({ok, data}) => {
+                            if (this.currentSubtitle !== subtitle) return;
+                            if (!ok || !data.success) {
+                                this.health = null;
+                                this.healthError = data.error || '健康状态暂不可用';
+                                return;
+                            }
+                            this.health = data;
+                        })
+                        .catch(() => { this.health = null; this.healthError = '健康状态请求失败'; })
+                        .finally(() => { this.healthLoading = false; });
+                },
+
+                healthStateClass(state) {
+                    if (['passed', 'current', 'sealed', 'not-configured'].includes(state)) return 'text-success';
+                    if (['warning', 'stale', 'draft', 'missing', 'unknown'].includes(state)) return 'text-gold';
+                    return 'text-danger';
+                },
+
+                healthCards(item) {
+                    return [
+                        {label: 'Sample', state: item.checks.sample.state},
+                        {label: 'Judge', state: item.checks.judge.state},
+                        {label: 'Judge QA', state: item.checks.judge_qa.state},
+                        {label: 'Stress', state: item.checks.stress.state},
+                        {label: 'Mutation', state: item.checks.mutation.state},
+                        {label: 'Evidence', state: item.evidence.calibration.state},
+                        {label: 'PDF', state: item.artifacts.pdf},
+                        {label: 'ZIP', state: item.artifacts.zip},
+                        {label: 'Manifest', state: item.artifacts.manifest},
+                    ];
+                },
+
+                healthHeadroom(item) {
+                    const accepted = item.evidence.calibration.accepted || [];
+                    if (!accepted.length || accepted[0].headroom_factor == null) return '暂无本机校准余量';
+                    return `${accepted[0].program || 'accepted'} · ${Number(accepted[0].headroom_factor).toFixed(2)}x TL`;
+                },
+
+                healthKillSummary(item) {
+                    const kills = item.evidence.calibration.resource_kills || [];
+                    if (!kills.length) return '暂无 TLE / MLE / OLE 击杀证据';
+                    return kills.map(kill => `${kill.status || '?'} · ${kill.program || '-'}`).join('；');
+                },
+
+                healthRemediations(item) {
+                    return (item.remediations || []).slice(0, 3);
+                },
+
+                healthCommand(remediation) {
+                    return Array.isArray(remediation.command) ? remediation.command.join(' ') : '';
                 },
 
                 restoreSandboxCache() {
@@ -794,6 +866,7 @@
                     this.submissionFilename = '';
                     this.restoreSubmissionCache();
                     if (this.activePage === 'sandbox') this.refreshSandboxInfo();
+                    if (this.activePage === 'health') this.loadHealth();
                 },
 
                 hasQuote() {
