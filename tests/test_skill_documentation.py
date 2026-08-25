@@ -85,6 +85,32 @@ class SkillDocumentationTests(unittest.TestCase):
                 self.assertIn(f"| {difficulty} |", design)
         self.assertIn("problem-design-principles.md", (ROOT / "SKILL.md").read_text(encoding="utf-8"))
 
+    def test_checker_interactor_guidance_covers_design_boundaries(self):
+        document = (ROOT / "references" / "checker-interactor.md").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "合法性层",
+            "目标层",
+            "官方答案独立",
+            "NaN",
+            "+inf",
+            "状态机",
+            "START",
+            "WAIT_QUERY",
+            "query_limit",
+            "不是查询次数上限",
+            "固定回答",
+            "自适应回答",
+            "隐藏 strategy",
+            "query-over-limit",
+            "infrastructure FAIL",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, document)
+        self.assertIn("mistake-taxonomy.md", document)
+        self.assertIn("verification-modes.md", document)
+
     def test_problem_creation_walkthrough_covers_supported_judge_branches(self):
         walkthrough = (ROOT / "references" / "problem-creation-walkthrough.md").read_text(
             encoding="utf-8"

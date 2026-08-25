@@ -168,7 +168,11 @@ class JudgeQAExecutionTests(unittest.TestCase):
         self.assertEqual(len(compile_calls), len(set(compile_calls)), compile_calls)
         self.assertEqual(
             {case["id"] for case in result["cases"]},
-            {"accepts-alternative", "rejects-extra-token"},
+            {
+                "accepts-alternative",
+                "rejects-extra-token",
+                "rejects-malformed-output",
+            },
         )
         self.assertTrue(all(case["matched"] for case in result["cases"]), result)
         self.assertEqual(
@@ -224,7 +228,7 @@ class JudgeQAExecutionTests(unittest.TestCase):
         self.assertTrue(second["ok"], second)
         self.assertEqual(second["cache"]["compile_hits"], 2, second)
         self.assertEqual(second["cache"]["compile_misses"], 0, second)
-        self.assertEqual(first_calls, 6)
+        self.assertEqual(first_calls, 7)
         self.assertEqual(second_calls, first_calls)
         self.assertTrue(refreshed["ok"], refreshed)
         self.assertEqual(refreshed["cache"]["mode"], "refresh")
@@ -437,13 +441,14 @@ class JudgeQAExecutionTests(unittest.TestCase):
         self.assert_successful_evidence(fixture, result)
         self.assertEqual(
             Counter(role for _, role in compile_calls),
-            Counter({"validator": 1, "interactor": 1, "contestant": 1}),
+            Counter({"validator": 1, "interactor": 1, "contestant": 2}),
         )
         self.assertEqual(len(compile_calls), len(set(compile_calls)), compile_calls)
         self.assertEqual(
             {case["id"] for case in result["cases"]},
             {
                 "normal-protocol",
+                "wrong-response-player",
                 "early-eof-player",
                 "idle-player",
                 "output-flood-player",

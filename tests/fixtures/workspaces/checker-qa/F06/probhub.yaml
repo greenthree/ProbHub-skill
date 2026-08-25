@@ -29,6 +29,11 @@ judge:
       jury_answer: judge-fixtures/checker/extra.ans
       contestant_output: judge-fixtures/checker/extra.out
       expected: {status: WA}
+    - id: rejects-malformed-output
+      purpose: malformed-output
+      case: sample/basic
+      contestant_output: judge-fixtures/checker/malformed.out
+      expected: {status: WA}
 solutions:
   accepted:
   - file: code/std.cpp
