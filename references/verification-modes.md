@@ -62,14 +62,12 @@
 9. 负责整场正式交付时，在所有题目均为有效 sealed revision 后执行一次多 ID `build --no-cache`，再运行 `status`、深度 `verify-package` 和最终 PDF QA。
 10. 最终交接必须区分已自动验证、已人工/Agent 审查、未验证和剩余风险；不得用“未发现问题”替代通过条件。
 
-多组数据累计约束属于三种模式共享的封题门槛。创作、修改或审查含 `T` 的题目时，先完整执行 `references/aggregate-limit-derivation.md`：推导的 `T_max` 必须在 `5..100000`，测试需求较大时的 `sum(n_i) <= 10*N` 只能作为满足复杂度条件后的候选，并且必须通过联合最坏数据与 `accepted_max_time * 3 <= TL` 校准。题面声明 `sum n`、总长度、总点数或总边数等累计上限时：
+多组数据的上限推导统一见 [`aggregate-limit-derivation.md`](aggregate-limit-derivation.md)，三种模式都必须遵守其硬门槛。模式文档只记录选择和证据边界：题面与 Validator 的累计上限必须相同；累加器类型、初始化、每组恰好累计一次、上限内接受/超限拒绝、联合边界和 accepted/Validator/Checker/Interactor 的资源校准必须实际审查。`5..100000` 是常见 `T_max` 候选区间，`10N` 是条件性累计候选，不是模式统一的拒绝或通过数字。`constraint_reconciliation.aggregate_constraints` 若为 `statement_only`、`aggregate_constraint_mismatch` 或 `dynamic`，以及人工发现没有真实累计/拒绝逻辑时，必须保留未完成状态并重跑受影响门禁。
 
-- 必须读取 `probhub --json lint <ID>` 的 `constraint_reconciliation.aggregate_constraints`；对应约束出现 `statement_only`、`aggregate_constraint_mismatch` 或 `dynamic` 时，不得因为 lint 仍为 warning 就继续 seal；
-- 直接写法应得到 `state: matched`；静态分析不支持的函数封装、宏或复杂表达式必须由主 Agent 人工复核并记录证据，不能伪称自动匹配；
-- `matched` 只证明直接语句形状和值可以对账。主 Agent 仍要确认使用足够宽的累加类型、累加器在循环前初始化、每组目标量恰好累计一次，并在读取完相关输入后执行与题面同值的 `ensuref` 或等价拒绝逻辑；
-- 缺少实际累计或拒绝逻辑时，修复 Validator 并重新运行 lint、Judge 和受影响的 seal。变量名含 `sum`、错误位置的检查或只在错误分支执行的比较都不算通过。
 
 模式不能削弱现有 Core 门禁。快速模式必须配置可用的 stress 链路，并使用固定 seed 完成 100 轮对拍；不得删除已有 `stress` 配置、减少到 100 轮以下或虚构跳过参数来绕过 `seal`。
+
+所有模式还保留以下操作边界：只修改规范源，正式产物/evidence/generation 由 Core 通过锁、快照、staging 和验证后发布写入；不要手工修复结果或把自然语言审查当作自动 evidence。外部程序必须使用共享进程控制和有界输出；取消、超时、基础设施失败或后代进程清理失败均保持未完成/失败语义。临时 submission、stress、preview 和审查快照在交接前清理，清理失败优先于“通过”结论。
 
 ## 3. 快速模式
 
@@ -171,26 +169,20 @@ probhub seal <ID> --no-cache --rounds 100 --seed 12345
 
 ### 5.3 条件性 mutation 检查
 
-完成独立证明、对抗审查并冻结题面、Validator、标程和正式数据后，主 Agent 应评估是否运行 mutation。它只适用于 `judge.type: standard` 且首个 accepted 为 C++ 的题目；Checker、Interactor、浮点判定和非 C++ 标程记录 `not_applicable`，不把跳过当作失败或通过。
+mutation 的算法、算子、预算和 evidence 语义以 [`mutation-testing.md`](mutation-testing.md) 为准。完成独立证明、对抗审查并冻结题面、Validator、标程和正式数据后，主 Agent 只需判断是否适用：仅 `judge.type: standard` 且首个 accepted 为 C++ 时可运行；Checker、Interactor、浮点判定和非 C++ 标程记录 `not_applicable`，不把跳过当作失败或通过。
 
-适用题目存在候选变异时，完整模式的默认建议命令为：
+适用且有明确时间预算时，按权威 reference 选择参数并运行，例如：
 
 ```powershell
 probhub mutation <ID> --jobs 2 --no-cache
 ```
 
-mutation 是补充证据，不是完整模式的统一硬门禁，也不接入普通模式、`seal` 或 `build`。运行前应根据源码规模、历史 `raw_planned` 和本机无缓存 Judge 吞吐估算墙钟；初期经验提示如下（不是 Core 限制）：
-
-- 预计不超过 16 个候选：通常可以直接建议运行；
-- 17 至 64 个候选：先向交接记录预计耗时和资源，再运行；
-- 超过 64 个候选：不要无预算自动启动，应先缩小算子/`max-mutants` 或取得明确的时间预算。
-
-命令返回后必须读取结构化 evidence，而不是只看 score：
+mutation 是补充证据，不是完整模式的统一硬门禁，也不接入普通模式、`seal` 或 `build`。运行前记录可接受的墙钟和资源预算，命令返回后必须读取结构化 evidence，而不是只看 score：
 
 - `raw_planned`、`excluded`、`planned`、`selected` 和 `executed` 必须互相一致；
 - `infrastructure-failed`、`cancelled`、超时或发布失败不计为 killed，且 mutation 子检查未完成；
 - `no_candidates` 表示没有可执行候选，不表示题目已获得 mutation 保证；
-- `survived` 必须由主 Agent 阅读源码位置、变换和命中范围后分类。
+- `survived` 必须由主 Agent 阅读源码位置、变换和命中范围后分类；mutation 子任务的编译、执行、取消、超时或发布失败都保持未完成语义。
 
 对 survivor 的处置只有三种：补数据或修复题目后重跑；确认等价、不适用或越界未定义行为并按稳定 ID 写出具体 exclusion 理由；无法判断时保留 residual risk。不能为了提高 score 批量排除，也不能把“全部已知变异被击杀”写成“没有未知错解”。
 
@@ -315,11 +307,4 @@ verification:
 
 ## 10. 并行出题与正式构建
 
-验证模式不得重新引入全局构建队列：
-
-1. 启动并行任务前一次登记稳定 ID 和正式题序。
-2. 每个任务只修改自己的题目目录，并在关键阶段发布 checkpoint。
-3. 独立审查使用冻结快照；其他题目的 live 进度不属于本题验证输入。
-4. 本题满足有效模式后执行 `seal`，取得自己的完整试卷 generation，即可交接 `SEALED` 并结束，不等待其他题。
-5. 只有整场正式交付需要等待所有题目 sealed；随后由任意存活任务一次执行多 ID `build --no-cache`。
-6. 若本题尚未参与正式批量构建，交接中写 `delivery_state: SEALED`，不得冒充 `FORMALLY_BUILT` 或 `QA_DONE`。
+并行、checkpoint、seal、generation 和正式批量 build 的权威流程见 [`generations.md`](generations.md)。本模式只保留交接边界：每个任务使用冻结审查快照并只修改自己的题目目录；完成所选验证模式后执行 `seal`，记录 `delivery_state: SEALED`，不等待其他题；整场交付再由一个任务执行多 ID build。任何 generation、发布或清理失败都必须保留未完成状态，不能冒充 `FORMALLY_BUILT` 或 `QA_DONE`。

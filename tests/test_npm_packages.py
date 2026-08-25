@@ -169,7 +169,9 @@ class NpmPackageMetadataTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, skill)
-                self.assertIn(marker, verification)
+        self.assertIn("aggregate-limit-derivation.md", verification)
+        self.assertIn("上限内接受/超限拒绝", verification)
+        self.assertNotIn("ensuref", verification)
 
     def test_skill_routes_and_covers_aggregate_limit_derivation(self):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
@@ -180,7 +182,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
         reference = reference_path.read_text(encoding="utf-8")
 
         self.assertIn("references/aggregate-limit-derivation.md", skill)
-        self.assertIn("references/aggregate-limit-derivation.md", verification)
+        self.assertIn("aggregate-limit-derivation.md", verification)
         release_check = (ROOT / "scripts/check_release.py").read_text(encoding="utf-8")
         self.assertIn("references/aggregate-limit-derivation.md", release_check)
 
@@ -205,6 +207,11 @@ class NpmPackageMetadataTests(unittest.TestCase):
 
         self.assertIn("本文不是 Core Schema", reference)
         self.assertIn("decision: needs_review", reference)
+        self.assertIn("常见候选区间", reference)
+        self.assertIn("不是所有题目的 seal 硬门槛", reference)
+        self.assertIn("10N` 不是普适规则", reference)
+        self.assertIn("accepted/Validator/Checker/Interactor", verification)
+        self.assertNotIn("推导的 `T_max` 必须在 `5..100000`", verification)
 
     def test_npm_pack_json_accepts_legacy_and_current_single_package_shapes(self):
         from scripts import check_release
