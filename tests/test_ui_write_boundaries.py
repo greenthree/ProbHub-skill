@@ -163,13 +163,16 @@ class UiWriteBoundaryTests(unittest.TestCase):
     def test_schema_cover_save_updates_workspace_without_touching_typst_sources(self):
         response = self.client.get("/api/config/Contest")
         config = response.get_json()["config"]
+        self.assertEqual(config["logo"], "school-badge.png")
         main_before = (self.root / "typst-statement/Contest/main.typ").read_bytes()
         config["title"] = "Updated Contest"
+        config["logo"] = "custom-logo.svg"
         config["logo_width"] = "8cm"
         response = self.client.post("/api/config/Contest", json=config)
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         workspace = (self.root / ".probhub/workspace.yaml").read_text(encoding="utf-8")
         self.assertIn("title: Updated Contest", workspace)
+        self.assertIn("logo: custom-logo.svg", workspace)
         self.assertIn("logo_width: 8cm", workspace)
         self.assertEqual((self.root / "typst-statement/Contest/main.typ").read_bytes(), main_before)
 
@@ -469,6 +472,7 @@ class UiWriteBoundaryTests(unittest.TestCase):
         self.assertIn("_postWriterJson('/api/distribute'", javascript)
         self.assertIn("_queueWriter(operation)", javascript)
         self.assertIn("/api/problem-assets/", javascript)
+        self.assertIn("logo: 'school-badge.png'", javascript)
 
 
 if __name__ == "__main__":

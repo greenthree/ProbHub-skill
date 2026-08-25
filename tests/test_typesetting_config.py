@@ -7,6 +7,43 @@ from probhub.typesetting import compile_collection
 
 
 class TypesettingConfigTests(unittest.TestCase):
+    def test_partial_cover_config_defaults_to_school_badge(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            typst_dir = root / "typst/contest"
+            typst_dir.mkdir(parents=True)
+            (typst_dir / "main.typ").write_text(
+                '#import "../lib.typ": contest-conf\n#show: contest-conf.with()\n',
+                encoding="utf-8",
+            )
+            (typst_dir.parent / "lib.typ").write_text(
+                'v(1em)\nalign(center, image("old.png", width: 4cm))\nv(2em)\n',
+                encoding="utf-8",
+            )
+            workspace = {
+                "typst": {
+                    "directory": "typst/contest",
+                    "cover": {"logo_width": "6cm"},
+                },
+            }
+
+            def fake_run(command, **_kwargs):
+                generated = next(path for path in typst_dir.parent.glob(".probhub-lib-*.typ"))
+                self.assertIn(
+                    'image("school-badge.png", width: 6cm)',
+                    generated.read_text(encoding="utf-8"),
+                )
+                (root / command[-1]).write_bytes(b"pdf")
+                return {"reason": "completed", "returncode": 0}
+
+            with (
+                mock.patch("probhub.typesetting.write_typst_collection", return_value=(typst_dir, [])),
+                mock.patch("probhub.typesetting.run_managed_to_files", side_effect=fake_run),
+            ):
+                compile_collection(root, workspace, [])
+
+            self.assertEqual(list(root.rglob(".probhub-*.typ")), [])
+
     def test_workspace_cover_config_uses_temporary_typst_sources(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

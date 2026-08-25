@@ -28,6 +28,8 @@ class SkillInstallTests(unittest.TestCase):
                 label + "\n", encoding="utf-8"
             )
         (package / "SKILL.md").write_text(f"# {label}\n", encoding="utf-8")
+        (package / "logo.svg").write_text(f"<svg>{label}</svg>\n", encoding="utf-8")
+        (package / "school-badge.png").write_bytes(label.encode("ascii"))
         (package / "package.json").write_text(
             json.dumps({"version": f"1.0.{len(label)}"}), encoding="utf-8"
         )
@@ -67,6 +69,14 @@ class SkillInstallTests(unittest.TestCase):
             for target in targets:
                 self.assertFalse((target / "old.txt").exists())
                 self.assertEqual((target / "SKILL.md").read_text(encoding="utf-8"), "# new\n")
+                self.assertEqual(
+                    (target / "logo.svg").read_text(encoding="utf-8"),
+                    "<svg>new</svg>\n",
+                )
+                self.assertEqual(
+                    (target / "school-badge.png").read_bytes(),
+                    b"new",
+                )
                 marker = json.loads(
                     (target / ".probhub-version.json").read_text(encoding="utf-8")
                 )

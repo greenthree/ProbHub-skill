@@ -217,7 +217,7 @@
     maketitle(title: title, subtitle: subtitle, date: date, author: author)
     v(-2.2em) //正式赛
     // v(1.5em)
-    align(center, image("usts.png", width: 9cm))
+    align(center, image("school-badge.png", width: 9cm))
     // TOC
     if enable-problem-list {
       figure(
@@ -305,10 +305,13 @@
 
     if problems != none {
       for (i, e) in problems.enumerate() {
-        place(
-          top + left,
-          text(size: 1pt, fill: rgb("#00000000"), e.boundary_marker),
-        )
+        let boundary-marker = e.at("boundary_marker", default: none)
+        if boundary-marker != none {
+          place(
+            top + left,
+            text(size: 1pt, fill: rgb("#00000000"), boundary-marker),
+          )
+        }
         e.problem.display-name = "题目 " + problem-label(i) + ". " + e.problem.display_name
         render-problem(e.problem, e.statement, language: problem-lang)
 

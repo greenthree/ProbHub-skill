@@ -11,6 +11,7 @@ from probhub.errors import ProbHubError
 from probhub.hashing import hash_file
 from probhub.io import write_yaml
 from probhub.metadata import problem_boundary_marker
+from probhub.process_control import run_managed_to_files
 from probhub.scaffold import scaffold_config, scaffold_files
 from probhub.typesetting import problem_boundaries
 from probhub.workspace import load_problem, load_workspace, problem_entries
@@ -21,6 +22,47 @@ RUN_TYPST_E2E = (
     os.environ.get("PROBHUB_RUN_TYPST_E2E") == "1"
     and shutil.which("typst") is not None
 )
+
+
+@unittest.skipUnless(
+    shutil.which("typst") is not None,
+    "Typst not found on PATH",
+)
+class CheckedInTypstTemplateTests(unittest.TestCase):
+    def test_checked_in_typst_template_compiles_with_packaged_logo(self):
+        self.assertTrue((ROOT / "school-badge.png").is_file())
+        self.assertEqual(
+            (ROOT / "typst-template/school-badge.png").read_bytes(),
+            (ROOT / "school-badge.png").read_bytes(),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "typst-template.pdf"
+            stdout_path = Path(temp) / "stdout"
+            stderr_path = Path(temp) / "stderr"
+            result = run_managed_to_files(
+                [
+                    "typst",
+                    "compile",
+                    "--root",
+                    str(ROOT),
+                    str(ROOT / "typst-template/正式赛/main.typ"),
+                    str(output),
+                ],
+                cwd=ROOT,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=120,
+                memory_limit_mb=2048,
+                output_limit_bytes=4 * 1024 * 1024,
+                process_limit=32,
+            )
+            self.assertEqual(
+                (result["reason"], result["returncode"]),
+                ("completed", 0),
+                stderr_path.read_text(encoding="utf-8", errors="replace")
+                + stdout_path.read_text(encoding="utf-8", errors="replace"),
+            )
+            self.assertTrue(output.is_file())
 
 
 @unittest.skipUnless(
@@ -36,7 +78,7 @@ class TypstPdfIntegrationTests(unittest.TestCase):
         typst_dir.mkdir(parents=True)
         references = ROOT / "references"
         shutil.copyfile(references / "lib.typ", typst_root / "lib.typ")
-        shutil.copyfile(references / "usts.png", typst_root / "usts.png")
+        shutil.copyfile(ROOT / "school-badge.png", typst_root / "school-badge.png")
         shutil.copyfile(references / "main.typ", typst_dir / "main.typ")
         shutil.copyfile(references / "problems.typ", typst_dir / "problems.typ")
 
@@ -52,7 +94,7 @@ class TypstPdfIntegrationTests(unittest.TestCase):
                 "directory": "typst-statement/正式赛",
                 "creation_timestamp": 0,
                 "cover": {
-                    "logo": "usts.png",
+                    "logo": "school-badge.png",
                     "logo_width": "7cm",
                     "logo_space_above": "0em",
                     "logo_space_below": "0em",
@@ -205,6 +247,28 @@ class TypstPdfIntegrationTests(unittest.TestCase):
                 (root / "typst-statement/lib.typ").read_bytes(),
                 (ROOT / "references/lib.typ").read_bytes(),
             )
+            self.assertEqual(list(root.rglob(".probhub-*.typ")), [])
+
+    def test_canonical_production_template_compiles_custom_workspace_logo(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = self.create_production_template_workspace(root)
+            custom_logo = root / "typst-statement/custom-logo.svg"
+            custom_logo.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">'
+                '<rect width="80" height="40" fill="#336699"/></svg>\n',
+                encoding="utf-8",
+            )
+            workspace_path = root / ".probhub/workspace.yaml"
+            workspace["typst"]["cover"]["logo"] = custom_logo.name
+            write_yaml(workspace_path, workspace)
+            _, workspace = load_workspace(root)
+
+            result = typeset_workspace(root, workspace, problem_entries(workspace))
+
+            self.assertTrue(Path(result["main_pdf"]).is_file())
+            self.assertEqual(workspace["typst"]["cover"]["logo"], "custom-logo.svg")
+            self.assertEqual(custom_logo.read_text(encoding="utf-8").count("#336699"), 1)
             self.assertEqual(list(root.rglob(".probhub-*.typ")), [])
 
     def test_canonical_markers_support_duplicate_long_names_and_aa_label(self):

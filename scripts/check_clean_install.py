@@ -487,9 +487,13 @@ def run_clean_install(*, registry_version=None, registry_url=DEFAULT_REGISTRY):
         )
         if Path(initialized["workspace"]).resolve() != (workspace / ".probhub/workspace.yaml").resolve():
             raise CleanInstallError(f"init returned the wrong workspace: {initialized!r}")
-        for relative in ("typst-statement/lib.typ", "typst-statement/usts.png", "typst-statement/正式赛/main.typ", "typst-statement/正式赛/problems.typ"):
+        for relative in ("typst-statement/lib.typ", "typst-statement/school-badge.png", "typst-statement/正式赛/main.typ", "typst-statement/正式赛/problems.typ"):
             if not (workspace / relative).is_file():
                 raise CleanInstallError(f"init omitted Typst template: {relative}")
+        if (workspace / "typst-statement/usts.png").exists():
+            raise CleanInstallError("init installed the retired contest-specific usts.png asset")
+        if (workspace / "typst-statement/school-badge.png").read_bytes() != (installed_main / "school-badge.png").read_bytes():
+            raise CleanInstallError("init did not copy the packaged school badge byte-for-byte")
 
         webui = _run_json(
             [probhub, "--workspace", workspace, "--json", "ui", "--check"],

@@ -19,7 +19,7 @@ TYPST_TIMEOUT_SECONDS = 120
 TYPST_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
 TYPST_TEMP_SOURCE_PREFIX = ".probhub-"
 TYPST_BOUNDARY_FIELD_PATTERN = re.compile(
-    r"(?:\.\s*boundary_marker\b|at\(\s*[\"']boundary_marker[\"']\s*\))"
+    r"(?:\.\s*boundary_marker\b|at\(\s*[\"']boundary_marker[\"'])"
 )
 TYPST_LOCAL_IMPORT_PATTERN = re.compile(
     r"#(?:import|include)\s+[\"']([^\"']+\.typ)[\"']"
@@ -60,7 +60,7 @@ def _configured_typst_sources(root, workspace, main_typ):
     if cover:
         generated_lib = lib_typ.with_name(f"{TYPST_TEMP_SOURCE_PREFIX}lib-{token}.typ")
         lib_text = lib_typ.read_text(encoding="utf-8")
-        logo = _typst_string(cover.get("logo", "usts.png"))
+        logo = _typst_string(cover.get("logo", "school-badge.png"))
         width = str(cover.get("logo_width", "9cm")).strip() or "9cm"
         above = str(cover.get("logo_space_above", "0em")).strip() or "0em"
         below = str(cover.get("logo_space_below", "0em")).strip() or "0em"

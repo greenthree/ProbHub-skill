@@ -585,8 +585,16 @@ def save_editor_data(root, workspace, submitted):
     return load_editor_data(root, saved_workspace)
 
 
+DEFAULT_COVER_CONFIG = {
+    "logo": "school-badge.png",
+    "logo_width": "9cm",
+    "logo_space_above": "0em",
+    "logo_space_below": "0em",
+}
+
+
 def load_contest_config(root, workspace, defaults=None):
-    config = dict(defaults or {})
+    config = {**DEFAULT_COVER_CONFIG, **(defaults or {})}
     contest = workspace.get("contest") or {}
     for key in ("title", "subtitle", "author", "date"):
         if key in contest:
@@ -610,12 +618,7 @@ def save_contest_config(root, workspace, submitted):
         contest[key] = str(submitted.get(key, "")).strip()
     typst = updated.setdefault("typst", {})
     cover = typst.setdefault("cover", {})
-    for key, fallback in (
-        ("logo", "usts.png"),
-        ("logo_width", "9cm"),
-        ("logo_space_above", "0em"),
-        ("logo_space_below", "0em"),
-    ):
+    for key, fallback in DEFAULT_COVER_CONFIG.items():
         cover[key] = str(submitted.get(key, fallback)).strip() or fallback
 
     def validate_saved_workspace():
