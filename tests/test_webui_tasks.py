@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from probhub.webui_tasks import (
     BoundedPipeCapture,
@@ -21,6 +22,7 @@ from probhub.webui_tasks import (
     publish_task_progress,
     supervise_judge_process,
     task_executor_error,
+    WebUiTaskService,
 )
 
 
@@ -174,6 +176,7 @@ class BoundedTaskExecutorTests(unittest.TestCase):
                 time.sleep(0.01)
             executor.shutdown(wait=True)
 
+
     def test_capacity_and_thread_count_are_bounded(self):
         executor = BoundedTaskExecutor(max_workers=2, max_queued=2, name="bounded-test")
         gate = threading.Event()
@@ -265,6 +268,127 @@ class BoundedTaskExecutorTests(unittest.TestCase):
             while executor.stats()["outstanding"] and time.time() < deadline:
                 time.sleep(0.01)
             executor.shutdown(wait=True)
+
+
+class WebUiTaskServiceTests(unittest.TestCase):
+    class RecordingExecutor:
+        capacity = 2
+
+        def __init__(self):
+            self.tasks = {}
+
+        def submit(self, task_id, callback, **callbacks):
+            self.tasks[task_id] = (callback, callbacks)
+            return True
+
+        def expire_pending(self):
+            return 0
+
+        def cancel_pending(self, task_id):
+            task = self.tasks.pop(task_id, None)
+            if task is None:
+                return False
+            task[1]["on_discard"]("cancelled")
+            return True
+
+        def shutdown(self, **_kwargs):
+            return None
+
+    def test_service_owns_enqueue_snapshot_and_request_slot_lifetime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            executor = self.RecordingExecutor()
+            service = WebUiTaskService(
+                workspace_root=temp,
+                local_judge_script=Path(temp) / "judge.py",
+                executor=executor,
+            )
+            slot = threading.BoundedSemaphore(1)
+            self.assertTrue(slot.acquire(blocking=False))
+            called = []
+
+            def worker(task_id, info):
+                called.append((task_id, info["dir"]))
+                with service.sandbox_lock:
+                    service.sandbox_jobs[task_id].update(
+                        status="success", finished_at=time.time()
+                    )
+
+            accepted, task_id = service.enqueue_sandbox(
+                {"dir": str(Path(temp) / "A"), "limits": {}},
+                task_slot=slot,
+                worker=worker,
+            )
+            self.assertTrue(accepted)
+            self.assertEqual(service.sandbox_jobs[task_id]["status"], "queued")
+            self.assertIsNone(service.get("sandbox", task_id).get("_deadline_monotonic"))
+            executor.tasks.pop(task_id)[0]()
+            self.assertEqual(called, [(task_id, str(Path(temp) / "A"))])
+            self.assertTrue(slot.acquire(blocking=False))
+            slot.release()
+
+    def test_service_cancel_publishes_queued_submission_cleanup_truth(self):
+        with tempfile.TemporaryDirectory() as temp:
+            executor = self.RecordingExecutor()
+            service = WebUiTaskService(
+                workspace_root=temp,
+                local_judge_script=Path(temp) / "judge.py",
+                executor=executor,
+            )
+            accepted, task_id = service.enqueue_submission(
+                {"dir": str(Path(temp) / "A"), "limits": {}},
+                "answer.cpp",
+                b"int main(){}\n",
+                worker=lambda *_args: None,
+            )
+            self.assertTrue(accepted)
+            state = service.cancel("submission", task_id)
+            self.assertEqual(state, {"status": "cancelled", "verdict": "CANCELLED"})
+            payload = service.get("submission", task_id)
+            self.assertEqual(payload["result"]["final"]["code"], "cancelled")
+            self.assertTrue(payload["result"]["submission"]["workspace_cleaned"])
+
+    def test_service_sandbox_cancel_keeps_adapter_response_shape(self):
+        with tempfile.TemporaryDirectory() as temp:
+            executor = self.RecordingExecutor()
+            service = WebUiTaskService(
+                workspace_root=temp,
+                local_judge_script=Path(temp) / "judge.py",
+                executor=executor,
+            )
+            accepted, task_id = service.enqueue_sandbox(
+                {"dir": str(Path(temp) / "A"), "limits": {}},
+                worker=lambda *_args: None,
+            )
+            self.assertTrue(accepted)
+            self.assertEqual(service.cancel("sandbox", task_id), {"status": "cancelled"})
+
+    def test_service_releases_request_slot_when_pre_submit_cleanup_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            executor = self.RecordingExecutor()
+            service = WebUiTaskService(
+                workspace_root=temp,
+                local_judge_script=Path(temp) / "judge.py",
+                executor=executor,
+            )
+            slot = threading.BoundedSemaphore(1)
+            self.assertTrue(slot.acquire(blocking=False))
+            with (
+                mock.patch(
+                    "probhub.webui_tasks.cleanup_stale_submission_workspaces",
+                    side_effect=OSError("busy"),
+                ),
+                self.assertRaises(OSError),
+            ):
+                service.enqueue_submission(
+                    {"dir": str(Path(temp) / "A"), "limits": {}},
+                    "answer.cpp",
+                    b"int main(){}\n",
+                    task_slot=slot,
+                )
+            self.assertEqual(service.submission_jobs, {})
+            self.assertTrue(slot.acquire(blocking=False))
+            slot.release()
+
 
 
 class BoundedUtf8LogTests(unittest.TestCase):
