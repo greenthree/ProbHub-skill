@@ -8,7 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class SkillDocumentationTests(unittest.TestCase):
     def test_skill_and_index_have_valid_local_markdown_links(self):
-        documents = [ROOT / "SKILL.md", ROOT / "references" / "index.md"]
+        documents = [
+            ROOT / "SKILL.md",
+            ROOT / "references" / "index.md",
+            ROOT / "references" / "problem-design-principles.md",
+        ]
         links = re.compile(r"\]\(([^)#]+)(?:#[^)]+)?\)")
         for document in documents:
             text = document.read_text(encoding="utf-8")
@@ -29,6 +33,7 @@ class SkillDocumentationTests(unittest.TestCase):
             "verification-modes.md",
             "generations.md",
             "aggregate-limit-derivation.md",
+            "problem-design-principles.md",
             "problem-creation-walkthrough.md",
         ):
             with self.subTest(marker=marker):
@@ -41,6 +46,44 @@ class SkillDocumentationTests(unittest.TestCase):
         self.assertIn("all_expectations_met", skill)
         self.assertIn("基础设施", skill)
         self.assertNotIn("旧的 Legacy workflow", skill)
+
+    def test_problem_design_guidance_preserves_evidence_boundaries(self):
+        design = (ROOT / "references" / "problem-design-principles.md").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            "design_intent",
+            "difficulty_anchor",
+            "validation_risk",
+            "needs_review",
+            "数组/字符串",
+            "图论",
+            "多组数据",
+            "浮点/构造",
+            "交互题",
+            "设计建议",
+            "人工证明/审查",
+            "Core 证据",
+            "目标平台校准",
+            "不能证明不存在未知错解",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, design)
+        for reference in (
+            "verification-modes.md",
+            "aggregate-limit-derivation.md",
+            "mistake-taxonomy.md",
+            "data-groups-expectations.md",
+            "checker-interactor.md",
+            "workspace-schema-v1.md",
+            "problem-creation-walkthrough.md",
+        ):
+            with self.subTest(reference=reference):
+                self.assertIn(f"]({reference})", design)
+        for difficulty in range(6):
+            with self.subTest(difficulty=difficulty):
+                self.assertIn(f"| {difficulty} |", design)
+        self.assertIn("problem-design-principles.md", (ROOT / "SKILL.md").read_text(encoding="utf-8"))
 
     def test_problem_creation_walkthrough_covers_supported_judge_branches(self):
         walkthrough = (ROOT / "references" / "problem-creation-walkthrough.md").read_text(
