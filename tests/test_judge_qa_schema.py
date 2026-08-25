@@ -65,8 +65,8 @@ class JudgeQASchemaTests(unittest.TestCase):
         self.assertEqual(report["schema_version"], 1)
         self.assertEqual(report["judge_type"], "custom")
         self.assertRegex(report["fixture_hash"], r"^[0-9a-f]{64}$")
-        self.assertEqual(report["stats"]["cases"], 2)
-        self.assertEqual(report["stats"]["files"], 6)
+        self.assertEqual(report["stats"]["cases"], 3)
+        self.assertEqual(report["stats"]["files"], 7)
         self.assertEqual(
             {item["path"] for item in report["files"]},
             {
@@ -76,6 +76,7 @@ class JudgeQASchemaTests(unittest.TestCase):
                 "judge-fixtures/checker/extra.in",
                 "judge-fixtures/checker/extra.ans",
                 "judge-fixtures/checker/extra.out",
+                "judge-fixtures/checker/malformed.out",
             },
         )
 
@@ -87,8 +88,8 @@ class JudgeQASchemaTests(unittest.TestCase):
         self.assertEqual(MAX_JUDGE_QA_ROBUSTNESS_PROBES, 16)
         self.assertEqual(MAX_JUDGE_QA_DIAGNOSTICS, 128)
         expected = {
-            "checker-qa": "7b5c879af93ad156a8d248ed1ee08be1db43fa119b6612f59d4f7bee5e646d41",
-            "interactor-qa": "54957c98a1a4b9584489402a54c133430f746633a040124ee8970b2578e4c3c2",
+            "checker-qa": "038f6c153b09eed58d49f6b7e6b9d96bc2a89b59e3b0a5e52ea2b0dc87fbd6d5",
+            "interactor-qa": "f2b7bc127075799035720a480effddb86a4a495991c75dfb1eb0daf271adab76",
         }
         for name, digest in expected.items():
             with self.subTest(name=name):
@@ -118,10 +119,11 @@ class JudgeQASchemaTests(unittest.TestCase):
         report = result["problems"][0]["judge_qa"]
         self.assertTrue(report["ok"], report)
         self.assertEqual(report["judge_type"], "interactive")
-        self.assertEqual(report["stats"]["cases"], 4)
-        self.assertEqual(report["stats"]["files"], 5)
+        self.assertEqual(report["stats"]["cases"], 5)
+        self.assertEqual(report["stats"]["files"], 6)
         contestants = [case.get("contestant") for case in report["cases"]]
         self.assertIn({"source": "code/judge-qa/normal.cpp"}, contestants)
+        self.assertIn({"source": "code/judge-qa/wrong-response.cpp"}, contestants)
         self.assertIn({"behavior": "early-eof"}, contestants)
         self.assertIn({"behavior": "idle"}, contestants)
         self.assertIn({"behavior": "output-flood"}, contestants)
@@ -236,7 +238,7 @@ class JudgeQASchemaTests(unittest.TestCase):
             ),
             "judge_qa_contestant_behavior_invalid_type": (
                 "interactor-qa",
-                lambda config: config["judge"]["qa"]["cases"][1]["contestant"].update(
+                lambda config: config["judge"]["qa"]["cases"][2]["contestant"].update(
                     behavior=[]
                 ),
             ),

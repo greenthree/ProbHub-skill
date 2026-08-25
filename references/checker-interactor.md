@@ -202,6 +202,54 @@ judge:
 
 成功 evidence 只保存有界状态、期望/实际 verdict 和脱敏原因，不保存 stdout、stderr、feedback 正文或 transcript 条目。完整成功原子发布 `judge-qa-evidence-v1.json`；失败、取消、超时、输入变化或发布错误保留上一份成功 evidence。`lint`/`status` 将 evidence 报告为 `not-configured`、`missing`、`current`、`stale` 或 `invalid`，后三者是 warning；已配置题目的 `seal` 仍要求 Judge QA `passed` 且 evidence `current`。
 
+### 3.1.1 设计模式：把 Checker 分成两层
+
+对非唯一答案、构造和浮点题，先验证选手输出是一个合法 witness，再验证它满足题目目标。两层应使用不同的变量和失败原因，避免“能解析”被误当成“最优/正确”：
+
+1. **格式与合法性层**：读取所有必需字段，检查 EOF、编号/边界、重复项、集合大小、几何退化、整数溢出和 `NaN`/`inf`。
+2. **目标层**：在合法性已成立后，检查目标值、可行性、最优性或误差。不要把官方答案逐项复制成唯一格式，除非题面确实规定唯一输出。
+
+官方答案只应提供可审计的目标值或参考信息。Checker 不应与答案生成器共享同一个未复核的浮点公式、最优值实现或构造假设；至少用小范围穷举、第二种数值方法或独立构造验证答案。Core 可以执行这些程序和 fixture，但不能自动证明 Checker 的数学关系或官方答案独立正确。
+
+建议的 QA 最小矩阵：
+
+| 类别 | 例子 | 期望 |
+|---|---|---|
+| 合法替代 | 不同但满足约束的 witness | AC |
+| 格式错误 | 缺字段、非法 token、额外 token | WA |
+| 合法格式但目标错误 | 非最优值、越界边、错误误差 | WA |
+| 数值边界 | 误差阈值两侧、`NaN`、`+inf`、`-inf` | 按题意明确判定 |
+| 官方/Checker 故障 | 答案截断、Checker `_fail` 或清理失败 | infrastructure FAIL |
+
+`FAIL` 不应写入 `expected.status` 来“通过” fixture，也不能当作错解被击杀。`robustness` 探针返回 AC 时仍需人工确认它没有误放行。
+
+### 3.1.2 设计模式：Interactor 状态机
+
+交互题先画状态机，再写 Interactor 和题面。每条边都标出消息方向、语法、参数范围、计数点、刷新和下一状态：
+
+| 状态 | 收到/发送 | 条件与动作 | 失败分类 |
+|---|---|---|---|
+| `START` | Interactor → 选手 | 发送初始数据并 `flush` | 发送失败/Interactor 崩溃：FAIL |
+| `WAIT_QUERY` | 选手 → Interactor | 解析命令和参数，记录一次查询 | 非法命令/参数：WA；超过题目上限：WA |
+| `ANSWER` | 选手 → Interactor | 验证最终答案，不再接受查询 | 正确 AC，错误 WA |
+| `DONE` | Interactor → 选手/退出 | 发送终止信息并结束 | 提前 EOF、协议断裂：按题意 WA/RE |
+
+查询计数、命令字、终止 token 和状态转移是具体题目的语义，必须由题面与 Interactor 共同实现。当前 Schema 不增加通用 `query_limit` 字段；`interactive.idle_limit` 只表示通信空闲时间，`transcript_limit` 只限制保存的通信字节，二者都不是查询次数上限。
+
+至少主动覆盖：正常策略、相反/边界回答、非法命令或参数、超查询、提前 EOF、未 flush 导致的 idle、总时限、输出洪泛和 Interactor 自身 `_fail`。其中 Interactor/进程控制/清理故障必须保持 infrastructure 语义。
+
+### 3.1.3 固定、自适应与隐藏策略
+
+Interactor 可以采用以下策略，但选择必须服务于题面承诺，而不是让错误程序“碰巧通过”：
+
+- **固定回答**：适合协议和基础边界回归；至少再准备一个相反边界，避免只测试一条路径。
+- **自适应回答**：根据选手历史查询维护状态；用小状态空间穷举或独立模型检查状态转移，记录覆盖到的状态和边。
+- **隐藏 strategy**：让输入携带 Validator 接受、题面不公开的策略编号；数据组分别选择相反策略，Interactor 读取该字段，选手仍只看到公开协议。
+
+一个可审计的最小设计是 `strategy=0` 优先回答左分支、`strategy=1` 优先回答右分支，再用 `normal`、`always-left`、`always-right` 和 `query-over-limit` 四类 QA 选手验证。若某个错误解在所有策略下都 AC，先怀疑 Interactor 过弱；不能仅凭一次成功运行认定错解正确。
+
+这些策略、查询上限和状态覆盖是人工设计与审查结论，不是 Core 自动推导的证明。错解分类继续遵循 [mistake-taxonomy.md](mistake-taxonomy.md)，验证深度遵循 [verification-modes.md](verification-modes.md)；Fixture evidence 只证明列出的输入、选手和协议分支。
+
 ## 4. 工艺守则
 
 ### Validator

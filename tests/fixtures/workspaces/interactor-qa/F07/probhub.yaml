@@ -23,6 +23,11 @@ judge:
       case: secret/edge
       contestant: {source: code/judge-qa/normal.cpp}
       expected: {status: AC}
+    - id: wrong-response-player
+      purpose: wrong-response
+      case: sample/basic
+      contestant: {source: code/judge-qa/wrong-response.cpp}
+      expected: {status: WA}
     - id: early-eof-player
       purpose: early-eof
       case: sample/basic
