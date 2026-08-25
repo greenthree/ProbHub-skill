@@ -60,7 +60,7 @@ def _configured_typst_sources(root, workspace, main_typ):
     if cover:
         generated_lib = lib_typ.with_name(f"{TYPST_TEMP_SOURCE_PREFIX}lib-{token}.typ")
         lib_text = lib_typ.read_text(encoding="utf-8")
-        logo = _typst_string(cover.get("logo", "usts.png"))
+        logo = _typst_string(cover.get("logo", "probhub.svg"))
         width = str(cover.get("logo_width", "9cm")).strip() or "9cm"
         above = str(cover.get("logo_space_above", "0em")).strip() or "0em"
         below = str(cover.get("logo_space_below", "0em")).strip() or "0em"

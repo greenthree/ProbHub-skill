@@ -45,6 +45,7 @@
   "files": [
     "bin/*.js",
     "CHANGELOG.md",
+    "logo.svg",
     "requirements.txt",
     "requirements.lock",
     "SKILL.md",

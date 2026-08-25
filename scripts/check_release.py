@@ -241,7 +241,7 @@ def validate_pack_inventories(
     main_paths = {entry["path"] for entry in main.get("files", [])}
     compat_paths = {entry["path"] for entry in compat.get("files", [])}
     required_main = {
-        "LICENSE", "README.md", "CHANGELOG.md", "SKILL.md", "package.json",
+        "LICENSE", "README.md", "CHANGELOG.md", "SKILL.md", "logo.svg", "package.json",
         "requirements.txt", "requirements.lock", "bin/init.js", "bin/probhub.js", "bin/python.js",
         "probhub/__init__.py", "probhub/cli.py", "probhub/dependency_lock.py", "probhub/install_deps.py",
         "probhub/install_skill.py", "probhub/process_control.py",
@@ -261,7 +261,7 @@ def validate_pack_inventories(
         "scripts/webui/vendor/mathjax-tex-svg.js", "scripts/webui/vendor/sortable.js",
         "scripts/webui/vendor/THIRD_PARTY_NOTICES.txt",
         "references/cli.md", "references/lib.typ", "references/main.typ",
-        "references/problems.typ", "references/usts.png", "references/testlib.h",
+        "references/problems.typ", "references/testlib.h",
         "references/installation.md",
         "references/aggregate-limit-derivation.md",
         "references/checker-interactor.md",
@@ -270,6 +270,8 @@ def validate_pack_inventories(
     missing = sorted(required_main - main_paths)
     if missing:
         raise ReleaseCheckError(f"main npm package is missing required files: {missing}")
+    if "references/usts.png" in main_paths:
+        raise ReleaseCheckError("main npm package still contains the retired references/usts.png asset")
     for prefix in ("scripts/webui/vendor/fonts/", "scripts/webui/vendor/licenses/"):
         if not any(path.startswith(prefix) for path in main_paths):
             raise ReleaseCheckError(f"main npm package is missing WebUI assets under {prefix}")

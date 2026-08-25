@@ -217,7 +217,7 @@
     maketitle(title: title, subtitle: subtitle, date: date, author: author)
     v(-2.2em) //正式赛
     // v(1.5em)
-    align(center, image("usts.png", width: 9cm))
+    align(center, image("probhub.svg", width: 9cm))
     // TOC
     if enable-problem-list {
       figure(

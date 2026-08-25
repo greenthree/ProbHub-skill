@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- 通用脚手架封面移除赛事专属 `usts.png`，改用主包唯一的 `logo.svg` 作为 ProbHub 品牌源；`probhub init`、Typst、WebUI、发布清单和干净安装默认统一为工作区内的 `probhub.svg`，赛事仍可配置自己的 Typst 目录内 Logo。
+
 ## [0.7.0] - 2026-08-25
 
 - Judge 执行、预览产物、工作区信息、协议处理、任务生命周期和监督逻辑统一为 Python Core 模块；CLI、WebUI 和 Skill 复用这些底层能力，WebUI 仍保留路由适配与任务编排。

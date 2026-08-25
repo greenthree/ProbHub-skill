@@ -36,7 +36,7 @@ class TypstPdfIntegrationTests(unittest.TestCase):
         typst_dir.mkdir(parents=True)
         references = ROOT / "references"
         shutil.copyfile(references / "lib.typ", typst_root / "lib.typ")
-        shutil.copyfile(references / "usts.png", typst_root / "usts.png")
+        shutil.copyfile(ROOT / "logo.svg", typst_root / "probhub.svg")
         shutil.copyfile(references / "main.typ", typst_dir / "main.typ")
         shutil.copyfile(references / "problems.typ", typst_dir / "problems.typ")
 
@@ -52,7 +52,7 @@ class TypstPdfIntegrationTests(unittest.TestCase):
                 "directory": "typst-statement/正式赛",
                 "creation_timestamp": 0,
                 "cover": {
-                    "logo": "usts.png",
+                    "logo": "probhub.svg",
                     "logo_width": "7cm",
                     "logo_space_above": "0em",
                     "logo_space_below": "0em",
@@ -205,6 +205,28 @@ class TypstPdfIntegrationTests(unittest.TestCase):
                 (root / "typst-statement/lib.typ").read_bytes(),
                 (ROOT / "references/lib.typ").read_bytes(),
             )
+            self.assertEqual(list(root.rglob(".probhub-*.typ")), [])
+
+    def test_canonical_production_template_compiles_custom_workspace_logo(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = self.create_production_template_workspace(root)
+            custom_logo = root / "typst-statement/custom-logo.svg"
+            custom_logo.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">'
+                '<rect width="80" height="40" fill="#336699"/></svg>\n',
+                encoding="utf-8",
+            )
+            workspace_path = root / ".probhub/workspace.yaml"
+            workspace["typst"]["cover"]["logo"] = custom_logo.name
+            write_yaml(workspace_path, workspace)
+            _, workspace = load_workspace(root)
+
+            result = typeset_workspace(root, workspace, problem_entries(workspace))
+
+            self.assertTrue(Path(result["main_pdf"]).is_file())
+            self.assertEqual(workspace["typst"]["cover"]["logo"], "custom-logo.svg")
+            self.assertEqual(custom_logo.read_text(encoding="utf-8").count("#336699"), 1)
             self.assertEqual(list(root.rglob(".probhub-*.typ")), [])
 
     def test_canonical_markers_support_duplicate_long_names_and_aa_label(self):

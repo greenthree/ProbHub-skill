@@ -239,7 +239,7 @@ def _init_typst_templates(root, subtitle):
     typst_dir = typst_root / subtitle
     sources = {
         typst_root / "lib.typ": references / "lib.typ",
-        typst_root / "usts.png": references / "usts.png",
+        typst_root / "probhub.svg": package_root / "logo.svg",
         typst_dir / "main.typ": references / "main.typ",
         typst_dir / "problems.typ": references / "problems.typ",
     }
@@ -319,7 +319,16 @@ def command_init(args):
         data = {
             "schema_version": 1,
             "contest": {"title": args.title or root.name, "subtitle": subtitle, "author": args.author or ""},
-            "typst": {"directory": f"typst-statement/{subtitle}", "creation_timestamp": 0},
+            "typst": {
+                "directory": f"typst-statement/{subtitle}",
+                "creation_timestamp": 0,
+                "cover": {
+                    "logo": "probhub.svg",
+                    "logo_width": "9cm",
+                    "logo_space_above": "0em",
+                    "logo_space_below": "0em",
+                },
+            },
             "problems": [],
             "lint": {"forbidden_patterns": ["TODO", "FIXME", "114514", "待补充"]},
         }

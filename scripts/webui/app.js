@@ -97,7 +97,7 @@
                 trackWidth: 800,
                 saveStatus: '',   // '' | 'saving' | 'saved' | 'error'
                 tagDraft: '',
-                coverConfig: { title: '', subtitle: '', author: '', date: '', logo: 'usts.png', logo_width: '9cm', logo_space_above: '0em', logo_space_below: '0em' },
+                coverConfig: { title: '', subtitle: '', author: '', date: '', logo: 'probhub.svg', logo_width: '9cm', logo_space_above: '0em', logo_space_below: '0em' },
                 _saveTimer: null,
                 _writerPromise: Promise.resolve(true),
                 _coverSaveTimer: null,
