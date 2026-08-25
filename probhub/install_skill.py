@@ -32,7 +32,7 @@ TARGETS = (
     ".claude/skills/probhub",
     ".agents/skills/probhub",
 )
-PACKAGE_ITEMS = ("SKILL.md", "logo.svg", "references", "scripts", "probhub")
+PACKAGE_ITEMS = ("SKILL.md", "logo.svg", "school-badge.png", "references", "scripts", "probhub")
 _TRANSACTION_NAME = re.compile(
     rf"^{re.escape(TRANSACTION_PREFIX)}[0-9a-f]{{32}}$"
 )

@@ -87,12 +87,12 @@ probhub init [directory] --title "Contest" --subtitle "正式赛" --author "Team
 ```text
 .probhub/workspace.yaml
 typst-statement/lib.typ
-typst-statement/probhub.svg
+typst-statement/school-badge.png
 typst-statement/<subtitle>/main.typ
 typst-statement/<subtitle>/problems.typ
 ```
 
-模板和默认 ProbHub Logo 直接来自当前已安装 npm 包，不依赖源码仓库；workspace 固定记录 `creation_timestamp: 0` 并把 `typst.cover.logo` 设为 `probhub.svg`，避免构建时间进入 PDF 身份。赛事可把它改为 Typst 目录内的任意自有 Logo。已有 Typst 文件和 workspace 自有 Logo 会保留，不被 `init --force` 静默覆盖。`subtitle` 必须是跨平台安全的单级目录名。
+模板和默认 ProbHub Logo 直接来自当前已安装 npm 包，不依赖源码仓库；workspace 固定记录 `creation_timestamp: 0` 并把 `typst.cover.logo` 设为 `school-badge.png`，避免构建时间进入 PDF 身份。赛事可把它改为 Typst 目录内的任意自有 Logo。已有 Typst 文件和 workspace 自有 Logo 会保留，不被 `init --force` 静默覆盖。`subtitle` 必须是跨平台安全的单级目录名。
 
 已初始化的工作区不要再次执行 `init`。只有明确需要覆盖 workspace 配置时才使用 `--force`。
 

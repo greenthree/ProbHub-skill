@@ -586,7 +586,7 @@ def save_editor_data(root, workspace, submitted):
 
 
 DEFAULT_COVER_CONFIG = {
-    "logo": "probhub.svg",
+    "logo": "school-badge.png",
     "logo_width": "9cm",
     "logo_space_above": "0em",
     "logo_space_below": "0em",

@@ -11,6 +11,7 @@ from probhub.errors import ProbHubError
 from probhub.hashing import hash_file
 from probhub.io import write_yaml
 from probhub.metadata import problem_boundary_marker
+from probhub.process_control import run_managed_to_files
 from probhub.scaffold import scaffold_config, scaffold_files
 from probhub.typesetting import problem_boundaries
 from probhub.workspace import load_problem, load_workspace, problem_entries
@@ -21,6 +22,47 @@ RUN_TYPST_E2E = (
     os.environ.get("PROBHUB_RUN_TYPST_E2E") == "1"
     and shutil.which("typst") is not None
 )
+
+
+@unittest.skipUnless(
+    shutil.which("typst") is not None,
+    "Typst not found on PATH",
+)
+class CheckedInTypstTemplateTests(unittest.TestCase):
+    def test_checked_in_typst_template_compiles_with_packaged_logo(self):
+        self.assertTrue((ROOT / "school-badge.png").is_file())
+        self.assertEqual(
+            (ROOT / "typst-template/school-badge.png").read_bytes(),
+            (ROOT / "school-badge.png").read_bytes(),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "typst-template.pdf"
+            stdout_path = Path(temp) / "stdout"
+            stderr_path = Path(temp) / "stderr"
+            result = run_managed_to_files(
+                [
+                    "typst",
+                    "compile",
+                    "--root",
+                    str(ROOT),
+                    str(ROOT / "typst-template/正式赛/main.typ"),
+                    str(output),
+                ],
+                cwd=ROOT,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout=120,
+                memory_limit_mb=2048,
+                output_limit_bytes=4 * 1024 * 1024,
+                process_limit=32,
+            )
+            self.assertEqual(
+                (result["reason"], result["returncode"]),
+                ("completed", 0),
+                stderr_path.read_text(encoding="utf-8", errors="replace")
+                + stdout_path.read_text(encoding="utf-8", errors="replace"),
+            )
+            self.assertTrue(output.is_file())
 
 
 @unittest.skipUnless(
@@ -36,7 +78,7 @@ class TypstPdfIntegrationTests(unittest.TestCase):
         typst_dir.mkdir(parents=True)
         references = ROOT / "references"
         shutil.copyfile(references / "lib.typ", typst_root / "lib.typ")
-        shutil.copyfile(ROOT / "logo.svg", typst_root / "probhub.svg")
+        shutil.copyfile(ROOT / "school-badge.png", typst_root / "school-badge.png")
         shutil.copyfile(references / "main.typ", typst_dir / "main.typ")
         shutil.copyfile(references / "problems.typ", typst_dir / "problems.typ")
 
@@ -52,7 +94,7 @@ class TypstPdfIntegrationTests(unittest.TestCase):
                 "directory": "typst-statement/正式赛",
                 "creation_timestamp": 0,
                 "cover": {
-                    "logo": "probhub.svg",
+                    "logo": "school-badge.png",
                     "logo_width": "7cm",
                     "logo_space_above": "0em",
                     "logo_space_below": "0em",

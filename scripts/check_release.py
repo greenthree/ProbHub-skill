@@ -241,7 +241,7 @@ def validate_pack_inventories(
     main_paths = {entry["path"] for entry in main.get("files", [])}
     compat_paths = {entry["path"] for entry in compat.get("files", [])}
     required_main = {
-        "LICENSE", "README.md", "CHANGELOG.md", "SKILL.md", "logo.svg", "package.json",
+        "LICENSE", "README.md", "CHANGELOG.md", "SKILL.md", "logo.svg", "school-badge.png", "package.json",
         "requirements.txt", "requirements.lock", "bin/init.js", "bin/probhub.js", "bin/python.js",
         "probhub/__init__.py", "probhub/cli.py", "probhub/dependency_lock.py", "probhub/install_deps.py",
         "probhub/install_skill.py", "probhub/process_control.py",

@@ -35,7 +35,7 @@ class ScaffoldTests(unittest.TestCase):
             result = self.init_workspace(root)
             expected = {
                 "typst-statement/lib.typ": "references/lib.typ",
-                "typst-statement/probhub.svg": "logo.svg",
+                "typst-statement/school-badge.png": "school-badge.png",
                 "typst-statement/正式赛/main.typ": "references/main.typ",
                 "typst-statement/正式赛/problems.typ": "references/problems.typ",
             }
@@ -45,12 +45,13 @@ class ScaffoldTests(unittest.TestCase):
             _, workspace = load_workspace(root, allow_empty=True)
             self.assertEqual(workspace["typst"]["creation_timestamp"], 0)
             self.assertEqual(workspace["typst"]["cover"], {
-                "logo": "probhub.svg",
+                "logo": "school-badge.png",
                 "logo_width": "9cm",
                 "logo_space_above": "0em",
                 "logo_space_below": "0em",
             })
             self.assertFalse((root / "typst-statement/usts.png").exists())
+            self.assertFalse((root / "typst-statement/probhub.svg").exists())
             self.assertEqual(len(result["typst"]["created"]), 4)
 
             main_typ = root / "typst-statement/正式赛/main.typ"

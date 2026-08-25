@@ -60,6 +60,7 @@ class NpmPackageMetadataTests(unittest.TestCase):
             entry["path"] for entry in npm_pack_manifest(dry_run=True)["files"]
         }
         self.assertIn("logo.svg", main_files)
+        self.assertIn("school-badge.png", main_files)
         self.assertNotIn("references/usts.png", main_files)
         self.assertIn("probhub/judge_qa_evidence.py", main_files)
         self.assertIn("probhub/judge_qa_runtime.py", main_files)
@@ -389,6 +390,10 @@ class NpmPackageMetadataTests(unittest.TestCase):
                 self.assertEqual(
                     (target / "logo.svg").read_bytes(),
                     (ROOT / "logo.svg").read_bytes(),
+                )
+                self.assertEqual(
+                    (target / "school-badge.png").read_bytes(),
+                    (ROOT / "school-badge.png").read_bytes(),
                 )
 
             for target in (

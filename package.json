@@ -46,6 +46,7 @@
     "bin/*.js",
     "CHANGELOG.md",
     "logo.svg",
+    "school-badge.png",
     "requirements.txt",
     "requirements.lock",
     "SKILL.md",

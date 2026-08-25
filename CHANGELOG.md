@@ -4,7 +4,7 @@
 
 ## [Unreleased]
 
-- 通用脚手架封面移除赛事专属 `usts.png`，改用主包唯一的 `logo.svg` 作为 ProbHub 品牌源；`probhub init`、Typst、WebUI、发布清单和干净安装默认统一为工作区内的 `probhub.svg`，赛事仍可配置自己的 Typst 目录内 Logo。
+- 通用脚手架封面移除赛事专属 `usts.png`，由主包根 `logo.svg` 生成并发布 `school-badge.png`；`probhub init`、Typst、WebUI、发布清单和干净安装默认统一为工作区内的 `school-badge.png`，赛事仍可配置自己的 Typst 目录内 Logo。
 
 ## [0.7.0] - 2026-08-25
 

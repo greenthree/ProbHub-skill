@@ -7,7 +7,7 @@ from probhub.typesetting import compile_collection
 
 
 class TypesettingConfigTests(unittest.TestCase):
-    def test_partial_cover_config_defaults_to_probhub_logo(self):
+    def test_partial_cover_config_defaults_to_school_badge(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             typst_dir = root / "typst/contest"
@@ -30,7 +30,7 @@ class TypesettingConfigTests(unittest.TestCase):
             def fake_run(command, **_kwargs):
                 generated = next(path for path in typst_dir.parent.glob(".probhub-lib-*.typ"))
                 self.assertIn(
-                    'image("probhub.svg", width: 6cm)',
+                    'image("school-badge.png", width: 6cm)',
                     generated.read_text(encoding="utf-8"),
                 )
                 (root / command[-1]).write_bytes(b"pdf")

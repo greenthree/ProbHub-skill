@@ -15,7 +15,7 @@ typst:
   directory: typst-statement/正式赛
   creation_timestamp: 1782403200
   cover:
-    logo: probhub.svg
+    logo: school-badge.png
     logo_width: 9cm
     logo_space_above: 0em
     logo_space_below: 0em
@@ -28,7 +28,7 @@ lint:
 
 The order of `problems` is the official contest order. `id` is stable and does not change when the displayed letter changes.
 
-`contest` 是赛事标题、封面副标题、作者和日期的规范源。`typst.cover` 可选，用于覆盖封面 Logo 和间距；`probhub init` 默认安装并配置 `typst-statement/probhub.svg`，赛事可把 `logo` 改为 Typst 目录内的任意自有资源。Logo 路径必须留在 Typst 目录内，宽度和间距使用 Typst 长度。Core 排版时生成临时入口应用这些值，不修改正式 `main.typ` 或 `lib.typ`，也不会改写已有工作区的配置或 Logo 文件。
+`contest` 是赛事标题、封面副标题、作者和日期的规范源。`typst.cover` 可选，用于覆盖封面 Logo 和间距；`probhub init` 默认安装并配置 `typst-statement/school-badge.png`，赛事可把 `logo` 改为 Typst 目录内的任意自有资源。Logo 路径必须留在 Typst 目录内，宽度和间距使用 Typst 长度。Core 排版时生成临时入口应用这些值，不修改正式 `main.typ` 或 `lib.typ`，也不会改写已有工作区的配置或 Logo 文件。
 
 ## Problem file
 
