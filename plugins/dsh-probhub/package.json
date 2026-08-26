@@ -1,0 +1,42 @@
+{
+  "name": "dsh-probhub",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness tools for the installed ProbHub CLI",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/index.mjs",
+    "src/protocol.mjs",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "probhub": "0.7.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1 <5",
+    "@deepseek-ai/dsh-sandbox": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-sandbox-policy": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test test/protocol.test.mjs",
+    "test:packed": "node --test test/packed-adapter.test.mjs",
+    "test:core-cli": "node --test test/core-cli-argv.test.mjs"
+  }
+}
