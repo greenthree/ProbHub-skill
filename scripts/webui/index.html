@@ -57,6 +57,11 @@
                                     :class="activePage === 'sandbox' ? 'bg-gold/12 text-gold-light' : 'text-cream-subtle hover:text-cream'">
                                 沙箱评测
                             </button>
+                            <button @click="openHealth()"
+                                    class="px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors"
+                                    :class="activePage === 'health' ? 'bg-gold/12 text-gold-light' : 'text-cream-subtle hover:text-cream'">
+                                健康状态
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -686,6 +691,73 @@
                             <span class="text-[11px] text-cream-subtle" x-text="sandboxLogOpen ? '收起' : '展开'"></span>
                         </button>
                         <pre x-show="sandboxLogOpen" x-collapse class="max-h-[320px] overflow-auto px-4 pb-4 text-[11px] leading-relaxed font-mono text-cream-muted whitespace-pre-wrap" x-text="sandboxLogs || '暂无日志。'"></pre>
+                    </div>
+                </div>
+            </div>
+
+            <div x-show="activePage === 'health'" class="workspace-panel flex-1 ink-card rounded-2xl p-6 overflow-y-auto relative">
+                <div class="space-y-6 animate-fade-in">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <div class="flex items-center gap-2 mb-2">
+                                <div class="w-1 h-4 rounded-full bg-gold"></div>
+                                <h2 class="font-serif text-[18px] font-semibold text-cream">题目健康状态</h2>
+                            </div>
+                            <p class="text-xs text-cream-subtle">只读摘要，判定由 ProbHub Core 提供；本机校准不代表 Linux/DOMjudge 保证。</p>
+                        </div>
+                        <button @click="loadHealth()" class="secondary-action px-3 py-2 rounded-lg text-[12px] text-cream-muted hover:text-cream" :disabled="healthLoading">
+                            <span x-text="healthLoading ? '刷新中...' : '刷新状态'"></span>
+                        </button>
+                    </div>
+
+                    <div x-show="healthError" class="rounded-xl border border-danger/30 bg-danger/10 p-4 text-sm text-danger" x-text="healthError"></div>
+                    <div x-show="health && !healthError" class="rounded-xl border border-white/[0.02] bg-ink-input/35 px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] text-cream-subtle">
+                        <span>Generation <strong class="font-mono text-cream" x-text="health ? health.generation.state : 'none'"></strong></span>
+                        <span>完整 <strong class="font-mono text-cream" x-text="health && health.generation.complete === true ? 'yes' : 'no'"></strong></span>
+                        <span>全部 sealed <strong class="font-mono text-cream" x-text="health && health.generation.all_sealed === true ? 'yes' : 'no'"></strong></span>
+                    </div>
+                    <div x-show="!healthError && health && health.problems.length === 0" class="rounded-xl border border-white/[0.02] bg-ink-input/40 p-8 text-center text-sm text-cream-subtle">
+                        当前排版集没有题目。
+                    </div>
+                    <div x-show="health && health.problems.length > 0" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                        <template x-for="item in (health ? health.problems : [])" :key="item.id">
+                            <article class="rounded-xl border border-white/[0.03] bg-ink-input/35 p-4 space-y-4">
+                                <div class="flex items-center justify-between gap-3">
+                                    <div>
+                                        <p class="font-mono text-[11px] text-gold" x-text="item.id"></p>
+                                        <h3 class="text-[15px] font-semibold text-cream" x-text="item.name"></h3>
+                                    </div>
+                                    <span class="px-2 py-1 rounded text-[10px] font-mono" :class="healthStateClass(item.artifacts.state)" x-text="item.artifacts.state"></span>
+                                </div>
+                                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                                    <template x-for="check in healthCards(item)" :key="check.label">
+                                        <div class="rounded-lg bg-ink-elevated/60 p-2.5">
+                                            <p class="text-cream-subtle" x-text="check.label"></p>
+                                            <p class="font-mono mt-1" :class="healthStateClass(check.state)" x-text="check.state"></p>
+                                        </div>
+                                    </template>
+                                </div>
+                                <div class="text-[11px] text-cream-subtle space-y-1">
+                                    <p>Lint: <span class="font-mono" x-text="item.lint.errors.length + ' errors / ' + item.lint.warnings.length + ' warnings'"></span></p>
+                                    <p>约束对账: <span class="font-mono" x-text="item.constraints.state + ' / aggregate ' + item.constraints.aggregate_state"></span></p>
+                                    <p>Sealed revision: <span class="font-mono" x-text="item.checkpoint.revision_id || 'missing'"></span></p>
+                                    <p>Accepted 余量: <span class="font-mono" x-text="healthHeadroom(item)"></span></p>
+                                    <p>资源击杀: <span class="font-mono" x-text="healthKillSummary(item)"></span></p>
+                                    <p x-show="item.artifacts.stale_fields.length">Stale: <span class="font-mono text-gold" x-text="item.artifacts.stale_fields.join(', ')"></span></p>
+                                </div>
+                                <div x-show="healthRemediations(item).length" class="space-y-1.5">
+                                    <p class="text-[10px] uppercase tracking-wide text-cream-subtle">Remediation</p>
+                                    <template x-for="remediation in healthRemediations(item)" :key="remediation.action_code">
+                                        <div class="rounded-lg bg-ink-elevated/60 px-3 py-2 text-[10px]">
+                                            <p class="text-cream-muted" x-text="remediation.description || remediation.action_code"></p>
+                                            <code class="block mt-1 text-gold" x-text="healthCommand(remediation)"></code>
+                                            <p x-show="remediation.manual_review_required" class="mt-1 text-danger">需要人工复核</p>
+                                        </div>
+                                    </template>
+                                </div>
+                                <div x-show="item.evidence.calibration.measurement_note" class="text-[10px] leading-relaxed text-cream-subtle/70" x-text="item.evidence.calibration.measurement_note"></div>
+                            </article>
+                        </template>
                     </div>
                 </div>
             </div>
