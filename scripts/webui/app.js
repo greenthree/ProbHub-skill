@@ -71,6 +71,9 @@
                 health: null,
                 healthLoading: false,
                 healthError: '',
+                coverage: null,
+                coverageLoading: false,
+                coverageError: '',
                 isCompiling: false,
                 isDistributing: false,
                 sandboxRunning: false,
@@ -196,6 +199,7 @@
                             this.loadData();
                             this.loadConfig();
                             this.loadPdfPages();
+                            this.loadCoverage();
                         }
                     });
                 },
@@ -235,6 +239,7 @@
                     this.pdfRefresh = Date.now();
                     this.loadPdfPages();
                     this.loadHealth();
+                    this.loadCoverage();
                 },
 
                 initSortable() {
@@ -448,6 +453,11 @@
                     this.loadHealth();
                 },
 
+                openCoverage() {
+                    this.activePage = 'coverage';
+                    this.loadCoverage();
+                },
+
                 loadHealth() {
                     if (!this.currentSubtitle) {
                         this.health = null;
@@ -469,6 +479,195 @@
                         })
                         .catch(() => { this.health = null; this.healthError = '健康状态请求失败'; })
                         .finally(() => { this.healthLoading = false; });
+                },
+
+                loadCoverage() {
+                    if (!this.currentSubtitle) {
+                        this.coverage = null;
+                        return;
+                    }
+                    const subtitle = this.currentSubtitle;
+                    this.coverageLoading = true;
+                    this.coverageError = '';
+                    fetch(`/api/coverage?collection=${encodeURIComponent(subtitle)}`)
+                        .then(res => res.json().then(data => ({ok: res.ok, data})))
+                        .then(({ok, data}) => {
+                            if (this.currentSubtitle !== subtitle) return;
+                            if (!ok || !data.success) {
+                                this.coverage = null;
+                                this.coverageError = data.error || '覆盖与交付摘要暂不可用';
+                                return;
+                            }
+                            this.coverage = data;
+                        })
+                        .catch(() => {
+                            this.coverage = null;
+                            this.coverageError = '覆盖与交付摘要请求失败';
+                        })
+                        .finally(() => { this.coverageLoading = false; });
+                },
+
+                coverageProblems() {
+                    return this.coverage && Array.isArray(this.coverage.problems) ? this.coverage.problems : [];
+                },
+
+                coverageGroups(item) {
+                    const groups = item && item.coverage && Array.isArray(item.coverage.groups)
+                        ? item.coverage.groups : [];
+                    return groups;
+                },
+
+                coverageRecipes(item) {
+                    const recipes = item && item.coverage && Array.isArray(item.coverage.recipes)
+                        ? item.coverage.recipes : [];
+                    return recipes;
+                },
+
+                coverageWrong(item) {
+                    const rows = item && Array.isArray(item.wrong) ? item.wrong
+                        : (item && item.coverage && Array.isArray(item.coverage.wrong) ? item.coverage.wrong : []);
+                    return rows;
+                },
+
+                coverageWrongSummary(item) {
+                    const rows = this.coverageWrong(item);
+                    if (!rows.length) return '—';
+                    const passed = rows.filter(row => ['matched', 'passed', 'ok', 'current'].includes(row && row.state)).length;
+                    return `${passed}/${rows.length}`;
+                },
+
+                coverageSecretSummary(item) {
+                    const summary = item && item.coverage && item.coverage.secret_summary;
+                    if (summary && typeof summary === 'object') return summary;
+                    const groups = this.coverageGroups(item);
+                    const cases = groups.reduce((total, group) => total + this.numberValue(group && group.secret_cases), 0);
+                    return {cases, input_bytes: null, answer_bytes: null};
+                },
+
+                coverageUngroupedSecretCount(item) {
+                    const value = item && item.coverage ? item.coverage.ungrouped_secret_cases : null;
+                    return this.numberValue(value);
+                },
+
+                coverageBytes(item) {
+                    const summary = this.coverageSecretSummary(item);
+                    const input = Number(summary.input_bytes);
+                    const answer = Number(summary.answer_bytes);
+                    if (!Number.isFinite(input) && !Number.isFinite(answer)) return '—';
+                    const format = value => Number.isFinite(value) ? `${value} B` : '—';
+                    return `${format(input)} / ${format(answer)}`;
+                },
+
+                coverageRecipeText(recipe) {
+                    if (!recipe || typeof recipe !== 'object') return String(recipe || 'case');
+                    const labels = [recipe.recipe_hash ? `recipe ${recipe.recipe_hash}` : 'recipe'];
+                    if (recipe.generator) labels.push(`generator: ${recipe.generator}`);
+                    if (recipe.manual === true) labels.push('manual');
+                    if (Array.isArray(recipe.groups) && recipe.groups.length) labels.push(`groups: ${recipe.groups.join(', ')}`);
+                    return labels.join(' · ');
+                },
+
+                coverageImpactList(impact, key) {
+                    const value = impact && impact[key];
+                    if (Array.isArray(value)) return value;
+                    return value == null || value === '' ? [] : [String(value)];
+                },
+
+                numberValue(value) {
+                    if (Array.isArray(value)) return value.length;
+                    const parsed = Number(value);
+                    return Number.isFinite(parsed) ? parsed : 0;
+                },
+
+                coverageRatio(value) {
+                    const parsed = Number(value);
+                    if (!Number.isFinite(parsed)) return '—';
+                    const ratio = parsed > 1 ? parsed / 100 : parsed;
+                    return `${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%`;
+                },
+
+                coveragePatternText(group) {
+                    const values = group && Array.isArray(group.patterns) ? group.patterns : [];
+                    return values.length ? values.join(', ') : '—';
+                },
+
+                coverageTargetText(group) {
+                    const values = group && Array.isArray(group.targets) ? group.targets : [];
+                    return values.length ? values.join(', ') : '—';
+                },
+
+                coverageWrongStateClass(state) {
+                    if (state === true || ['matched', 'passed', 'ok', 'current'].includes(state)) return 'text-success';
+                    if (state === false) return 'text-danger';
+                    if (['partial', 'warning', 'pending', 'missing', 'unknown'].includes(state)) return 'text-gold';
+                    return 'text-danger';
+                },
+
+                coverageStatusClass(state) {
+                    if (state === true || ['passed', 'pass', 'ok', 'current', 'sealed', 'ready', 'complete', 'done'].includes(state)) {
+                        return 'bg-success/15 text-success';
+                    }
+                    if (['warning', 'partial', 'pending', 'draft', 'missing', 'stale', 'unknown', 'not-configured'].includes(state) || state == null) {
+                        return 'bg-gold/15 text-gold';
+                    }
+                    return 'bg-danger/15 text-danger';
+                },
+
+                coverageBoolLabel(value) {
+                    if (value === true) return '通过';
+                    if (value === false) return '未通过';
+                    return value == null || value === '' ? '—' : String(value);
+                },
+
+                coverageQa(item) {
+                    const qa = item && item.judge_qa && typeof item.judge_qa === 'object' ? item.judge_qa
+                        : (item && item.coverage && item.coverage.judge_qa && typeof item.coverage.judge_qa === 'object'
+                            ? item.coverage.judge_qa : {});
+                    return qa;
+                },
+
+                coverageQaManualReviewCount(item) {
+                    const qa = this.coverageQa(item);
+                    if (Array.isArray(qa.manual_review_probes)) return qa.manual_review_probes.length;
+                    if (Array.isArray(qa.probes)) return qa.probes.filter(probe => probe && probe.manual_review_required).length;
+                    return qa.manual_review_required === true ? 1 : 0;
+                },
+
+                coverageImpact(item) {
+                    if (item && item.impact && typeof item.impact === 'object') return item.impact;
+                    return item && item.coverage && item.coverage.impact && typeof item.coverage.impact === 'object'
+                        ? item.coverage.impact : {};
+                },
+
+                deliveryItemValue(item, key) {
+                    if (!item || typeof item !== 'object') return null;
+                    if (item[key] != null) return item[key];
+                    if (key === 'sealed' || key === 'qa' || key === 'evidence' || key === 'pdf' || key === 'zip' || key === 'manifest') {
+                        return item.state === 'current' || item.state === 'ready' || item.state === 'complete' || item.state === 'sealed'
+                            ? true : (item.state || null);
+                    }
+                    return null;
+                },
+
+                delivery() {
+                    return this.coverage && this.coverage.delivery && typeof this.coverage.delivery === 'object'
+                        ? this.coverage.delivery : {};
+                },
+
+                deliveryItems() {
+                    const items = this.delivery().items;
+                    return Array.isArray(items) ? items : [];
+                },
+
+                deliveryRemediations() {
+                    const values = this.delivery().remediations;
+                    return Array.isArray(values) ? values : [];
+                },
+
+                deliveryRemediationText(remediation) {
+                    if (typeof remediation === 'string') return remediation;
+                    if (!remediation || typeof remediation !== 'object') return String(remediation == null ? '—' : remediation);
+                    return remediation.description || remediation.action_code || '需要人工复核';
                 },
 
                 healthStateClass(state) {
