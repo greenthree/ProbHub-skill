@@ -268,8 +268,67 @@ def _generation_summary(root):
     }
 
 
-def build_health_summary(root, workspace, selected_ids=None):
-    """Combine existing Core results without reading or publishing raw artifacts."""
+def _delivery_requirements(problem):
+    artifacts = problem.get("artifacts") or {}
+    checks = problem.get("checks") or {}
+    checkpoint = problem.get("checkpoint") or {}
+    requirements = []
+    if list(artifacts.get("stale_fields") or []):
+        requirements.append("build")
+    if checkpoint.get("state") in {"missing", "stale", "invalid"}:
+        requirements.extend(("checkpoint", "seal"))
+    if (checks.get("judge") or {}).get("state") in {"missing", "failed", "not-run"}:
+        requirements.append("judge")
+    qa = checks.get("judge_qa") or {}
+    if qa.get("applicable") and qa.get("state") not in {"current", "passed"}:
+        requirements.append("judge-qa")
+    calibration = (problem.get("evidence") or {}).get("calibration") or {}
+    if calibration.get("state") in {"missing", "stale", "invalid"}:
+        requirements.append("judge")
+    for key in ("pdf", "zip", "manifest"):
+        if artifacts.get(key) in {"missing", "stale", "invalid"}:
+            requirements.append("build")
+    return list(dict.fromkeys(requirements))
+
+
+def _delivery_item(problem):
+    artifacts = problem.get("artifacts") or {}
+    checks = problem.get("checks") or {}
+    checkpoint = problem.get("checkpoint") or {}
+    calibration = (problem.get("evidence") or {}).get("calibration") or {}
+    return {
+        "id": problem.get("id"),
+        "sealed": checkpoint.get("state") == "sealed",
+        "qa": (checks.get("judge_qa") or {}).get("state", "not-configured"),
+        "evidence": calibration.get("state", "missing"),
+        "pdf": artifacts.get("pdf", "missing"),
+        "zip": artifacts.get("zip", "missing"),
+        "manifest": artifacts.get("manifest", "missing"),
+        "requires": _delivery_requirements(problem),
+    }
+
+
+def _delivery_summary(problems):
+    items = [_delivery_item(problem) for problem in problems]
+    if not items:
+        state = "empty"
+    elif any(item["requires"] for item in items):
+        state = "needs-action"
+    elif all(
+        item["sealed"]
+        and item["qa"] in {"current", "passed", "not-configured"}
+        and item["evidence"] in {"current", "passed"}
+        and all(item[key] in {"current", "passed"} for key in ("pdf", "zip", "manifest"))
+        for item in items
+    ):
+        state = "ready"
+    else:
+        state = "incomplete"
+    return {"state": state, "items": items}
+
+
+def build_health_bundle(root, workspace, selected_ids=None):
+    """Build one read-only result bundle for health and coverage consumers."""
     root = Path(root).resolve()
     ensure_no_pending_transactions(root, workspace)
     all_entries = problem_entries(workspace)
@@ -277,8 +336,13 @@ def build_health_summary(root, workspace, selected_ids=None):
     if not entries:
         contest = workspace.get("contest") or {}
         return {
-            "success": True,
-            "schema_version": HEALTH_SCHEMA_VERSION,
+            "all_entries": all_entries,
+            "entries": entries,
+            "report": {},
+            "lint": {},
+            "lint_by_id": {},
+            "report_by_id": {},
+            "health_problems": [],
             "workspace": {
                 "title": contest.get("title") or root.name,
                 "subtitle": contest.get("subtitle"),
@@ -286,13 +350,13 @@ def build_health_summary(root, workspace, selected_ids=None):
                 "selected_count": 0,
             },
             "summary": {"problems": 0, "warnings": 0, "errors": 0},
-            "problems": [],
             "generation": _generation_summary(root),
+            "delivery": {"state": "empty", "items": []},
             "diagnostics": [],
         }
 
     lint = lint_workspace(root, workspace, entries)
-    report = build_workspace_report(root, workspace, entries)
+    report = build_workspace_report(root, workspace, entries, lint_result=lint)
     lint_by_id = {
         item.get("id"): item
         for item in lint.get("problems") or []
@@ -334,11 +398,31 @@ def build_health_summary(root, workspace, selected_ids=None):
             status,
         ))
     return {
-        "success": True,
-        "schema_version": HEALTH_SCHEMA_VERSION,
+        "all_entries": all_entries,
+        "entries": entries,
+        "report": report,
+        "lint": lint,
+        "lint_by_id": lint_by_id,
+        "report_by_id": report_by_id,
+        "health_problems": problems,
         "workspace": report.get("workspace") or {},
         "summary": report.get("summary") or {},
-        "problems": problems,
         "generation": _generation_summary(root),
+        "delivery": _delivery_summary(problems),
         "diagnostics": _diagnostics(report.get("diagnostics")),
+    }
+
+
+def build_health_summary(root, workspace, selected_ids=None, *, _bundle=None):
+    """Return the public health projection, optionally from a shared bundle."""
+    bundle = _bundle or build_health_bundle(root, workspace, selected_ids)
+    return {
+        "success": True,
+        "schema_version": HEALTH_SCHEMA_VERSION,
+        "workspace": bundle.get("workspace") or {},
+        "summary": bundle.get("summary") or {},
+        "problems": bundle.get("health_problems") or [],
+        "generation": bundle.get("generation") or {"state": "none", "ok": False},
+        "delivery": bundle.get("delivery") or {"state": "empty", "items": []},
+        "diagnostics": bundle.get("diagnostics") or [],
     }

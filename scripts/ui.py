@@ -58,6 +58,7 @@ from probhub.webui_workspace import (
     statement_asset_path,
 )
 from probhub.webui_health import HEALTH_SCHEMA_VERSION, build_health_summary
+from probhub.webui_coverage import COVERAGE_SCHEMA_VERSION, build_coverage_summary
 from probhub.workspace import load_workspace, problem_entries
 from probhub.webui_tasks import (
     BoundedTaskExecutor,
@@ -376,6 +377,51 @@ def get_health():
             "success": False,
             "error": "health summary unavailable",
             "code": "health_failed",
+        }), 500
+
+
+@app.route('/api/coverage', methods=['GET'])
+def get_coverage():
+    """Return the bounded, read-only data-group and delivery projection."""
+    collection = request.args.get('collection')
+    if not collection and 'subtitle' in request.args:
+        return jsonify({
+            "success": False,
+            "error": "use collection to select an existing typesetting collection",
+            "code": "invalid_collection_selector",
+        }), 400
+    if not collection:
+        return jsonify({
+            "success": True,
+            "schema_version": COVERAGE_SCHEMA_VERSION,
+            "source_revision": None,
+            "workspace": {},
+            "problems": [],
+            "delivery": {"state": "see-health", "requires": []},
+            "diagnostics": [],
+        })
+    try:
+        if not (Path.cwd() / ".probhub" / "workspace.yaml").is_file():
+            raise ProbHubError(
+                "Workspace Schema v1 is required; migrate this old workspace first",
+                code="migration_required",
+            )
+        root, workspace = load_workspace(Path.cwd(), allow_empty=True)
+        typst_dir = Path((workspace.get("typst") or {}).get("directory", "typst-statement/正式赛"))
+        if typst_dir.name != collection:
+            raise ProbHubError(f"unknown Schema v1 collection: {collection}", code="unknown_collection")
+        selected = request.args.getlist("problem") or None
+        return jsonify(build_coverage_summary(root, workspace, selected_ids=selected))
+    except ProbHubError as exc:
+        status = 409 if exc.code in {"migration_required", "unknown_collection", "recovery_required"} else 400
+        return jsonify({"success": False, "error": str(exc), "code": exc.code}), status
+    except Exception:
+        # A malformed or partial projection must never look like a delivery
+        # decision to the client.
+        return jsonify({
+            "success": False,
+            "error": "coverage summary unavailable",
+            "code": "coverage_failed",
         }), 500
 
 

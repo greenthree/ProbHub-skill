@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from probhub.calibration import build_judge_evidence, write_calibration_evidence
 from probhub.cli import main as cli_main
@@ -229,6 +230,16 @@ class WorkspaceReportTests(unittest.TestCase):
             codes = {diagnostic["code"] for diagnostic in item["diagnostics"]}
             self.assertIn("report_random_ratio_high", codes)
             self.assertIn("report_near_boundary_recipe_missing", codes)
+
+    def test_report_accepts_precomputed_lint_result_without_relinting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root)
+            _, workspace = load_workspace(root)
+            lint = lint_workspace(root, workspace)
+            with mock.patch("probhub.reporting.lint_workspace", side_effect=AssertionError("unexpected relint")):
+                report = build_workspace_report(root, workspace, lint_result=lint)
+            self.assertEqual(report["ok"], lint["ok"])
 
     def test_report_is_byte_for_byte_read_only_and_cli_supports_all_formats(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -2,8 +2,8 @@
   "schema_version": 1,
   "files": {
     "app.css": "sha256-text-lf:ce50a4bb97ee9f5e9748c16292d8e4c1e038d60d21ea05aac344a3808b57d4ca",
-    "app.js": "sha256-text-lf:46bc190c066511be219bdbfe526a4a61ea56cb97b9ac77c1ece4c555157f3199",
-    "index.html": "sha256-text-lf:306fc4cfd749afa3227f4a4046479ab6c9fc0d78b486e086f6db85582d15f5b4",
+    "app.js": "sha256-text-lf:dc999cba1db3d6cfa4f4d200e526b1302f35d1c9be478748eb1815daa5eba51d",
+    "index.html": "sha256-text-lf:5876cf5b0776098be60797d80a6a707000d6b8afc7ec83a98825b934bbbf9dee",
     "mathjax-config.js": "sha256-text-lf:56fbc310138be2821076be5dd7024090dae63982d483c3c9af187d83146da92e",
     "theme.js": "sha256-text-lf:cec2dc423d1dac5df360ea10fcb85fe4b09ffad82285d0edc89c773ab24d8bba",
     "vendor/THIRD_PARTY_NOTICES.txt": "sha256-text-lf:006d125012b4ac1c90cec04f7deb7e447c9e1cc614f3f0b32e278fa99b8defb0",
@@ -135,6 +135,6 @@
     "vendor/marked.js": "sha256-text-lf:7a1f8c5e7226b75ff16644bdb2c0130d2ae7371e7ea3106c2d6dac77ab0ff7b6",
     "vendor/mathjax-tex-svg.js": "sha256-text-lf:d4295dc33744836935c1399feece5159577b34c5c8ffb9f1c6324cd82e03a882",
     "vendor/sortable.js": "sha256-text-lf:bf4241bc73fef7f11c59a283a69fe8051cdd31c6d8ff5a2b9ba219e7831fcf76",
-    "vendor/tailwind.css": "sha256-text-lf:87b5921613189bdff09d137c154e724eddcd7d63e22987e122fc124d26879275"
+    "vendor/tailwind.css": "sha256-text-lf:3bb64cfe01f24028c896b802062492385b9ed20ea3e223da580e6449c6943f86"
   }
 }
