@@ -65,7 +65,7 @@
                             <button @click="openCoverage()"
                                     class="px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors"
                                     :class="activePage === 'coverage' ? 'bg-gold/12 text-gold-light' : 'text-cream-subtle hover:text-cream'">
-                                覆盖与交付
+                                数据覆盖
                             </button>
                         </div>
                     </div>
@@ -764,6 +764,14 @@
                             </article>
                         </template>
                     </div>
+                    <div x-show="healthDeliveryItems().length" class="rounded-xl border border-white/[0.03] bg-ink-input/35 overflow-hidden">
+                        <div class="px-4 py-3 border-b border-white/[0.02] flex items-center justify-between">
+                            <h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">正式交付清单</h3>
+                            <span class="text-[10px] font-mono text-cream-subtle" x-text="health && health.delivery ? health.delivery.state : 'unknown'"></span>
+                        </div>
+                        <div class="overflow-auto"><table class="w-full text-left text-[11px]"><thead class="bg-ink-card"><tr class="text-cream-subtle"><th class="px-4 py-2">题目</th><th class="px-3 py-2">sealed</th><th class="px-3 py-2">QA</th><th class="px-3 py-2">evidence</th><th class="px-3 py-2">PDF</th><th class="px-3 py-2">ZIP</th><th class="px-3 py-2">Manifest</th><th class="px-3 py-2">requires</th></tr></thead><tbody class="divide-y divide-white/[0.02]"><template x-for="item in healthDeliveryItems()" :key="item.id || $index"><tr><td class="px-4 py-2 font-mono text-cream" x-text="item.id || '—'"></td><td class="px-3 py-2" :class="coverageWrongStateClass(item.sealed)" x-text="coverageBoolLabel(item.sealed)"></td><td class="px-3 py-2" :class="coverageWrongStateClass(item.qa)" x-text="coverageBoolLabel(item.qa)"></td><td class="px-3 py-2" :class="coverageWrongStateClass(item.evidence)" x-text="coverageBoolLabel(item.evidence)"></td><td class="px-3 py-2" :class="coverageWrongStateClass(item.pdf)" x-text="coverageBoolLabel(item.pdf)"></td><td class="px-3 py-2" :class="coverageWrongStateClass(item.zip)" x-text="coverageBoolLabel(item.zip)"></td><td class="px-3 py-2" :class="coverageWrongStateClass(item.manifest)" x-text="coverageBoolLabel(item.manifest)"></td><td class="px-3 py-2 text-gold" x-text="healthDeliveryRequiresText(item)"></td></tr></template></tbody></table></div>
+                        <div x-show="healthDeliveryRemediations().length" class="p-4 border-t border-white/[0.02] space-y-1"><p class="text-[10px] uppercase tracking-wide text-cream-subtle">交付提醒</p><template x-for="(remediation, index) in healthDeliveryRemediations()" :key="index"><p class="text-[10px] text-gold" x-text="healthCommand(remediation)"></p></template></div>
+                    </div>
                 </div>
             </div>
 
@@ -773,9 +781,9 @@
                         <div>
                             <div class="flex items-center gap-2 mb-2">
                                 <div class="w-1 h-4 rounded-full bg-gold"></div>
-                                <h2 class="font-serif text-[18px] font-semibold text-cream">覆盖与交付检查</h2>
+                                <h2 class="font-serif text-[18px] font-semibold text-cream">数据覆盖</h2>
                             </div>
-                            <p class="text-xs text-cream-subtle">只读摘要：展示数据组元数据、错解覆盖、Judge QA、保存影响与交付清单。不会展开 secret 用例内容。</p>
+                            <p class="text-xs text-cream-subtle">只读摘要：展示数据组、recipe、已知错解覆盖、Judge QA probe 与修改影响。不会展开 secret 用例内容。</p>
                         </div>
                         <button @click="loadCoverage()" class="secondary-action px-3 py-2 rounded-lg text-[12px] text-cream-muted hover:text-cream" :disabled="coverageLoading">
                             <span x-text="coverageLoading ? '刷新中...' : '刷新摘要'"></span>
@@ -786,7 +794,7 @@
                     <div x-show="!coverageError && coverage && coverage.schema_version" class="rounded-xl border border-white/[0.02] bg-ink-input/35 px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] text-cream-subtle">
                         <span>Schema <strong class="font-mono text-cream" x-text="coverage ? coverage.schema_version : '—'"></strong></span>
                         <span>题目 <strong class="font-mono text-cream" x-text="coverageProblems().length"></strong></span>
-                        <span>交付状态 <strong class="font-mono" :class="coverageWrongStateClass(delivery().state)" x-text="delivery().state || 'unknown'"></strong></span>
+                        <span>交付详情请查看 <strong class="font-mono text-cream">健康状态</strong></span>
                         <span x-show="coverage && coverage.source_revision">源修订 <strong class="font-mono text-cream" x-text="coverage ? coverage.source_revision : '—'"></strong></span>
                     </div>
 
@@ -805,7 +813,7 @@
                                     <span class="px-2 py-1 rounded text-[10px] font-mono" :class="coverageStatusClass(coverageImpact(item).state || item.state)" x-text="coverageImpact(item).state || item.state || 'unknown'"></span>
                                 </div>
 
-                                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
                                     <div class="rounded-lg bg-ink-elevated/60 p-2.5"><p class="text-cream-subtle">数据组</p><p class="font-mono mt-1 text-cream" x-text="coverageGroups(item).length"></p></div>
                                     <div class="rounded-lg bg-ink-elevated/60 p-2.5"><p class="text-cream-subtle">Secret 用例</p><p class="font-mono mt-1 text-cream" x-text="coverageSecretSummary(item).cases == null ? '—' : coverageSecretSummary(item).cases"></p></div>
                                     <div class="rounded-lg bg-ink-elevated/60 p-2.5"><p class="text-cream-subtle">错解覆盖</p><p class="font-mono mt-1" :class="coverageWrongStateClass(coverageWrong(item).length ? coverageWrong(item)[0].state : 'unknown')" x-text="coverageWrongSummary(item)"></p></div>
@@ -836,7 +844,7 @@
                                     <div class="grid grid-cols-1 md:grid-cols-2 gap-2"><template x-for="row in coverageWrong(item)" :key="row.program || $index"><div class="rounded-lg bg-ink-elevated/60 px-3 py-2 flex items-center justify-between gap-3"><div><p class="font-mono text-[11px] text-cream" x-text="row.program || '—'"></p><p class="text-[10px] text-cream-subtle" x-text="(row.matched_case_count == null ? '—' : row.matched_case_count) + ' matched · groups ' + ((row.expected_groups || []).join(', ') || '—')"></p></div><span class="px-2 py-0.5 rounded font-mono text-[10px]" :class="coverageStatusClass(row.state)" x-text="row.state || 'unknown'"></span></div></template></div>
                                 </div>
 
-                                <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                                    <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
                                     <div class="rounded-lg border border-white/[0.03] bg-ink-input/25 p-3 space-y-2">
                                         <div class="flex items-center justify-between"><p class="text-[10px] uppercase tracking-wide text-cream-subtle">Judge QA</p><span class="px-2 py-0.5 rounded font-mono text-[10px]" :class="coverageStatusClass(coverageQa(item).state)" x-text="coverageQa(item).state || 'unknown'"></span></div>
                                         <p class="text-[11px] text-cream-subtle" x-text="(coverageQa(item).matched_case_count == null ? '—' : coverageQa(item).matched_case_count) + ' / ' + (coverageQa(item).declared_cases == null ? '—' : coverageQa(item).declared_cases) + ' cases matched'"></p>
@@ -850,16 +858,14 @@
                                         <p class="text-[10px] text-cream-subtle" x-show="coverageImpactList(coverageImpact(item), 'requires').length" x-text="'requires: ' + coverageImpactList(coverageImpact(item), 'requires').join(', ')"></p>
                                         <p class="text-[10px] text-gold" x-show="coverageImpact(item).source_changed === true">source changed — refresh required</p>
                                     </div>
+                                    <div x-show="coverageImpactList(coverageImpact(item), 'requires').length" class="text-[10px] text-gold">
+                                        交付依赖：<span class="font-mono" x-text="coverageImpactList(coverageImpact(item), 'requires').join(', ')"></span>；完整清单位于健康状态页。
+                                    </div>
                                 </div>
                             </article>
                         </template>
                     </div>
 
-                    <div x-show="coverage && deliveryItems().length" class="rounded-xl border border-white/[0.03] bg-ink-input/35 overflow-hidden">
-                        <div class="px-4 py-3 border-b border-white/[0.02] flex items-center justify-between"><h3 class="text-[11px] font-medium tracking-wide text-cream-muted uppercase">交付清单</h3><span class="text-[10px] font-mono text-cream-subtle" x-text="delivery().state || 'unknown'"></span></div>
-                                    <div class="overflow-auto"><table class="w-full text-left text-[11px]"><thead class="bg-ink-card"><tr class="text-cream-subtle"><th class="px-4 py-2">题目</th><th class="px-3 py-2">sealed</th><th class="px-3 py-2">QA</th><th class="px-3 py-2">evidence</th><th class="px-3 py-2">PDF</th><th class="px-3 py-2">ZIP</th><th class="px-3 py-2">Manifest</th><th class="px-3 py-2">requires</th></tr></thead><tbody class="divide-y divide-white/[0.02]"><template x-for="item in deliveryItems()" :key="item.id || $index"><tr><td class="px-4 py-2 font-mono text-cream" x-text="item.id || '—'"></td><td class="px-3 py-2" :class="coverageWrongStateClass(deliveryItemValue(item, 'sealed'))" x-text="coverageBoolLabel(deliveryItemValue(item, 'sealed'))"></td><td class="px-3 py-2" :class="coverageWrongStateClass(deliveryItemValue(item, 'qa'))" x-text="coverageBoolLabel(deliveryItemValue(item, 'qa'))"></td><td class="px-3 py-2" :class="coverageWrongStateClass(deliveryItemValue(item, 'evidence'))" x-text="coverageBoolLabel(deliveryItemValue(item, 'evidence'))"></td><td class="px-3 py-2" :class="coverageWrongStateClass(deliveryItemValue(item, 'pdf'))" x-text="coverageBoolLabel(deliveryItemValue(item, 'pdf'))"></td><td class="px-3 py-2" :class="coverageWrongStateClass(deliveryItemValue(item, 'zip'))" x-text="coverageBoolLabel(deliveryItemValue(item, 'zip'))"></td><td class="px-3 py-2" :class="coverageWrongStateClass(deliveryItemValue(item, 'manifest'))" x-text="coverageBoolLabel(deliveryItemValue(item, 'manifest'))"></td><td class="px-3 py-2 text-gold" x-text="deliveryRequiresText(item)"></td></tr></template></tbody></table></div>
-                        <div x-show="deliveryRemediations().length" class="p-4 border-t border-white/[0.02] space-y-1"><p class="text-[10px] uppercase tracking-wide text-cream-subtle">交付提醒</p><template x-for="(remediation, index) in deliveryRemediations()" :key="index"><p class="text-[10px] text-gold" x-text="deliveryRemediationText(remediation)"></p></template></div>
-                    </div>
                 </div>
             </div>
 

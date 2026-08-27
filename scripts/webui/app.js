@@ -639,44 +639,6 @@
                         ? item.coverage.impact : {};
                 },
 
-                deliveryItemValue(item, key) {
-                    if (!item || typeof item !== 'object') return null;
-                    if (item[key] != null) return item[key];
-                    if (key === 'sealed' || key === 'qa' || key === 'evidence' || key === 'pdf' || key === 'zip' || key === 'manifest') {
-                        return item.state === 'current' || item.state === 'ready' || item.state === 'complete' || item.state === 'sealed'
-                            ? true : (item.state || null);
-                    }
-                    return null;
-                },
-
-                deliveryRequiresText(item) {
-                    const value = item && item.requires;
-                    if (Array.isArray(value)) return value.join(', ');
-                    if (value) return String(value);
-                    return Array.isArray(item && item.stale_fields) ? item.stale_fields.join(', ') : '—';
-                },
-
-                delivery() {
-                    return this.coverage && this.coverage.delivery && typeof this.coverage.delivery === 'object'
-                        ? this.coverage.delivery : {};
-                },
-
-                deliveryItems() {
-                    const items = this.delivery().items;
-                    return Array.isArray(items) ? items : [];
-                },
-
-                deliveryRemediations() {
-                    const values = this.delivery().remediations;
-                    return Array.isArray(values) ? values : [];
-                },
-
-                deliveryRemediationText(remediation) {
-                    if (typeof remediation === 'string') return remediation;
-                    if (!remediation || typeof remediation !== 'object') return String(remediation == null ? '—' : remediation);
-                    return remediation.description || remediation.action_code || '需要人工复核';
-                },
-
                 healthStateClass(state) {
                     if (['passed', 'current', 'sealed', 'not-configured'].includes(state)) return 'text-success';
                     if (['warning', 'stale', 'draft', 'missing', 'unknown'].includes(state)) return 'text-gold';
@@ -715,6 +677,24 @@
 
                 healthCommand(remediation) {
                     return Array.isArray(remediation.command) ? remediation.command.join(' ') : '';
+                },
+
+                healthDeliveryItems() {
+                    return this.health && this.health.delivery && Array.isArray(this.health.delivery.items)
+                        ? this.health.delivery.items : [];
+                },
+
+                healthDeliveryRequiresText(item) {
+                    const value = item && item.requires;
+                    return Array.isArray(value) ? value.join(', ') : (value || '—');
+                },
+
+                healthDeliveryRemediations() {
+                    const result = [];
+                    (this.health && this.health.problems || []).forEach(problem => {
+                        (problem.remediations || []).slice(0, 3).forEach(item => result.push(item));
+                    });
+                    return result.slice(0, 16);
                 },
 
                 restoreSandboxCache() {

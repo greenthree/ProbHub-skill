@@ -565,13 +565,13 @@ def _problem_report(root, workspace, entry, position, lint_result):
     }
 
 
-def build_workspace_report(root, workspace, selected=None):
+def build_workspace_report(root, workspace, selected=None, *, lint_result=None):
     """Build a deterministic, read-only workspace report."""
     root = Path(root).resolve()
     all_entries = problem_entries(workspace)
     entries = list(selected or all_entries)
     selected_ids = {entry["id"] for entry in entries}
-    lint = lint_workspace(root, workspace, entries)
+    lint = lint_result if lint_result is not None else lint_workspace(root, workspace, entries)
     lint_by_id = {
         item.get("id"): item for item in lint.get("problems") or []
         if isinstance(item, dict)

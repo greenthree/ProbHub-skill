@@ -74,6 +74,7 @@
         "test_skill_install.py",
         "test_ui_security.py",
         "test_ui_theme.py",
+        "test_ui_coverage.py",
         "test_ui_write_boundaries.py",
         "test_skill_documentation.py",
         "test_webui_judge_protocol.py",

@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fixture_support import copy_workspace_fixture
 from probhub.io import read_yaml, write_yaml
+from probhub.webui_coverage import build_coverage_summary
+from probhub.workspace import load_workspace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,18 +128,10 @@ class UiCoverageTests(unittest.TestCase):
                         "stale_fields": [],
                         "requires": [],
                     },
-                    "delivery": {
-                        "sealed": True,
-                        "qa": "not-configured",
-                        "evidence": "current",
-                        "pdf": "current",
-                        "zip": "current",
-                        "manifest": "current",
-                        "requires": [],
-                    },
+                    "delivery": {"reference": "health", "requires": []},
                 }
             ],
-            "delivery": {"state": "none", "items": [], "remediations": []},
+            "delivery": {"state": "see-health", "requires": []},
         }
 
     def test_empty_workspace_returns_explicit_empty_schema(self):
@@ -180,6 +175,12 @@ class UiCoverageTests(unittest.TestCase):
             selected_ids = args[2]
         self.assertEqual(selected_ids, ["A"])
 
+    def test_coverage_delivery_is_only_a_health_reference(self):
+        result = self.coverage_payload()
+        item = result["problems"][0]
+        self.assertEqual(item["delivery"], {"reference": "health", "requires": []})
+        self.assertEqual(result["delivery"], {"state": "see-health", "requires": []})
+
     def test_stale_coverage_preserves_impact_and_remediation_fields(self):
         import probhub.webui_coverage as coverage_core
 
@@ -219,8 +220,13 @@ class UiCoverageTests(unittest.TestCase):
             "diagnostics": [],
         }
         with (
-            mock.patch.object(coverage_core, "build_workspace_report", return_value=report),
-            mock.patch.object(coverage_core, "build_health_summary", return_value=health),
+            mock.patch.object(coverage_core, "build_health_bundle", return_value={
+                "report": report,
+                "report_by_id": {"A": report["problems"][0]},
+                "health_problems": health["problems"],
+                "generation": health["generation"],
+                "diagnostics": health["diagnostics"],
+            }),
         ):
             response = self.client.get("/api/coverage?collection=Contest")
         self.assertEqual(response.status_code, 200)
@@ -229,11 +235,8 @@ class UiCoverageTests(unittest.TestCase):
             payload["problems"][0]["impact"]["stale_fields"],
             ["source_hash", "judge"],
         )
-        self.assertEqual(payload["delivery"]["state"], "needs-action")
-        self.assertEqual(
-            payload["delivery"]["remediations"][0]["action_code"],
-            "refresh_judge",
-        )
+        self.assertEqual(payload["delivery"]["state"], "see-health")
+        self.assertIn("build", payload["delivery"]["requires"])
 
     def test_corrupt_core_result_fails_closed_with_structured_error(self):
         with mock.patch.object(
@@ -282,8 +285,13 @@ class UiCoverageTests(unittest.TestCase):
             "diagnostics": [],
         }
         with (
-            mock.patch.object(coverage_core, "build_workspace_report", return_value=report),
-            mock.patch.object(coverage_core, "build_health_summary", return_value=health),
+            mock.patch.object(coverage_core, "build_health_bundle", return_value={
+                "report": report,
+                "report_by_id": {"A": report["problems"][0]},
+                "health_problems": health["problems"],
+                "generation": health["generation"],
+                "diagnostics": health["diagnostics"],
+            }),
         ):
             response = self.client.get("/api/coverage?collection=Contest")
         self.assertEqual(response.status_code, 200)
@@ -336,6 +344,8 @@ class UiCoverageTests(unittest.TestCase):
         html = self.ui.HTML_TEMPLATE
         javascript = (self.ui.WEBUI_ASSET_DIR / "app.js").read_text(encoding="utf-8")
         self.assertIn("/api/coverage", html + javascript)
+        self.assertIn("数据覆盖", html)
+        self.assertEqual(html.count("正式交付清单"), 1)
         self.assertRegex(
             javascript,
             r"fetch\(`?/api/coverage\?collection=\$\{encodeURIComponent\(",
@@ -351,6 +361,21 @@ class UiCoverageTests(unittest.TestCase):
         self.assertNotIn("unsafe-eval", csp)
         self.assertNotIn("https://", csp)
         self.assertNotIn("http://", csp)
+
+    def test_coverage_reuses_one_lint_result_for_report_and_health(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = copy_workspace_fixture("standard", Path(temp))
+            _, workspace = load_workspace(fixture.root)
+            import probhub.webui_health as health_core
+
+            with mock.patch.object(
+                health_core,
+                "lint_workspace",
+                wraps=health_core.lint_workspace,
+            ) as lint:
+                result = build_coverage_summary(fixture.root, workspace)
+            self.assertTrue(result["success"])
+            self.assertEqual(lint.call_count, 1)
 
 
 if __name__ == "__main__":

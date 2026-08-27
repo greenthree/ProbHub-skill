@@ -397,7 +397,7 @@ def get_coverage():
             "source_revision": None,
             "workspace": {},
             "problems": [],
-            "delivery": {"state": "empty", "items": [], "remediations": []},
+            "delivery": {"state": "see-health", "requires": []},
             "diagnostics": [],
         })
     try:

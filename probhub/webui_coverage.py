@@ -12,9 +12,8 @@ from pathlib import Path
 
 from .errors import ProbHubError
 from .linting import compute_source_hash
-from .reporting import build_workspace_report
 from .transactions import ensure_no_pending_transactions
-from .webui_health import build_health_summary
+from .webui_health import build_health_bundle
 from .workspace import load_problem, problem_entries, select_entries
 
 
@@ -229,19 +228,9 @@ def _problem_projection(report_item, health_item):
     # validated evidence.  Prefer its probe summaries (status tokens only)
     # while retaining health's current/stale state and counters.
     report_qa = report_item.get("judge_qa") or {}
-    evidence = (health_item.get("evidence") or {}).get("calibration") or {}
     stale_fields = list(artifacts.get("stale_fields") or [])
     requires = _requires_for_problem(report_item, health_item)
     source_revision = checkpoint.get("revision_id") or health_item.get("source_hash")
-    delivery = {
-        "sealed": checkpoint.get("state") == "sealed",
-        "qa": qa.get("state") if qa.get("configured") or qa.get("applicable") else "not-configured",
-        "evidence": evidence.get("state", "missing"),
-        "pdf": artifacts.get("pdf", "missing"),
-        "zip": artifacts.get("zip", "missing"),
-        "manifest": artifacts.get("manifest", "missing"),
-        "requires": requires,
-    }
     if stale_fields:
         impact_state = "stale"
     elif requires:
@@ -274,25 +263,8 @@ def _problem_projection(report_item, health_item):
             "requires": requires,
             "source_revision": source_revision,
         },
-        "delivery": delivery,
+        "delivery": {"reference": "health", "requires": requires},
     }
-
-
-def _delivery_state(items, generation):
-    if not items:
-        return "empty"
-    if any(item.get("requires") for item in items):
-        return "needs-action"
-    required = ("sealed", "qa", "evidence", "pdf", "zip", "manifest")
-    if all(
-        item.get("sealed") is True
-        and item.get("qa") in {"current", "passed", "not-configured"}
-        and item.get("evidence") in {"current", "passed"}
-        and all(item.get(field) in {"current", "passed"} for field in required[3:])
-        for item in items
-    ) and generation.get("complete") is not False:
-        return "ready"
-    return "incomplete"
 
 
 def build_coverage_summary(root, workspace, selected_ids=None):
@@ -316,16 +288,15 @@ def build_coverage_summary(root, workspace, selected_ids=None):
                 "selected_count": 0,
             },
             "problems": [],
-            "delivery": {"state": "empty", "items": [], "remediations": []},
+            "delivery": {"state": "see-health", "requires": []},
             "diagnostics": [],
         }
 
-    report = build_workspace_report(root, workspace, entries)
-    health = build_health_summary(root, workspace, [entry["id"] for entry in entries])
-    report_by_id = {item.get("id"): item for item in report.get("problems") or []}
-    health_by_id = {item.get("id"): item for item in health.get("problems") or []}
+    bundle = build_health_bundle(root, workspace, selected_ids)
+    report = bundle.get("report") or {}
+    report_by_id = bundle.get("report_by_id") or {}
+    health_by_id = {item.get("id"): item for item in bundle.get("health_problems") or []}
     problems = []
-    remediations = []
     for entry in entries:
         # A sealed checkpoint revision is preferred.  For draft/unsealed
         # problems expose the current source hash as a stable revision token;
@@ -344,35 +315,26 @@ def build_coverage_summary(root, workspace, selected_ids=None):
             health_by_id.get(entry["id"], {}),
         )
         problems.append(item)
-        remediations.extend(
-            value
-            for value in (health_by_id.get(entry["id"], {}).get("remediations") or [])
-            if isinstance(value, dict)
-        )
     source_revision = next(
         (item["impact"].get("source_revision") for item in problems if item["impact"].get("source_revision")),
         None,
     )
-    delivery_items = [
-        {"id": item["id"], **item["delivery"]}
+    requirements = list(dict.fromkeys(
+        requirement
         for item in problems
-    ]
-    generation = health.get("generation") or {}
+        for requirement in (item.get("impact") or {}).get("requires") or []
+    ))
     return {
         "success": True,
         "schema_version": COVERAGE_SCHEMA_VERSION,
         "source_revision": source_revision,
         "workspace": report.get("workspace") or {},
         "problems": problems,
-        "delivery": {
-            "state": _delivery_state(delivery_items, generation),
-            "items": delivery_items,
-            "remediations": remediations[:32],
-        },
+        "delivery": {"state": "see-health", "requires": requirements},
         "diagnostics": _diagnostics(
             report.get("diagnostics"),
-            health.get("diagnostics"),
-            *(item.get("diagnostics") for item in health.get("problems") or []),
+            bundle.get("diagnostics"),
+            *(item.get("diagnostics") for item in bundle.get("health_problems") or []),
         ),
     }
 
