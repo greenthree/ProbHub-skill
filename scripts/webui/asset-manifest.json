@@ -2,8 +2,8 @@
   "schema_version": 1,
   "files": {
     "app.css": "sha256-text-lf:ce50a4bb97ee9f5e9748c16292d8e4c1e038d60d21ea05aac344a3808b57d4ca",
-    "app.js": "sha256-text-lf:6d7aa76111da98c30f8b4355e836eb07b5ba120f78efb5a31bda364e46dbc1c9",
-    "index.html": "sha256-text-lf:9e0c881b075ab9f0be17815161c811c5174586d1217c25537dd69ac12f4a6e2b",
+    "app.js": "sha256-text-lf:dc999cba1db3d6cfa4f4d200e526b1302f35d1c9be478748eb1815daa5eba51d",
+    "index.html": "sha256-text-lf:5876cf5b0776098be60797d80a6a707000d6b8afc7ec83a98825b934bbbf9dee",
     "mathjax-config.js": "sha256-text-lf:56fbc310138be2821076be5dd7024090dae63982d483c3c9af187d83146da92e",
     "theme.js": "sha256-text-lf:cec2dc423d1dac5df360ea10fcb85fe4b09ffad82285d0edc89c773ab24d8bba",
     "vendor/THIRD_PARTY_NOTICES.txt": "sha256-text-lf:006d125012b4ac1c90cec04f7deb7e447c9e1cc614f3f0b32e278fa99b8defb0",

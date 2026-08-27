@@ -596,7 +596,7 @@
                     return values.length ? values.join(', ') : '—';
                 },
 
-                coverageWrongStateClass(state) {
+                statusStateClass(state) {
                     if (state === true || ['matched', 'passed', 'ok', 'current'].includes(state)) return 'text-success';
                     if (state === false) return 'text-danger';
                     if (['partial', 'warning', 'pending', 'missing', 'unknown'].includes(state)) return 'text-gold';
@@ -613,7 +613,7 @@
                     return 'bg-danger/15 text-danger';
                 },
 
-                coverageBoolLabel(value) {
+                statusLabel(value) {
                     if (value === true) return '通过';
                     if (value === false) return '未通过';
                     return value == null || value === '' ? '—' : String(value);
