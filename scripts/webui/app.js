@@ -649,6 +649,13 @@
                     return null;
                 },
 
+                deliveryRequiresText(item) {
+                    const value = item && item.requires;
+                    if (Array.isArray(value)) return value.join(', ');
+                    if (value) return String(value);
+                    return Array.isArray(item && item.stale_fields) ? item.stale_fields.join(', ') : '—';
+                },
+
                 delivery() {
                     return this.coverage && this.coverage.delivery && typeof this.coverage.delivery === 'object'
                         ? this.coverage.delivery : {};
