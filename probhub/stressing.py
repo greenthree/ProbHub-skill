@@ -20,8 +20,10 @@ from .output_compare import compare_standard_output
 from .process_control import (
     DEFAULT_PROCESS_LIMIT,
     OutputBudgetError,
+    ProcessCancelled,
     PROCESS_CLEANUP_FAILED,
     allocate_shared_prefix_bytes,
+    check_cancellation,
     run_managed_to_files,
 )
 from .special_judges import MAX_CHECKER_DIAGNOSTIC_BYTES, run_checker_to_files
@@ -250,6 +252,7 @@ def _run(
     output_limit=64,
     process_limit=DEFAULT_PROCESS_LIMIT,
     additional_output_paths=(),
+    cancel_check=None,
 ):
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -269,6 +272,7 @@ def _run(
                 process_limit=process_limit,
                 cwd=cwd,
                 env=env,
+                cancel_check=cancel_check,
             )
             stdout = stdout_path.read_bytes() if stdout_path.is_file() else b""
             stderr = stderr_path.read_bytes() if stderr_path.is_file() else b""
@@ -361,6 +365,7 @@ def _compare_custom(
     memory_limit,
     output_limit,
     process_limit,
+    cancel_check=None,
 ):
     contestant_dir = Path(tempfile.mkdtemp(prefix="checker-input-", dir=cwd))
     try:
@@ -381,6 +386,7 @@ def _compare_custom(
             process_limit=process_limit,
             diagnostic_limit_bytes=diagnostic_limit_bytes,
             env=env,
+            cancel_check=cancel_check,
         )
         stderr = result.get("stderr") or b""
         output_details = {
@@ -420,7 +426,16 @@ def _compare_custom(
         shutil.rmtree(contestant_dir, ignore_errors=True)
 
 
-def _comparison(configured, commands, round_dir, input_data, accepted_output, brute_output):
+def _comparison(
+    configured,
+    commands,
+    round_dir,
+    input_data,
+    accepted_output,
+    brute_output,
+    *,
+    cancel_check=None,
+):
     if configured["judge_type"] == "custom":
         input_path = Path(round_dir) / "input.in"
         answer_path = Path(round_dir) / "accepted.out"
@@ -436,6 +451,7 @@ def _comparison(configured, commands, round_dir, input_data, accepted_output, br
             configured["memory_limit"],
             configured["output_limit"],
             configured["process_limit"],
+            cancel_check=cancel_check,
         )
     matched, message = compare_standard_output(
         accepted_output.decode("utf-8", errors="replace"),
@@ -449,7 +465,17 @@ def _comparison(configured, commands, round_dir, input_data, accepted_output, br
     }
 
 
-def _round_once(problem_dir, configured, commands, seed, round_number, round_dir, input_data=None):
+def _round_once(
+    problem_dir,
+    configured,
+    commands,
+    seed,
+    round_number,
+    round_dir,
+    input_data=None,
+    *,
+    cancel_check=None,
+):
     generator_args = expand_generator_args(configured["args"], seed, round_number)
     generator = None
     if input_data is None:
@@ -461,6 +487,7 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
             configured["memory_limit"],
             configured["output_limit"],
             configured["process_limit"],
+            cancel_check=cancel_check,
         )
         # Windows text-mode generators emit CRLF; validators are compiled with
         # Linux line-ending semantics, so normalise like `gen` does.
@@ -478,7 +505,8 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
 
     validator = _run(
         commands["validator"], input_data, configured["tool_timeout"], problem_dir,
-        configured["memory_limit"], configured["output_limit"], configured["process_limit"]
+        configured["memory_limit"], configured["output_limit"], configured["process_limit"],
+        cancel_check=cancel_check,
     )
     if validator["status"] != "AC":
         return {
@@ -494,7 +522,8 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
 
     accepted = _run(
         commands["accepted"], input_data, configured["time_limit"], problem_dir,
-        configured["memory_limit"], configured["output_limit"], configured["process_limit"]
+        configured["memory_limit"], configured["output_limit"], configured["process_limit"],
+        cancel_check=cancel_check,
     )
     if accepted["status"] != "AC":
         return {
@@ -517,7 +546,8 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
 
     brute = _run(
         commands["brute"], input_data, configured["time_limit"], problem_dir,
-        configured["memory_limit"], configured["output_limit"], configured["process_limit"]
+        configured["memory_limit"], configured["output_limit"], configured["process_limit"],
+        cancel_check=cancel_check,
     )
     if brute["status"] != "AC":
         return {
@@ -540,7 +570,13 @@ def _round_once(problem_dir, configured, commands, seed, round_number, round_dir
         }
 
     comparison = _comparison(
-        configured, commands, round_dir, input_data, accepted["stdout"], brute["stdout"]
+        configured,
+        commands,
+        round_dir,
+        input_data,
+        accepted["stdout"],
+        brute["stdout"],
+        cancel_check=cancel_check,
     )
     if comparison["status"] == "FAIL":
         return {
@@ -1456,7 +1492,7 @@ def _fixate_killer(
     }
 
 
-def stress_problem(
+def _stress_problem(
     root,
     problem_dir,
     config,
@@ -1466,9 +1502,11 @@ def stress_problem(
     against=None,
     fixate=None,
     fixate_group=None,
+    cancel_check=None,
 ):
     root = Path(root).resolve()
     problem_dir = Path(problem_dir).resolve()
+    check_cancellation(cancel_check)
     problem_id = str(config.get("id") or problem_dir.name)
     if fixate is not None and against is None:
         raise ProbHubError("--fixate requires --against")
@@ -1479,6 +1517,7 @@ def stress_problem(
         # Recover any interrupted prior commit, then capture a current snapshot
         # under the same writer lock used by fixate publication.
         with workspace_build_lock(root):
+            check_cancellation(cancel_check)
             _, live_workspace = load_workspace(root)
             recover_workspace_transactions(root, live_workspace)
             config = read_yaml(problem_dir / "probhub.yaml")
@@ -1487,6 +1526,7 @@ def stress_problem(
             fixate_snapshot = _fixate_input_snapshot(problem_dir, config, configured)
     else:
         configured = _stress_config(problem_dir, config, against=against)
+    check_cancellation(cancel_check)
     requested_rounds = configured["rounds"] if rounds is None else rounds
     if not _is_int(requested_rounds) or requested_rounds <= 0:
         raise ProbHubError("--rounds must be a positive integer")
@@ -1501,10 +1541,12 @@ def stress_problem(
             "generator", "validator", "accepted", "brute"
         )
         for role in roles:
+            check_cancellation(cancel_check)
             commands[role], event = _prepare_program(configured[role], build_temp, role)
             event["source"] = configured[f"{role}_rel"]
             compile_events.append(event)
         if configured["checker"]:
+            check_cancellation(cancel_check)
             commands["checker"], event = _prepare_program(
                 configured["checker"], build_temp, "checker"
             )
@@ -1512,6 +1554,7 @@ def stress_problem(
             compile_events.append(event)
 
         if replay is not None:
+            check_cancellation(cancel_check)
             artifact, input_path, metadata = _resolve_replay(
                 root, problem_dir, replay, problem_id=problem_id
             )
@@ -1533,6 +1576,7 @@ def stress_problem(
                     # Same normalisation as the generation path: validators are
                     # compiled with Linux line-ending semantics.
                     input_data=normalize_newlines(input_path.read_bytes()),
+                    cancel_check=cancel_check,
                 )
             ok = bool(outcome["ok"])
             status = "passed" if ok else outcome["kind"]
@@ -1560,6 +1604,7 @@ def stress_problem(
             }
 
         for round_number in range(1, requested_rounds + 1):
+            check_cancellation(cancel_check)
             seed = master_seed + round_number - 1
             with tempfile.TemporaryDirectory(prefix="probhub-stress-round-") as round_temp:
                 outcome = _round_once(
@@ -1569,6 +1614,7 @@ def stress_problem(
                     seed,
                     round_number,
                     round_temp,
+                    cancel_check=cancel_check,
                 )
             if not outcome["ok"]:
                 artifact, metadata = _save_counterexample(
@@ -1619,6 +1665,7 @@ def stress_problem(
                         result["ok"] = True
                         result["status"] = "killer_found"
                         if fixate is not None:
+                            check_cancellation(cancel_check)
                             result["fixated"] = _fixate_killer(
                                 root,
                                 problem_dir,
@@ -1632,6 +1679,7 @@ def stress_problem(
                             )
                 return result
 
+    check_cancellation(cancel_check)
     if against is not None:
         return {
             "ok": True,
@@ -1661,3 +1709,20 @@ def stress_problem(
         "counterexample": None,
         "compile": compile_events,
     }
+
+
+def stress_problem(*args, **kwargs):
+    """Run differential testing using the shared cancellation contract."""
+    try:
+        return _stress_problem(*args, **kwargs)
+    except ProcessCancelled as exc:
+        return {
+            "ok": False,
+            "status": "cancelled",
+            "code": "cancelled",
+            "reason": "cancelled",
+            "message": str(exc),
+            "rounds_requested": None,
+            "rounds_completed": 0,
+            "counterexample": None,
+        }

@@ -531,7 +531,15 @@ def _run_synthetic(task, cancel_event):
                 cancel_check=cancel_event.is_set,
             )
         child_pid = None
-        ready_deadline = time.monotonic() + 10.0
+        # The managed supervisor may terminate the short-lived parent before
+        # a freshly spawned child gets scheduled on a busy Windows host.  Do
+        # not hold the scheduler open for its full test timeout waiting for a
+        # marker that can no longer be produced; cleanup is already owned by
+        # run_managed_to_files and the marker is only supplementary evidence.
+        ready_deadline = time.monotonic() + min(
+            3.0,
+            max(float(spec.get("managed_timeout", 0.1)) * 8.0, 1.0),
+        )
         while child_pid is None and time.monotonic() < ready_deadline:
             try:
                 child_pid = int(child_pid_path.read_text(encoding="utf-8"))

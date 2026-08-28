@@ -32,6 +32,7 @@ from .linting import (
 )
 from .datagen import generate_problem_data, problem_config_identity
 from .package_tools import verify_package
+from .process_control import ProcessCancelled, check_cancellation
 from .reporting import build_workspace_report, render_workspace_report
 from .scaffold import JUDGE_TYPES, scaffold_config, scaffold_files
 from .stressing import stress_problem
@@ -600,7 +601,7 @@ def command_mutate(args):
     results = {}
     for entry in entries:
         problem_dir, _ = load_problem(root, entry)
-        results[entry["id"]] = mutation_test_problem(
+        result = mutation_test_problem(
             root,
             problem_dir,
             use_cache=not args.no_cache,
@@ -609,6 +610,11 @@ def command_mutate(args):
             jobs=args.jobs,
             deadline=(time.monotonic() + args.timeout) if args.timeout else None,
         )
+        if result.get("code") in {"mutation_cancelled", "cancelled"} or (
+            result.get("execution") or {}
+        ).get("stop_code") == "mutation_cancelled":
+            raise ProbHubError("mutation testing cancelled", code="cancelled")
+        results[entry["id"]] = result
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
 
 
@@ -633,10 +639,12 @@ def command_checkpoint(args):
 
 def command_seal(args):
     root, workspace, entry = _single_problem_context(args)
+    check_cancellation()
     ensure_no_pending_transactions(root, workspace)
     _ensure_local_gitignore(root)
     builder_fingerprint = compute_builder_fingerprint(root, workspace)
     lint = lint_workspace(root, workspace, [entry])
+    check_cancellation()
     if not lint["ok"]:
         messages = list(lint.get("errors", []))
         for result in lint["problems"]:
@@ -654,6 +662,11 @@ def command_seal(args):
     data_hash = compute_data_hash(problem_dir, config)
     judge = judge_problem(root, problem_dir, use_cache=not args.no_cache)
     if not judge["ok"]:
+        if (judge.get("final") or {}).get("code") == "cancelled":
+            raise ProbHubError(
+                f"cannot seal {entry['id']}: operation cancelled",
+                code="cancelled",
+            )
         raise ProbHubError(
             f"cannot seal {entry['id']}: sandbox failed: {judge.get('final')}",
             code="seal_judge_failed",
@@ -663,6 +676,11 @@ def command_seal(args):
         problem_dir,
         use_cache=not args.no_cache,
     )
+    if judge_qa.get("status") == "cancelled" or judge_qa.get("code") == "cancelled":
+        raise ProbHubError(
+            f"cannot seal {entry['id']}: operation cancelled",
+            code="cancelled",
+        )
     qa_status = judge_qa.get("status")
     qa_passed = (
         judge_qa.get("ok") is True
@@ -681,6 +699,7 @@ def command_seal(args):
     # Judge and Judge QA publish local evidence. Refresh the read-only lint
     # view so the checkpoint records the post-verification states.
     lint = lint_workspace(root, workspace, [entry])
+    check_cancellation()
     evidence_state = (
         ((lint["problems"][0].get("judge_qa") or {}).get("evidence") or {}).get(
             "state"
@@ -703,6 +722,11 @@ def command_seal(args):
             rounds=args.rounds,
             master_seed=args.seed,
         )
+        if stress.get("status") == "cancelled" or stress.get("code") == "cancelled":
+            raise ProbHubError(
+                f"cannot seal {entry['id']}: operation cancelled",
+                code="cancelled",
+            )
         if not stress["ok"]:
             raise ProbHubError(
                 f"cannot seal {entry['id']}: stress failed: {stress.get('reason')}",
@@ -967,6 +991,12 @@ def main(argv=None):
             if key not in {"ok", "error", "code"}
         })
         emit_result(result, args)
+        return 1
+    except ProcessCancelled as exc:
+        emit_result(
+            {"ok": False, "error": str(exc), "code": "cancelled"},
+            args,
+        )
         return 1
     except KeyboardInterrupt:
         return 130

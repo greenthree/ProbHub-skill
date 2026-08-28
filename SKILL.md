@@ -57,6 +57,7 @@ description: 当用户需要创作或维护算法竞赛题目、运行 ProbHub �
 ### 3.3 写入安全底线
 
 - 外部程序必须经过共享进程控制，限制时间、内存、输出和整棵进程树，并支持取消清理。
+- `seal`、`assemble`、`typeset`、`package`、`build` 和 stress 统一接受取消信号：正式发布前返回 `code: "cancelled"`，发布边界已提交后按成功事实返回，进程/临时目录清理失败优先返回对应的 `*_cleanup_failed`。
 - 正式写入使用锁、输入快照、staging、验证后发布、原子替换或可恢复 journal；失败不能覆盖最后一份正确产物。
 - 上传代码只能进入 `.probhub/submissions/<task-id>/`；不得写回题目 `code/`。
 - 本地沙箱是资源约束，不是安全容器；不得宣称可以安全执行任意敌意代码。

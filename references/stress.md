@@ -272,6 +272,11 @@ CLI 退出码：
 - `1`：发现反例、基础设施失败、配置/路径/编译/参数错误，或多题中至少一题失败；
 - `130`：用户中断（Ctrl+C）。
 
+取消请求由 Core 统一映射为 `status: "cancelled"`、`code: "cancelled"`，且
+`ok` 为 `false`；它不产生可用于封题的通过证据。若终止进程树或保存诊断时
+发生清理故障，`infrastructure`/`process_cleanup_failed` 优先于取消。Stress
+在一个反例正式保存或 fixate 发布已经提交后不会把已完成的发布改报为取消。
+
 不要只匹配自然语言输出；自动化流程应检查退出码以及 `ok`、`status`、`reason` 和反例路径。
 
 ## 8. `--against`：给错解找刀

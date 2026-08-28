@@ -74,6 +74,23 @@ probhub --workspace C:\path\to\workspace --json status L01
 - 非 `0`：失败、状态过期、包验证失败或参数错误。
 - 自动化调用必须同时检查退出码和结构化输出；沙箱还必须检查最后一个 JSONL `final` 事件。
 
+### 2.1 统一取消契约
+
+所有可取消的 Core 操作共享同一结果边界。取消请求可以来自
+`PROBHUB_CANCEL_FILE` 或适配器传入的 `cancel_check`；适配器不应自行重写
+取消状态机。
+
+- 正式发布开始前取消：返回 `ok: false`、`code: "cancelled"`，且旧的正式
+  产物、evidence 和 generation 指针保持不变。
+- 进程树、临时目录或事务回滚清理失败：返回对应的 `*_cleanup_failed` 或
+  `process_cleanup_failed`，优先级高于取消，不能报告为取消成功。
+- 最后一个正式替换已经完成、generation current 指针已经更新或事务已标记
+  `committed` 后，发布边界已经跨过；随后到达的取消请求不改变成功结果。
+
+`seal`、`assemble`、`typeset`、`package`、`build` 和 stress 在阶段边界检查
+取消；`judge` 的最终事件使用同样的 `status: "cancelled"`、`code: "cancelled"`
+表示未完成。取消不等于通过，也不会生成新的 sealed revision 或正式交付包。
+
 ## 3. `init`
 
 初始化新的空工作区：
@@ -635,7 +652,7 @@ probhub build [ID...] [--skip-judge] [--no-cache]
 
 执行 `build L01 L02 ...` 时，所选题目逐题评测，但完整 Typst 集合只编译一次。任一题在 judge、PDF 提取、配置、ZIP 构建或验证阶段失败时，正式 metadata、PDF、ZIP 与 Manifest 均保持不变。所有所选 Manifest 使用同一份 `workspace_hash`、`collection_hash` 和 `batch_id`。
 
-并发执行 `build`、`typeset` 或 `package` 时，第二个 writer 失败并在 JSON 中返回 `code: "build_busy"`。快照创建或发布前发现 live 输入变化时返回 `code: "inputs_changed"`。快照 I/O 与发布 I/O 分别使用 `snapshot_failed`、`publish_failed`。正式发布先把全部文件和目录复制到工作区同卷事务目录，写入 journal，再备份并替换目标；中途失败会回滚。build、gen 和 fixate 的 writer 在读取题目配置前统一恢复三类硬中断 journal；只读 lint/status/judge 在恢复前返回 `recovery_required`。journal 的 committed 标记保证“已经发布但清理失败”的事务只会重试清理，不会被错误回滚。回滚或恢复本身失败时保留事务目录并返回对应的 rollback/recovery 错误，不得手工删除恢复材料。
+并发执行 `build`、`typeset` 或 `package` 时，第二个 writer 失败并在 JSON 中返回 `code: "build_busy"`。快照创建或发布前发现 live 输入变化时返回 `code: "inputs_changed"`。快照 I/O 与发布 I/O 分别使用 `snapshot_failed`、`publish_failed`。正式发布先把全部文件和目录复制到工作区同卷事务目录，写入 journal，再备份并替换目标；中途失败会回滚。build、gen 和 fixate 的 writer 在读取题目配置前统一恢复三类硬中断 journal；只读 lint/status/judge 在恢复前返回 `recovery_required`。journal 的 committed 标记保证“已经发布但清理失败”的事务只会重试清理，不会被错误回滚。回滚或恢复本身失败时保留事务目录并返回对应的 rollback/recovery 错误，不得手工删除恢复材料。取消请求在首个正式替换前返回 `code: "cancelled"`；替换序列已完成后按成功事实返回，清理失败优先于取消。
 
 选项：
 

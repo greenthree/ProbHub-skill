@@ -136,6 +136,13 @@ Generator → Validator → accepted → brute → Checker/standard compare
 
 Stress 不读取或写入普通沙箱缓存。完整反例和 replay 协议见 `references/stress.md`。
 
+取消契约由 Core 统一处理：阶段边界或受控子进程收到
+`PROBHUB_CANCEL_FILE`/`cancel_check` 后，正式发布前返回
+`code: "cancelled"`。`run_managed_to_files` 仍负责终止完整进程树；如果树、
+临时目录或事务回滚无法确认清理，则以 `process_cleanup_failed` 或对应的
+`*_cleanup_failed` 优先返回。事务最后一次正式替换、generation current 指针
+更新或 `committed` journal 写入完成后，取消不再覆盖已提交的成功结果。
+
 ## 9. 缓存
 
 逐点缓存键包含时间、内存、输出、进程数、平台和沙箱策略。可观测脱离后代清理与 `process_cleanup_failed` 语义加入后缓存 Schema 为 8；进程控制或资源状态语义变化时会继续提升 Schema，因此旧版本缓存不会返回缺少 OLE、旧 feedback 或旧进程树行为的结果。

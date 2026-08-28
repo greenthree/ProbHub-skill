@@ -42,6 +42,7 @@ from .linting import (
     lint_workspace,
 )
 from .package_tools import build_verified_package, generate_domjudge_config, validate_output_validator_source
+from .process_control import ProcessCancelled, check_cancellation
 from .remediation import remediation_for_error
 from .typesetting import compile_collection, extract_problem_pdfs, is_temporary_typst_source
 from .transactions import (
@@ -404,9 +405,10 @@ def _snapshot_mismatches(plan, snapshot):
 
 
 @contextmanager
-def create_build_snapshot(plan):
+def create_build_snapshot(plan, *, cancel_check=None):
     temporary_root = None
     try:
+        check_cancellation(cancel_check)
         try:
             temporary_root = Path(tempfile.mkdtemp(
                 prefix=f".{plan.root.name}-probhub-{plan.batch_id[:8]}-",
@@ -418,6 +420,7 @@ def create_build_snapshot(plan):
                 snapshot_root,
                 ignore=_snapshot_ignore(plan),
             )
+            check_cancellation(cancel_check)
             _, workspace = load_workspace(snapshot_root)
             planned_ids = {item.config["id"] for item in plan.selected}
             problems = []
@@ -881,7 +884,7 @@ def _recover_build_publish_transactions(root):
             ) from exc
 
 
-def _publish_transaction(root, batch_id, specs, pre_commit=None):
+def _publish_transaction(root, batch_id, specs, pre_commit=None, cancel_check=None):
     root = Path(root).resolve()
     transaction = root / ".probhub" / f"build-publish-{batch_id}"
     transaction.mkdir(parents=True, exist_ok=False)
@@ -925,11 +928,18 @@ def _publish_transaction(root, batch_id, specs, pre_commit=None):
                     f"publish target changed before commit: {entry['target']}",
                     code="publish_failed",
                 )
+        check_cancellation(cancel_check)
         if pre_commit is not None:
             pre_commit()
         cleanup_transaction = False
         try:
+            # Cancellation is only observed before the first replacement and
+            # between replacements.  Once the final replacement succeeds the
+            # publication boundary has been crossed and the operation must
+            # report the committed result, even if a later cancel request is
+            # observed by an adapter.
             for index, entry in enumerate(entries):
+                check_cancellation(cancel_check)
                 target = _journal_target(root, entry["target"])
                 backup_name = entry.get("backup")
                 backup = (
@@ -970,6 +980,11 @@ def _publish_transaction(root, batch_id, specs, pre_commit=None):
             cleanup_context = "rollback"
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
+            if isinstance(exc, ProcessCancelled):
+                raise ProbHubError(
+                    "operation cancelled before artifact publication",
+                    code="cancelled",
+                ) from exc
             raise ProbHubError(
                 f"failed to publish artifact transaction: {exc}",
                 code="publish_failed",
@@ -981,6 +996,11 @@ def _publish_transaction(root, batch_id, specs, pre_commit=None):
         })
         cleanup_transaction = True
         cleanup_context = "committed"
+    except ProcessCancelled as exc:
+        raise ProbHubError(
+            "operation cancelled before artifact publication",
+            code="cancelled",
+        ) from exc
     except ProbHubError:
         raise
     except Exception as exc:
@@ -1005,12 +1025,13 @@ def _publish_transaction(root, batch_id, specs, pre_commit=None):
                 ) from exc
 
 
-def _publish_build_transaction(plan, snapshot, pre_commit=None):
+def _publish_build_transaction(plan, snapshot, pre_commit=None, cancel_check=None):
     _publish_transaction(
         plan.root,
         plan.batch_id,
         _publish_entry_specs(plan, snapshot),
         pre_commit=pre_commit,
+        cancel_check=cancel_check,
     )
 
 
@@ -1022,10 +1043,17 @@ def publish_build(
     packages,
     publish_cache,
     pre_commit=None,
+    cancel_check=None,
 ):
+    check_cancellation(cancel_check)
     _assert_publish_targets_available(plan)
     live_by_id = {item.config["id"]: item for item in plan.problems}
-    _publish_build_transaction(plan, snapshot, pre_commit=pre_commit)
+    _publish_build_transaction(
+        plan,
+        snapshot,
+        pre_commit=pre_commit,
+        cancel_check=cancel_check,
+    )
 
     live_typst = plan.root / plan.typst_relative
     live_pdfs = {}
@@ -1300,15 +1328,18 @@ def assert_package_inputs_unchanged(plan):
         )
 
 
-def package_workspace(root, workspace, entries, require_pdf=True):
+def _package_workspace(root, workspace, entries, require_pdf=True, *, cancel_check=None):
     root = Path(root).resolve()
+    check_cancellation(cancel_check)
     with workspace_build_lock(root):
+        check_cancellation(cancel_check)
         _, live_workspace = load_workspace(root)
         recover_workspace_transactions(root, live_workspace)
         selected_ids = [entry["id"] for entry in entries]
         live_entries = select_entries(live_workspace, selected_ids)
         plan = create_package_plan(root, live_workspace, live_entries)
         with create_package_snapshot(plan) as snapshot:
+            check_cancellation(cancel_check)
             packages = {}
             for item in snapshot.selected:
                 package_path, verification = package_problem(
@@ -1322,6 +1353,7 @@ def package_workspace(root, workspace, entries, require_pdf=True):
                     "verification": verification,
                 }
 
+            check_cancellation(cancel_check)
             assert_package_inputs_unchanged(plan)
             specs = _package_publish_entry_specs(plan, snapshot)
             _assert_publish_paths_available(target for _, target in specs)
@@ -1330,6 +1362,7 @@ def package_workspace(root, workspace, entries, require_pdf=True):
                 plan.batch_id,
                 specs,
                 pre_commit=lambda: assert_package_inputs_unchanged(plan),
+                cancel_check=cancel_check,
             )
             return {
                 "ok": True,
@@ -1338,27 +1371,52 @@ def package_workspace(root, workspace, entries, require_pdf=True):
             }
 
 
-def typeset_workspace(root, workspace, entries):
+def package_workspace(root, workspace, entries, require_pdf=True, *, cancel_check=None):
+    try:
+        return _package_workspace(
+            root,
+            workspace,
+            entries,
+            require_pdf=require_pdf,
+            cancel_check=cancel_check,
+        )
+    except ProcessCancelled as exc:
+        raise ProbHubError(
+            "package operation cancelled before publication",
+            code="cancelled",
+        ) from exc
+
+
+def _typeset_workspace(root, workspace, entries, *, cancel_check=None):
     root = Path(root).resolve()
+    check_cancellation(cancel_check)
     with workspace_build_lock(root):
+        check_cancellation(cancel_check)
         _, live_workspace = load_workspace(root)
         recover_workspace_transactions(root, live_workspace)
         selected_ids = [entry["id"] for entry in entries]
         live_entries = select_entries(live_workspace, selected_ids)
         plan = create_build_plan(root, live_workspace, live_entries)
-        with create_build_snapshot(plan) as snapshot:
+        snapshot_kwargs = {} if cancel_check is None else {"cancel_check": cancel_check}
+        with create_build_snapshot(plan, **snapshot_kwargs) as snapshot:
+            check_cancellation(cancel_check)
+            compile_kwargs = {} if cancel_check is None else {"cancel_check": cancel_check}
             _, staged_main_pdf, _ = compile_collection(
                 snapshot.root,
                 snapshot.workspace,
                 snapshot.loaded_problems,
+                **compile_kwargs,
             )
             target_ids = {item.config["id"] for item in snapshot.selected}
+            extract_kwargs = {} if cancel_check is None else {"cancel_check": cancel_check}
             pdfs = extract_problem_pdfs(
                 staged_main_pdf,
                 snapshot.loaded_problems,
                 only_ids=target_ids,
+                **extract_kwargs,
             )
 
+            check_cancellation(cancel_check)
             assert_build_inputs_unchanged(plan)
             specs = _typeset_publish_entry_specs(plan, snapshot)
             _assert_publish_paths_available(target for _, target in specs)
@@ -1367,6 +1425,7 @@ def typeset_workspace(root, workspace, entries):
                 plan.batch_id,
                 specs,
                 pre_commit=lambda: assert_build_inputs_unchanged(plan),
+                cancel_check=cancel_check,
             )
 
             live_by_id = {item.config["id"]: item for item in plan.problems}
@@ -1385,23 +1444,48 @@ def typeset_workspace(root, workspace, entries):
             }
 
 
-def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=True):
+def typeset_workspace(root, workspace, entries, *, cancel_check=None):
+    try:
+        return _typeset_workspace(root, workspace, entries, cancel_check=cancel_check)
+    except ProcessCancelled as exc:
+        raise ProbHubError(
+            "typeset operation cancelled before publication",
+            code="cancelled",
+        ) from exc
+
+
+def _build_workspace(
+    root,
+    workspace,
+    entries,
+    run_judge=True,
+    use_judge_cache=True,
+    *,
+    cancel_check=None,
+):
     root = Path(root).resolve()
+    check_cancellation(cancel_check)
     with workspace_build_lock(root):
+        check_cancellation(cancel_check)
         _, live_workspace = load_workspace(root)
         recover_workspace_transactions(root, live_workspace)
         selected_ids = [entry["id"] for entry in entries]
         live_entries = select_entries(live_workspace, selected_ids)
         plan = create_build_plan(root, live_workspace, live_entries)
         sealed_checkpoints = require_collection_sealed(plan)
-        with create_build_snapshot(plan) as snapshot:
+        snapshot_kwargs = {} if cancel_check is None else {"cancel_check": cancel_check}
+        with create_build_snapshot(plan, **snapshot_kwargs) as snapshot:
+            check_cancellation(cancel_check)
             judge_results = {}
             if run_judge:
                 for item in snapshot.selected:
+                    check_cancellation(cancel_check)
+                    judge_kwargs = {} if cancel_check is None else {"cancel_check": cancel_check}
                     result = judge_problem(
                         snapshot.root,
                         item.problem_dir,
                         use_cache=use_judge_cache,
+                        **judge_kwargs,
                     )
                     judge_results[item.config["id"]] = {
                         "ok": result["ok"],
@@ -1412,24 +1496,35 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
                         "calibration": result.get("calibration"),
                     }
                     if not result["ok"]:
+                        if (result.get("final") or {}).get("code") == "cancelled":
+                            raise ProbHubError(
+                                "build cancelled before artifact publication",
+                                code="cancelled",
+                            )
                         raise ProbHubError(
                             f"sandbox failed for {item.config['id']}: "
                             f"{result.get('final')}"
                         )
 
+            check_cancellation(cancel_check)
+            compile_kwargs = {} if cancel_check is None else {"cancel_check": cancel_check}
             _, staged_main_pdf, _ = compile_collection(
                 snapshot.root,
                 snapshot.workspace,
                 snapshot.loaded_problems,
+                **compile_kwargs,
             )
             target_ids = {item.config["id"] for item in snapshot.selected}
+            extract_kwargs = {} if cancel_check is None else {"cancel_check": cancel_check}
             pdfs = extract_problem_pdfs(
                 staged_main_pdf,
                 snapshot.loaded_problems,
                 only_ids=target_ids,
+                **extract_kwargs,
             )
             packages = {}
             for item in snapshot.selected:
+                check_cancellation(cancel_check)
                 package_path, verification = package_problem(
                     snapshot.root,
                     item.problem_dir,
@@ -1446,6 +1541,7 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
             }
             manifests = {}
             for item in snapshot.selected:
+                check_cancellation(cancel_check)
                 problem_id = item.config["id"]
                 planned = planned_by_id[problem_id]
                 manifests[problem_id] = write_manifest(
@@ -1474,6 +1570,7 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
                     assert_build_inputs_unchanged(plan),
                     assert_collection_seals_unchanged(plan, sealed_checkpoints),
                 ),
+                cancel_check=cancel_check,
             )
             return {
                 "ok": True,
@@ -1481,3 +1578,28 @@ def build_workspace(root, workspace, entries, run_judge=True, use_judge_cache=Tr
                 **published,
                 "judge": judge_results,
             }
+
+
+def build_workspace(
+    root,
+    workspace,
+    entries,
+    run_judge=True,
+    use_judge_cache=True,
+    *,
+    cancel_check=None,
+):
+    try:
+        return _build_workspace(
+            root,
+            workspace,
+            entries,
+            run_judge=run_judge,
+            use_judge_cache=use_judge_cache,
+            cancel_check=cancel_check,
+        )
+    except ProcessCancelled as exc:
+        raise ProbHubError(
+            "build cancelled before artifact publication",
+            code="cancelled",
+        ) from exc

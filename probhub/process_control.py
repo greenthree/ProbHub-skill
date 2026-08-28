@@ -82,7 +82,17 @@ raise SystemExit(main())
 
 
 class ProcessCancelled(Exception):
-    """Raised when a supervising submission task requests cancellation."""
+    """Raised when a supervised ProbHub operation requests cancellation.
+
+    The exception is deliberately shared by the process supervisor and the
+    higher-level build/seal orchestration.  Adapters can therefore map every
+    pre-publication cancellation to the same public ``cancelled`` code.
+    """
+
+    code = "cancelled"
+
+    def __init__(self, message="operation cancelled"):
+        super().__init__(str(message))
 
 
 class OutputBudgetError(OSError):
@@ -117,6 +127,21 @@ def cancellation_requested():
         return Path(path).is_file()
     except OSError:
         return False
+
+
+def check_cancellation(cancel_check=None):
+    """Raise the shared cancellation exception when an operation is stopped.
+
+    ``None`` uses the process-wide ``PROBHUB_CANCEL_FILE`` signal.  Callers
+    may provide a test or adapter callback, but the public outcome remains
+    the same.  This helper is intended for phase boundaries; managed child
+    processes continue to use :func:`run_managed_to_files` for polling and
+    process-tree cleanup.
+    """
+
+    check = cancellation_requested if cancel_check is None else cancel_check
+    if bool(check()):
+        raise ProcessCancelled()
 
 
 def _cancellation_requested(cancel_check):

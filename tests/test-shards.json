@@ -7,6 +7,7 @@
         "test_batch_build.py",
         "test_builder_fingerprint.py",
         "test_calibration.py",
+        "test_cancellation_contract.py",
         "test_cli_output.py",
         "test_core.py",
         "test_data_groups.py",
