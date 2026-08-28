@@ -613,7 +613,10 @@ class GenerationTests(unittest.TestCase):
 
                 self.assertEqual(code, 1, output.getvalue())
                 payload = json.loads(output.getvalue())
-                self.assertEqual(payload["code"], "seal_judge_qa_failed")
+                self.assertEqual(
+                    payload["code"],
+                    "cancelled" if status == "cancelled" else "seal_judge_qa_failed",
+                )
                 self.assertIsNone(latest_checkpoint(fixture.root, "F06"))
                 assemble.assert_not_called()
 

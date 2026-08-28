@@ -66,6 +66,11 @@ probhub generation-status
 
 消费 `assemble`/`seal` 结果时不得只看 `ok`：交付前必须确认 `complete=true` 或逐项核对 `missing`。
 
+`seal` 和 `assemble` 使用 Core 统一取消契约：generation current 指针发布前
+收到取消时返回 `code: "cancelled"`，不会把未完成 generation 当作成功；指针更新
+已经完成后按已提交的 generation 返回。checkpoint、临时目录或进程清理失败时，
+对应的 `*_cleanup_failed` 优先于取消。
+
 只有正式 `build` 才会生成或替换 DOMjudge ZIP、正式单题 PDF、共享 metadata 和 Build Manifest。不要把 `.probhub/generations/` 中的预览直接作为正式包发布。
 
 generation manifest 使用 schema v3。旧 schema 的文件若内容哈希仍完整，`generation-status` 报告 `stale/generation_schema`；只有文件缺失、路径或内容哈希不一致时才报告 `invalid`。构建器不可探测时报告 `stale/builder_fingerprint.unavailable`，不会把已有 PDF 误报为损坏。

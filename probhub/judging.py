@@ -9,7 +9,7 @@ from .calibration import build_judge_evidence, write_calibration_evidence
 from .errors import ProbHubError
 from .io import read_yaml
 from .linting import compute_data_hash, compute_source_hash
-from .process_control import run_managed_to_files
+from .process_control import ProcessCancelled, run_managed_to_files
 
 
 JUDGE_TIMEOUT_SECONDS = 3600.0
@@ -93,13 +93,17 @@ def _invoke_local_judge(
 
 
 def _supervisor_failure(run, stderr_text):
-    codes = {"time_limit": "judge_timeout", "output_limit": "judge_output_limit"}
+    codes = {
+        "cancelled": "cancelled",
+        "time_limit": "judge_timeout",
+        "output_limit": "judge_output_limit",
+    }
     message = run.get("message") or "sandbox supervisor failed"
     if stderr_text.strip():
         message += ": " + stderr_text.strip()[-4000:]
     return {
         "type": "final",
-        "status": "failed",
+        "status": "cancelled" if run.get("reason") == "cancelled" else "failed",
         "code": codes.get(run["reason"], "judge_" + run["reason"]),
         "message": message,
     }
@@ -126,16 +130,32 @@ def judge_problem(
         )
     except (FileNotFoundError, ProbHubError, OSError, ValueError, TypeError):
         config = None
-    run, events, stderr_text = _invoke_local_judge(
-        root,
-        problem_dir,
-        use_cache=use_cache,
-        timeout=timeout,
-        output_limit_bytes=output_limit_bytes,
-        memory_limit_mb=memory_limit_mb,
-        process_limit=process_limit,
-        cancel_check=cancel_check,
-    )
+    try:
+        run, events, stderr_text = _invoke_local_judge(
+            root,
+            problem_dir,
+            use_cache=use_cache,
+            timeout=timeout,
+            output_limit_bytes=output_limit_bytes,
+            memory_limit_mb=memory_limit_mb,
+            process_limit=process_limit,
+            cancel_check=cancel_check,
+        )
+    except ProcessCancelled as exc:
+        return {
+            "ok": False,
+            "returncode": None,
+            "final": {
+                "type": "final",
+                "status": "cancelled",
+                "code": "cancelled",
+                "message": str(exc),
+            },
+            "cache": {},
+            "summaries": [],
+            "calibration": None,
+            "events": [],
+        }
     cache = next((event for event in reversed(events) if event.get("type") == "cache"), {})
     summaries = [event for event in events if event.get("type") == "summary"]
     if run["reason"] != "completed":

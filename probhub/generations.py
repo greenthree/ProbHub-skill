@@ -22,6 +22,7 @@ from .hashing import hash_file
 from .io import atomic_write_json, read_yaml, write_yaml
 from .linting import compute_data_hash, compute_source_hash, compute_workspace_hash
 from .problem_snapshot import copy_problem_consistently, problem_path
+from .process_control import ProcessCancelled, check_cancellation
 from .typesetting import compile_collection, extract_problem_pdfs, is_temporary_typst_source
 from .workspace import WORKSPACE_FILE, load_problem, load_workspace, problem_entries
 
@@ -162,8 +163,10 @@ def create_problem_checkpoint(
     *,
     expected_source_hash=None,
     expected_data_hash=None,
+    cancel_check=None,
 ):
     root = Path(root).resolve()
+    check_cancellation(cancel_check)
     if state not in {"draft", "sealed"}:
         raise ProbHubError(f"unsupported checkpoint state: {state}")
     if state == "sealed" and (
@@ -184,6 +187,7 @@ def create_problem_checkpoint(
         busy_code="checkpoint_busy",
         busy_message=f"another checkpoint operation is running for {problem_id}",
     ):
+        check_cancellation(cancel_check)
         current = latest_checkpoint(root, problem_id)
         problem_dir, config = load_problem(root, entry)
         source_hash = compute_source_hash(problem_dir, config)
@@ -210,6 +214,7 @@ def create_problem_checkpoint(
                 expected_data_hash=expected_data_hash,
                 operation="checkpoint",
             )
+            check_cancellation(cancel_check)
             evidence = _json_safe(evidence or {})
             revision_id = _digest_json({
                 "problem_id": problem_id,
@@ -233,6 +238,7 @@ def create_problem_checkpoint(
             atomic_write_json(stage / "revision.json", manifest)
             final = _checkpoint_root(root, problem_id) / revision_id
             final.parent.mkdir(parents=True, exist_ok=True)
+            check_cancellation(cancel_check)
             reused = final.exists()
             if reused:
                 _read_checkpoint(root, problem_id, revision_id)
@@ -341,7 +347,7 @@ def _write_placeholder(problem_dir, entry):
     return record
 
 
-def _ensure_generation_checkpoint(root, workspace, entry):
+def _ensure_generation_checkpoint(root, workspace, entry, *, cancel_check=None):
     """Return (checkpoint, placeholder_reason) for one workspace entry.
 
     A missing or broken problem source keeps the documented placeholder-page
@@ -357,8 +363,15 @@ def _ensure_generation_checkpoint(root, workspace, entry):
         return checkpoint, None
     deadline = time.monotonic() + CHECKPOINT_BUSY_WAIT_SECONDS
     while True:
+        check_cancellation(cancel_check)
         try:
-            return create_problem_checkpoint(root, workspace, entry, state="draft"), None
+            return create_problem_checkpoint(
+                root,
+                workspace,
+                entry,
+                state="draft",
+                cancel_check=cancel_check,
+            ), None
         except ProbHubError as exc:
             if exc.code != "checkpoint_busy":
                 return None, str(exc)
@@ -372,6 +385,7 @@ def _ensure_generation_checkpoint(root, workspace, entry):
                     "concurrent seal or checkpoint operation finishes",
                     code="checkpoint_busy",
                 ) from exc
+            check_cancellation(cancel_check)
             time.sleep(CHECKPOINT_BUSY_POLL_SECONDS)
         except (ValueError, yaml.YAMLError) as exc:
             return None, str(exc)
@@ -474,14 +488,17 @@ def _recheck_builder_fingerprint(root, workspace, expected):
     return current
 
 
-def assemble_exam_generation(
+def _assemble_exam_generation(
     root,
     workspace=None,
     *,
     expected_builder_fingerprint=None,
+    cancel_check=None,
 ):
     root = Path(root).resolve()
+    check_cancellation(cancel_check)
     with workspace_generation_lock(root):
+        check_cancellation(cancel_check)
         _, workspace = load_workspace(root) if workspace is None else (root, workspace)
         if expected_builder_fingerprint is None:
             builder_fingerprint = compute_builder_fingerprint(root, workspace)
@@ -495,7 +512,12 @@ def assemble_exam_generation(
         checkpoints = {}
         placeholder_reasons = {}
         for entry in entries:
-            checkpoint, reason = _ensure_generation_checkpoint(root, workspace, entry)
+            checkpoint, reason = _ensure_generation_checkpoint(
+                root,
+                workspace,
+                entry,
+                cancel_check=cancel_check,
+            )
             checkpoints[entry["id"]] = checkpoint
             if checkpoint is None:
                 placeholder_reasons[entry["id"]] = reason or "problem has no checkpoint"
@@ -595,12 +617,20 @@ def assemble_exam_generation(
             )
 
             loaded = [load_problem(snapshot_root, entry) for entry in entries]
+            check_cancellation(cancel_check)
+            compile_kwargs = {} if cancel_check is None else {"cancel_check": cancel_check}
             _, main_pdf, _ = compile_collection(
                 snapshot_root,
                 snapshot_workspace,
                 loaded,
+                **compile_kwargs,
             )
-            pdfs = extract_problem_pdfs(main_pdf, loaded)
+            extract_kwargs = {} if cancel_check is None else {"cancel_check": cancel_check}
+            pdfs = extract_problem_pdfs(
+                main_pdf,
+                loaded,
+                **extract_kwargs,
+            )
 
             stage_root = root / GENERATION_TMP_DIR
             stage_root.mkdir(parents=True, exist_ok=True)
@@ -647,12 +677,18 @@ def assemble_exam_generation(
                 ],
             }
             atomic_write_json(stage / "manifest.json", manifest)
+            check_cancellation(cancel_check)
             _recheck_builder_fingerprint(
                 root,
                 load_workspace(root)[1],
                 builder_fingerprint,
             )
             generation_dir.parent.mkdir(parents=True, exist_ok=True)
+            # The generation directory and current pointer are committed as a
+            # pair from the caller's perspective.  Do not begin that publish
+            # sequence after a cancellation request; once it starts, finish
+            # the pointer update and report the committed generation.
+            check_cancellation(cancel_check)
             if generation_dir.exists():
                 # Reuse an existing directory only after validating it; a
                 # corrupt leftover must never win over the freshly built stage.
@@ -674,6 +710,33 @@ def assemble_exam_generation(
                 shutil.rmtree(stage, ignore_errors=True)
             if temporary_root is not None:
                 shutil.rmtree(temporary_root, ignore_errors=True)
+
+
+def assemble_exam_generation(
+    root,
+    workspace=None,
+    *,
+    expected_builder_fingerprint=None,
+    cancel_check=None,
+):
+    """Assemble a generation with the shared cancellation contract.
+
+    Cancellation before the current-generation pointer is published is
+    returned as ``ProbHubError(code="cancelled")``.  A pointer update already
+    completed is a committed result and is therefore returned successfully.
+    """
+    try:
+        return _assemble_exam_generation(
+            root,
+            workspace,
+            expected_builder_fingerprint=expected_builder_fingerprint,
+            cancel_check=cancel_check,
+        )
+    except ProcessCancelled as exc:
+        raise ProbHubError(
+            "exam generation cancelled before publication",
+            code="cancelled",
+        ) from exc
 
 
 def generation_status(root):

@@ -12,7 +12,7 @@ from .metadata import (
     write_typst_collection,
 )
 from .pdf_processing import inspect_pdf, split_pdf
-from .process_control import run_managed_to_files
+from .process_control import ProcessCancelled, check_cancellation, run_managed_to_files
 
 
 TYPST_TIMEOUT_SECONDS = 120
@@ -253,9 +253,11 @@ def problem_boundaries(pdf_path, loaded_problems=None):
     )
 
 
-def compile_collection(root, workspace, loaded_problems):
+def compile_collection(root, workspace, loaded_problems, *, cancel_check=None):
+    check_cancellation(cancel_check)
     typst = workspace.get("typst") or {}
     typst_dir, problems = write_typst_collection(root, workspace, loaded_problems)
+    check_cancellation(cancel_check)
     main_typ = typst_dir / "main.typ"
     main_pdf = typst_dir / "main.pdf"
     if not main_typ.is_file():
@@ -282,17 +284,24 @@ def compile_collection(root, workspace, loaded_problems):
         with tempfile.TemporaryDirectory(prefix="probhub-typst-") as temp:
             stdout_path = Path(temp) / "stdout"
             stderr_path = Path(temp) / "stderr"
-            result = run_managed_to_files(
-                command,
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                timeout=TYPST_TIMEOUT_SECONDS,
-                memory_limit_mb=2048,
-                output_limit_bytes=TYPST_OUTPUT_LIMIT_BYTES,
-                process_limit=32,
-                cwd=root,
-                env=environment,
-            )
+            try:
+                result = run_managed_to_files(
+                    command,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    timeout=TYPST_TIMEOUT_SECONDS,
+                    memory_limit_mb=2048,
+                    output_limit_bytes=TYPST_OUTPUT_LIMIT_BYTES,
+                    process_limit=32,
+                    cwd=root,
+                    env=environment,
+                    cancel_check=cancel_check,
+                )
+            except ProcessCancelled as exc:
+                raise ProbHubError(
+                    "Typst compilation cancelled",
+                    code="cancelled",
+                ) from exc
             if result["reason"] != "completed" or result["returncode"] != 0:
                 detail = stderr_path.read_text(encoding="utf-8", errors="replace")
                 if not detail.strip():
@@ -304,10 +313,12 @@ def compile_collection(root, workspace, loaded_problems):
     finally:
         for path in generated:
             path.unlink(missing_ok=True)
+    check_cancellation(cancel_check)
     return typst_dir, main_pdf, problems
 
 
-def extract_problem_pdfs(main_pdf, loaded_problems, only_ids=None):
+def extract_problem_pdfs(main_pdf, loaded_problems, only_ids=None, *, cancel_check=None):
+    check_cancellation(cancel_check)
     inspection = inspect_pdf(main_pdf, scan_text=True)
     boundaries = _boundaries_from_inspection(inspection, loaded_problems)
     if not boundaries:
@@ -335,5 +346,7 @@ def extract_problem_pdfs(main_pdf, loaded_problems, only_ids=None):
             "end": found[1] - 1,
         })
         outputs[problem_id] = {"path": str(output), "pages": found[1] - found[0]}
+    check_cancellation(cancel_check)
     split_pdf(main_pdf, split_plan)
+    check_cancellation(cancel_check)
     return outputs
