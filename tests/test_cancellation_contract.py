@@ -1,5 +1,7 @@
+import ctypes
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -114,6 +116,34 @@ class CancellationContractTests(unittest.TestCase):
                 [(source, target)],
                 cancel_check=lambda: next(calls, True),
             )
+            self.assertEqual(target.read_text(encoding="utf-8"), "new")
+
+    @unittest.skipUnless(
+        os.name == "nt", "Windows short-path aliases are platform-specific"
+    )
+    def test_publish_accepts_windows_short_path_alias(self):
+        with tempfile.TemporaryDirectory() as temp:
+            long_root = Path(temp) / "ProbHub transaction root with spaces"
+            long_root.mkdir()
+            short_buffer = ctypes.create_unicode_buffer(32768)
+            get_short_path = ctypes.windll.kernel32.GetShortPathNameW
+            get_short_path.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_wchar_p,
+                ctypes.c_uint32,
+            ]
+            get_short_path.restype = int
+            length = get_short_path(str(long_root), short_buffer, len(short_buffer))
+            if length == 0 or short_buffer.value == str(long_root):
+                self.skipTest("filesystem does not provide an 8.3 alias")
+            short_root = Path(short_buffer.value)
+            target = short_root / "artifact.txt"
+            source = short_root / "staged.txt"
+            target.write_text("old", encoding="utf-8")
+            source.write_text("new", encoding="utf-8")
+
+            _publish_transaction(short_root, "short-path", [(source, target)])
+
             self.assertEqual(target.read_text(encoding="utf-8"), "new")
 
     def test_build_api_maps_boundary_cancellation(self):

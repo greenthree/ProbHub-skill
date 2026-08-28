@@ -895,7 +895,12 @@ def _publish_transaction(root, batch_id, specs, pre_commit=None, cancel_check=No
         for index, (source, target) in enumerate(specs):
             source = Path(source)
             target = Path(target)
-            relative = target.absolute().relative_to(root.absolute()).as_posix()
+            # Canonicalize both sides before checking containment.  On Windows
+            # callers may pass an 8.3 short-path alias while ``root`` has
+            # already been resolved to its long form; ``Path.relative_to``
+            # compares those spellings literally and would reject a valid
+            # in-tree target.
+            relative = target.resolve(strict=False).relative_to(root).as_posix()
             staged = transaction / f"payload-{index}"
             source_kind = "missing"
             if source.is_dir():
