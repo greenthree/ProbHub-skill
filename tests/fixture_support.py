@@ -16,6 +16,7 @@ FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures"
 JUDGE_QA_FIXTURES = ("checker-qa", "interactor-qa")
 WORKSPACE_FIXTURES = (
     "standard",
+    "walkthrough",
     "custom",
     "float",
     "interactive",

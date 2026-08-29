@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from probhub.judging import judge_problem
+from probhub.judging import check_sample_answers, judge_problem
+from probhub.datagen import generate_problem_data
 from probhub.linting import lint_workspace, problem_status
 from probhub.stressing import stress_problem
 from probhub.workspace import load_workspace
@@ -84,6 +85,7 @@ class FixtureExecutionTests(unittest.TestCase):
     def test_standard_custom_float_and_interactive_judges(self):
         expected_types = {
             "standard": "standard",
+            "walkthrough": "standard",
             "custom": "custom",
             "float": "custom",
             "interactive": "interactive",
@@ -131,6 +133,36 @@ class FixtureExecutionTests(unittest.TestCase):
             self.assertEqual(result["status"], "passed")
             self.assertEqual(result["rounds_completed"], 5)
             self.assertFalse((fixture.problem / ".probhub/stress").exists())
+
+    def test_walkthrough_generator_and_stress_are_reproducible(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = copy_workspace_fixture("walkthrough", temp)
+            for stem in ("random01", "many01"):
+                (fixture.problem / "data" / "secret" / f"{stem}.in").unlink()
+                (fixture.problem / "data" / "secret" / f"{stem}.ans").unlink()
+            plan = generate_problem_data(fixture.problem, fixture.config(), apply_changes=False)
+            self.assertTrue(plan["ok"], plan)
+            self.assertEqual(plan["summary"]["new"], 2)
+            applied = generate_problem_data(fixture.problem, fixture.config(), apply_changes=True)
+            self.assertTrue(applied["ok"], applied)
+            self.assertTrue(applied["applied"], applied)
+            second = generate_problem_data(fixture.problem, fixture.config(), apply_changes=False)
+            self.assertTrue(second["ok"], second)
+            self.assertEqual(second["summary"]["new"], 0)
+            self.assertEqual(second["summary"]["changed"], 0)
+            self.assertEqual(second["summary"]["unchanged"], 2)
+            sample = check_sample_answers(fixture.root, fixture.problem, use_cache=False, timeout=120)
+            self.assertTrue(sample["ok"], sample)
+            stress = stress_problem(
+                fixture.root,
+                fixture.problem,
+                fixture.config(),
+                rounds=5,
+                master_seed=12345,
+            )
+            self.assertTrue(stress["ok"], stress)
+            self.assertEqual(stress["status"], "passed")
+            self.assertEqual(stress["rounds_completed"], 5)
 
     def test_validator_rejection_is_infrastructure_failure(self):
         _, _, result = self.run_fault_fixture("standard", "validator")

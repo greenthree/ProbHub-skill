@@ -27,7 +27,48 @@ probhub lint A01
 
 `new` 会创建 `A01/probhub.yaml`、`problem.md`、`code/`、`data/sample/` 和 `data/secret/`。把脚手架中的 A+B 示例替换为正式题目，并在配置中登记 accepted、brute、wrong、Validator、数据组和 recipes。所有代码路径都相对于 `A01/` 写成 `code/...`。
 
-### 1.2 样例和可复现数据
+### 1.2 可执行范例：多测的连续子段最大和
+
+仓库中的 `tests/fixtures/workspaces/walkthrough/W01` 是一份与本节共用的最小完整范例。它把每个规范源放在一个真实闭环中：Kadane 标程按每组 $O(n)$ 处理，暴力程序按 $O(n^2)$ 交叉验证；Validator 同时限制 $T$、单组 $n$、元素范围和所有组的 `sum(n)`；`negative` 与 `many-cases` 数据组分别击杀“把空子段当答案”和“只处理第一组”的错解。
+
+核心配置只保留与流程有关的字段（完整源文件位于上述 Fixture）：
+
+```yaml
+# tests/fixtures/workspaces/walkthrough/W01/probhub.yaml
+schema_version: 1
+id: W01
+judge:
+  type: standard
+  validator: code/validator.cpp
+solutions:
+  accepted: [{file: code/std.cpp, expected: {status: AC, all: true}}]
+  brute: [{file: code/brute.cpp, expected: {status: AC, all: true}}]
+  wrong:
+    - {file: code/wrong-zero.cpp, expected: {status: WA, groups: [negative]}}
+    - {file: code/wrong-one-case.cpp, expected: {status: WA, groups: [many-cases]}}
+data:
+  groups:
+    - {name: negative, role: wrong-solution-killer, patterns: [secret/negative*], targets: [code/wrong-zero.cpp]}
+    - {name: many-cases, role: wrong-solution-killer, patterns: [secret/many*], targets: [code/wrong-one-case.cpp]}
+  recipes:
+    - {case: random01, generator: code/inmaker.cpp, args: [random, 7]}
+    - {case: many01, generator: code/inmaker.cpp, args: [many, 11]}
+    - {case: negative01, manual: true}
+```
+
+复制该 Fixture 到临时工作区后，可以直接执行与本节相同的门禁：
+
+```text
+probhub lint W01
+probhub sample-check W01 --no-cache
+probhub gen W01 --apply
+probhub judge W01 --no-cache
+probhub stress W01 --rounds 100 --seed 12345
+```
+
+这里的 `sum(n) <= 64` 同时出现在输入格式和 Validator 的 `ensuref` 中；若其中一处改变，lint 会报告需要人工复核。生成器 recipe 的 `random01` 和 `many01` 可重复生成同一字节，`negative01` 展示手工边界数据。这个范例只证明当前声明的算法、数据职责和 Validator 契约闭合，仍不能证明不存在未登记的未知错解。
+
+### 1.3 样例和可复现数据
 
 样例答案先由首个 accepted 复现，再检查题面样例与配置一致。secret 数据优先用 `data.recipes` 生成；手工数据必须显式 `manual: true`。
 
@@ -40,7 +81,7 @@ probhub lint A01
 
 不带 `--apply` 的 `gen` 是只读计划；只有 `--apply` 会写入 `data/secret/`。生成后重跑 lint，确认 Validator 真正执行题面约束，特别是多组数据的累计上限。
 
-### 1.3 Judge、stress 和独立审查
+### 1.4 Judge、stress 和独立审查
 
 ```text
 probhub judge A01 --no-cache
@@ -49,7 +90,7 @@ probhub stress A01 --rounds 100 --seed 12345
 
 Judge 成功必须同时满足退出码 `0` 和最终事件 `all_expectations_met`。stress 的 `counterexample` 要先 replay；有价值的反例修复后固化为正式数据，再从 lint 开始重跑。普通模式还要让隔离上下文的独立解题者给出参考实现，主 Agent 编译并交叉运行；完整模式再增加证明/错解审查和适用的 mutation。交互题不使用普通 stress。
 
-### 1.4 Checkpoint、seal 和单题交接
+### 1.5 Checkpoint、seal 和单题交接
 
 完成当前题的门禁后发布不可变 draft，再生成 sealed revision：
 
@@ -61,7 +102,7 @@ probhub generation-status
 
 `checkpoint` 记录当前规范源的 draft；`seal` 会重新执行 lint、Judge、已配置的 Judge QA 和 stress，记录 evidence，并在隔离快照中组装当前工作区 generation。若其他题尚未 checkpoint，结果会明确包含 `placeholder`、`missing` 或 `complete=false`，不能把它当作完整试卷交付；这不阻塞当前题任务结束，也不需要等待其他题。修改任何规范源都必须重新 checkpoint 和 seal。
 
-### 1.5 全部题封存后的正式组卷
+### 1.6 全部题封存后的正式组卷
 
 多个 Agent 可以各自完成并 seal 自己的题。等目标题目都具备有效 sealed revision 后，由一个任务执行一次多 ID 正式 build：
 
