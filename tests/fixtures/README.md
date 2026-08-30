@@ -4,8 +4,9 @@ These fixtures are intentionally small, deterministic Workspace Schema v1
 projects. Tests must copy a workspace to a temporary directory before running
 Core commands because Judge, stress, and status checks create local artifacts.
 
-`workspaces/` contains independent examples for standard, custom, float,
-interactive, stress, Checker QA Schema, and Interactor QA Schema workflows.
+`workspaces/` contains independent examples for standard, the end-to-end
+`walkthrough` Standard workflow, custom, float, interactive, stress, Checker
+QA Schema, and Interactor QA Schema workflows.
 `faults/` contains source files that the test helper overlays onto a copied
 workspace to exercise infrastructure and resource failures.
 

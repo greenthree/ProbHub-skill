@@ -1,0 +1,77 @@
+schema_version: 1
+id: W01
+name: 连续子段最大和
+display_name: 连续子段最大和
+difficulty: 2
+tags:
+- 动态规划
+- 多测
+limits:
+  time: 1
+  memory: 256
+  output: 64
+  processes: 16
+statement:
+  source: problem.md
+judge:
+  type: standard
+  validator: code/validator.cpp
+solutions:
+  accepted:
+  - file: code/std.cpp
+    expected:
+      status: AC
+      all: true
+  brute:
+  - file: code/brute.cpp
+    expected:
+      status: AC
+      all: true
+  wrong:
+  - file: code/wrong-zero.cpp
+    expected:
+      status: WA
+      groups: [negative]
+      forbid: [FAIL]
+  - file: code/wrong-one-case.cpp
+    expected:
+      status: WA
+      groups: [many-cases]
+      forbid: [FAIL]
+generators:
+- code/inmaker.cpp
+stress:
+  generator: code/stress_generator.cpp
+  args: ["{seed}", "{round}"]
+  rounds: 10
+  time_limit: 2
+  tool_timeout: 2
+  accepted: code/std.cpp
+  brute: code/brute.cpp
+data:
+  sample_dir: data/sample
+  secret_dir: data/secret
+  groups:
+  - name: negative
+    role: wrong-solution-killer
+    patterns: [secret/negative*]
+    targets: [code/wrong-zero.cpp]
+  - name: many-cases
+    role: wrong-solution-killer
+    patterns: [secret/many*]
+    targets: [code/wrong-one-case.cpp]
+  - name: reference-domain
+    role: reference-domain
+    patterns: [sample/*, secret/random*]
+    targets: []
+  recipes:
+  - case: random01
+    generator: code/inmaker.cpp
+    args: [random, 7]
+  - case: many01
+    generator: code/inmaker.cpp
+    args: [many, 11]
+  - case: negative01
+    manual: true
+domjudge:
+  include_pdf: true

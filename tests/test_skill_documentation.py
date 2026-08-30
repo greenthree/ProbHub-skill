@@ -2,6 +2,10 @@ import re
 import unittest
 from pathlib import Path
 
+import yaml
+
+from probhub.cli import build_parser
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -141,6 +145,48 @@ class SkillDocumentationTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, walkthrough)
+
+    def test_walkthrough_yaml_and_commands_match_executable_fixture(self):
+        walkthrough = (ROOT / "references" / "problem-creation-walkthrough.md").read_text(
+            encoding="utf-8"
+        )
+        blocks = re.findall(r"```yaml\n(.*?)\n```", walkthrough, flags=re.DOTALL)
+        self.assertGreaterEqual(len(blocks), 3)
+        parsed = [yaml.safe_load(block) for block in blocks]
+        self.assertTrue(all(isinstance(value, dict) for value in parsed))
+        snippet = next(value for value in parsed if value.get("id") == "W01")
+        self.assertEqual(snippet["schema_version"], 1)
+        self.assertEqual(snippet["judge"]["type"], "standard")
+        self.assertEqual(snippet["judge"]["validator"], "code/validator.cpp")
+        self.assertEqual(len(snippet["solutions"]["accepted"]), 1)
+        self.assertEqual(len(snippet["solutions"]["brute"]), 1)
+        self.assertEqual(len(snippet["solutions"]["wrong"]), 2)
+        self.assertEqual(len(snippet["data"]["recipes"]), 3)
+
+        fixture = ROOT / "tests" / "fixtures" / "workspaces" / "walkthrough" / "W01"
+        config = yaml.safe_load((fixture / "probhub.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(config["id"], snippet["id"])
+        self.assertEqual(config["judge"], {**config["judge"], **snippet["judge"]})
+        for entry in config["solutions"]["accepted"] + config["solutions"]["brute"] + config["solutions"]["wrong"]:
+            self.assertTrue((fixture / entry["file"]).is_file(), entry["file"])
+        for recipe in config["data"]["recipes"]:
+            if not recipe.get("manual"):
+                self.assertTrue((fixture / recipe["generator"]).is_file(), recipe["generator"])
+        self.assertIn(r"\sum_{i=1}^{T} n_i\le 64", (fixture / "problem.md").read_text(encoding="utf-8"))
+        self.assertIn("ensuref(total_n <= 64", (fixture / "code" / "validator.cpp").read_text(encoding="utf-8"))
+
+        parser = build_parser()
+        commands = (
+            ["--json", "lint", "W01"],
+            ["sample-check", "W01", "--no-cache"],
+            ["gen", "W01", "--apply"],
+            ["judge", "W01", "--no-cache"],
+            ["stress", "W01", "--rounds", "100", "--seed", "12345"],
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                args = parser.parse_args(command)
+                self.assertIn(args.command, {"lint", "sample-check", "gen", "judge", "stress"})
 
 
 if __name__ == "__main__":
