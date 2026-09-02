@@ -149,6 +149,17 @@ probhub --json ui --check
 
 The WebUI edits statements, samples, limits, covers, and problem order. It also provides live preview, isolated compilation, temporary code judging, and task cancellation. Compile is for isolated preview; Distribute is the operation that formally writes PDFs, ZIPs, and build records. Request and task queues have explicit limits and return retryable feedback when busy; the service listens only on the local loopback address.
 
+### Optional: integrate with DeepSeek Harness
+
+If you use DeepSeek Harness, the standalone downstream extension can mount the ProbHub workbench and validation/delivery tools into a compatible DSH Web profile:
+
+~~~bash
+dsh plugin --profile web add @greenthree/dsh-probhub@0.1.1-rc.2
+dsh --profile web
+~~~
+
+This is a downstream extension, not a built-in feature of official DSH. The complete problem workbench requires a matching DSH Web client; with only the upstream DSH build, the Host and background tools may load while the browser workbench is unavailable. See [`@greenthree/dsh-probhub`](https://www.npmjs.com/package/@greenthree/dsh-probhub) for installation and compatibility details.
+
 ## CLI for manual control
 
 Agents and the WebUI use the same Core. Most users do not need every command; these are the usual troubleshooting and orchestration commands:
