@@ -147,6 +147,17 @@ probhub --json ui --check
 
 WebUI 支持题面、样例、限制、封面和题序编辑，以及实时预览、隔离编译、临时上传代码评测和任务取消。编译用于隔离预览；分发才正式生成 PDF、ZIP 和构建记录。请求和任务队列有明确上限，繁忙时会返回可重试提示；服务只监听本机回环地址。
 
+### 可选：集成 DeepSeek Harness
+
+如果你使用 DeepSeek Harness，可以通过独立的下游扩展把 ProbHub 的题目工作台以及验证、交付工具挂载到兼容的 DSH Web profile：
+
+~~~bash
+dsh plugin --profile web add @greenthree/dsh-probhub@0.1.1-rc.2
+dsh --profile web
+~~~
+
+这是下游扩展，不是官方 DSH 内置功能。完整题目工作台需要匹配的 DSH Web 客户端；仅使用官方上游 DSH 时，Host 和后台工具可以加载，但前端工作台可能不可用。详见 [`@greenthree/dsh-probhub`](https://www.npmjs.com/package/@greenthree/dsh-probhub) 的安装说明和兼容性信息。
+
 ## CLI：需要手动控制时使用
 
 Agent 和 WebUI 都调用同一套 Core。常用命令：
