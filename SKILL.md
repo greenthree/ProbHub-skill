@@ -7,10 +7,10 @@ description: 当用户需要创作或维护算法竞赛题目、运行 ProbHub �
 
 你是严谨的 ACM/ICPC 出题人。先读本文件，再按任务路由只读取需要的 reference；不要一次加载全部参考文档。命令的精确参数以当前安装包的 `probhub <command> --help` 为准。
 
-## 1. 先做这四件事
+## 1. 开始任务前先做这四件事
 
-1. 从当前目录向上定位 `.probhub/workspace.yaml`。
-2. 找不到该文件就停止并报告 `migration_required`。不要读取旧 `meta.json`、Typst `problems.json`、PDF、ZIP 或旧 local judge 作为回退；Legacy workflow 已移除，旧目录只能由用户手工迁移到 Schema v1。
+1. 如果用户明确要求新建赛事或空工作区，直接以当前安装包的 `probhub init --help` 为准执行 `probhub init`，初始化后再从新目录继续；其他任务从当前目录向上定位 `.probhub/workspace.yaml`。
+2. 修改、验证或交付已有工作区时，找不到该文件就停止并报告 `migration_required`。不要读取旧 `meta.json`、Typst `problems.json`、PDF、ZIP 或旧 local judge 作为回退；Legacy workflow 已移除，旧目录只能由用户手工迁移到 Schema v1。
 3. 读取 [参考文档索引](references/index.md)，再按任务读取对应 reference。
 4. 只修改规范源，修改后用 Core 命令验证；不要把自然语言审查、局部命令或本机测量冒充正式交付证据。
 
@@ -64,14 +64,14 @@ description: 当用户需要创作或维护算法竞赛题目、运行 ProbHub �
 
 ## 4. 标准出题主线
 
-只要任务不是纯只读审计，就沿着下面主线推进；每一步失败都先修复根因，再进入下一步：
+只要任务不是纯只读审计，就沿着下面主线推进；每一步都有结构化成功判据，失败先修复根因，再进入下一步：
 
 1. **设计**：先读取 [算法设计指导](references/problem-design-principles.md)，记录轻量 `design_intent`，明确目标算法、证明、复杂度、边界、典型错法和数据职责；多组数据再读取 [累计约束指南](references/aggregate-limit-derivation.md)。
 2. **骨架与规范源**：`probhub init` 后用 `probhub new <ID>`，只写 `workspace.yaml`、`probhub.yaml`、`problem.md`、`code/`、`data/` 和 Schema 允许的 Judge QA 素材。
-3. **静态检查**：`probhub lint <ID>`。题面有总量承诺时，查看 JSON 的 `constraint_reconciliation.aggregate_constraints`；`statement_only`、`aggregate_constraint_mismatch` 或 `dynamic` 都要人工处理，不能因为 lint 仍是 warning 就封题。
-4. **样例和数据**：`probhub sample-check <ID>`，再用 `probhub gen <ID> --apply` 生成可复现数据；每个 `.in` 必须有同名 `.ans`，Validator 必须真正限制题面声明的字段和累计量。
+3. **静态检查**：`probhub lint <ID>`。成功判据是结构化结果 `ok=true`；题面有总量承诺时，查看 JSON 的 `constraint_reconciliation.aggregate_constraints`，`statement_only`、`aggregate_constraint_mismatch` 或 `dynamic` 都要人工处理，不能因为 lint 仍是 warning 就封题。
+4. **样例和数据**：`probhub sample-check <ID>`，再用 `probhub gen <ID> --apply` 生成可复现数据。两条命令都必须退出码为 `0`；每个 `.in` 必须有同名 `.ans`，Validator 必须真正限制题面声明的字段和累计量。
 5. **Judge**：`probhub judge <ID> --no-cache`。成功必须有退出码 `0` 和最终事件 `all_expectations_met`；Checker/Interactor 题还要按路由执行 Judge QA。
-6. **差分与对抗验证**：按验证模式运行固定 seed stress、独立解题/证明、错解审查和适用的 mutation；反例先 replay，再修复或固化为 secret 数据。
+6. **差分与对抗验证**：按验证模式运行固定 seed stress、独立解题/证明、错解审查和适用的 mutation。成功判据是所选模式要求的证据均有结构化结果且没有 `counterexample`、`infrastructure` 或取消未完成项；反例先 replay，再修复或固化为 secret 数据。
 7. **并行交接**：`probhub checkpoint <ID>`，完成门禁后 `probhub seal <ID> --no-cache --seed 12345`。seal 生成隔离的当前工作区 generation；若其他题尚未 checkpoint，会明确返回 `placeholder`/`complete=false`，题目任务不等待其他题。
 8. **正式交付**：所有题目有效 sealed 后只执行一次多题 `probhub build <ID...> --no-cache`，随后 `status`、`verify-package --require-pdf` 和 PDF QA。不要让各任务排队执行单题正式 build。
 
