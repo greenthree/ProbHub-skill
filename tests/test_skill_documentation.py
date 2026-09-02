@@ -56,6 +56,21 @@ class SkillDocumentationTests(unittest.TestCase):
         self.assertIn("基础设施", skill)
         self.assertNotIn("旧的 Legacy workflow", skill)
 
+    def test_skill_distinguishes_new_workspace_initialization(self):
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("明确要求新建赛事或空工作区", skill)
+        self.assertIn("直接以当前安装包的 `probhub init --help` 为准执行 `probhub init`", skill)
+        self.assertIn("修改、验证或交付已有工作区时", skill)
+        self.assertIn("`migration_required`", skill)
+        self.assertIn("不要读取旧 `meta.json`", skill)
+
+    def test_skill_mainline_states_structured_success_criteria(self):
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("每一步都有结构化成功判据", skill)
+        self.assertIn("结构化结果 `ok=true`", skill)
+        self.assertIn("两条命令都必须退出码为 `0`", skill)
+        self.assertIn("没有 `counterexample`、`infrastructure` 或取消未完成项", skill)
+
     def test_problem_design_guidance_preserves_evidence_boundaries(self):
         design = (ROOT / "references" / "problem-design-principles.md").read_text(
             encoding="utf-8"
