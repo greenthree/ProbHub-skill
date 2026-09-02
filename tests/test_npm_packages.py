@@ -139,6 +139,21 @@ class NpmPackageMetadataTests(unittest.TestCase):
         self.assertIn("replaces both Skill directories as whole directories", english)
         self.assertIn("Local manual changes inside them are not preserved", english)
 
+    def test_readmes_place_dsh_plugin_in_skill_installation(self):
+        chinese = (ROOT / "README.md").read_text(encoding="utf-8")
+        chinese_heading = "#### 可选：安装 DSH 插件（DeepSeek Harness）"
+        self.assertIn("独立的 `dsh-plugin` 下游扩展", chinese)
+        self.assertLess(chinese.index("### 1. 安装 Skill"), chinese.index(chinese_heading))
+        self.assertLess(chinese.index(chinese_heading), chinese.index("### 2. 调用 Agent"))
+        self.assertEqual(chinese.count("dsh plugin --profile web add @greenthree/dsh-probhub@0.1.1-rc.2"), 1)
+
+        english = (ROOT / "README_EN.md").read_text(encoding="utf-8")
+        english_heading = "#### Optional: install the DSH plugin (DeepSeek Harness)"
+        self.assertIn("independent downstream `dsh-plugin`", english)
+        self.assertLess(english.index("### 1. Install the Skill"), english.index(english_heading))
+        self.assertLess(english.index(english_heading), english.index("### 2. Call an Agent"))
+        self.assertEqual(english.count("dsh plugin --profile web add @greenthree/dsh-probhub@0.1.1-rc.2"), 1)
+
     def test_release_metadata_gate_passes_for_the_source_tree(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts/check_release.py"), "--json"],
