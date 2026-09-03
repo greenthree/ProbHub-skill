@@ -882,7 +882,7 @@ def _force_stop_mutation_worker(process, known_identities):
     return stopped and bool(cleanup.get("ok", False))
 
 
-def _run_serial_mutations(tasks, *, cancel_check, deadline):
+def _run_serial_mutations(tasks, *, cancel_check, deadline, on_progress=None):
     results = []
     stop_code = None
     check = cancellation_requested if cancel_check is None else cancel_check
@@ -905,6 +905,8 @@ def _run_serial_mutations(tasks, *, cancel_check, deadline):
                 diagnostic="mutation_worker_cleanup_failed",
             )
         results.append(result)
+        if on_progress is not None:
+            on_progress(len(results), len(tasks), result)
         if result["classification"] == "infrastructure-failed":
             stop_code = "infrastructure-failed"
             break
@@ -925,6 +927,7 @@ def _run_parallel_mutations(
     deadline,
     cancel_grace=MUTATION_CANCEL_GRACE_SECONDS,
     worker_target=_mutation_worker_entry,
+    on_progress=None,
 ):
     context = multiprocessing.get_context("spawn")
     cancel_event = context.Event()
@@ -1024,6 +1027,8 @@ def _run_parallel_mutations(
                     results[index] = result
                     del active[index]
                     made_progress = True
+                    if on_progress is not None:
+                        on_progress(len(results), len(tasks), result)
                     if result.get("classification") == "infrastructure-failed":
                         begin_stop("infrastructure-failed")
                     elif result.get("classification") == "cancelled" and stop_code is None:
@@ -1051,6 +1056,8 @@ def _run_parallel_mutations(
                     )
                     del active[index]
                     made_progress = True
+                    if on_progress is not None:
+                        on_progress(len(results), len(tasks), results[index])
                     begin_stop("infrastructure-failed")
 
             now = time.monotonic()
@@ -1143,6 +1150,7 @@ def mutation_test_problem(
     jobs=1,
     cancel_check=None,
     deadline=None,
+    event_sink=None,
 ):
     root = Path(root).resolve()
     problem_dir = Path(problem_dir).resolve()
@@ -1298,18 +1306,48 @@ def mutation_test_problem(
             )
             for index, mutation in enumerate(plan["mutations"])
         )
+        tasks = tuple(tasks)
+        problem_id = str(config.get("id") or problem_dir.name)
+        if event_sink is not None:
+            event_sink.emit_started(
+                "mutation",
+                problem_id,
+                total=len(tasks),
+                unit="mutants",
+                metadata={"jobs": effective_jobs, "max_mutants": max_mutants},
+            )
+
+        def _on_mutation_progress(completed, total, last_result):
+            if event_sink is not None:
+                mut = (last_result.get("mutation") if isinstance(last_result, dict) else None) or {}
+                event_sink.emit_progress(
+                    "mutation",
+                    problem_id,
+                    completed=completed,
+                    total=total,
+                    unit="mutants",
+                    detail={
+                        "index": last_result.get("index") if isinstance(last_result, dict) else None,
+                        "classification": last_result.get("classification") if isinstance(last_result, dict) else None,
+                        "operator": mut.get("operator") if isinstance(mut, dict) else None,
+                    },
+                    force=(completed == total),
+                )
+
         scheduled = (
             _run_parallel_mutations(
                 tasks,
                 jobs=effective_jobs,
                 cancel_check=cancel_check,
                 deadline=deadline,
+                on_progress=_on_mutation_progress,
             )
             if effective_jobs > 1
             else _run_serial_mutations(
                 tasks,
                 cancel_check=cancel_check,
                 deadline=deadline,
+                on_progress=_on_mutation_progress,
             )
         )
         run_results = scheduled["results"]
@@ -1401,6 +1439,14 @@ def mutation_test_problem(
     }
     if status != "passed":
         result["execution"]["mutations"] = run_results
+    if event_sink is not None:
+        event_sink.emit_final(
+            "mutation",
+            problem_id,
+            ok=result["ok"],
+            status=result["status"],
+            result=result,
+        )
     return result
 
 

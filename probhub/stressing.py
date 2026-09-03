@@ -1503,6 +1503,7 @@ def _stress_problem(
     fixate=None,
     fixate_group=None,
     cancel_check=None,
+    event_sink=None,
 ):
     root = Path(root).resolve()
     problem_dir = Path(problem_dir).resolve()
@@ -1533,6 +1534,19 @@ def _stress_problem(
     master_seed = secrets.randbelow(2**31) if master_seed is None else master_seed
     if not _is_int(master_seed) or master_seed < 0:
         raise ProbHubError("--seed must be a non-negative integer")
+
+    if event_sink is not None:
+        event_sink.emit_started(
+            "stress",
+            problem_id,
+            total=1 if replay is not None else requested_rounds,
+            unit="rounds",
+            metadata={
+                "master_seed": master_seed,
+                "replay": replay is not None,
+                "against": against,
+            },
+        )
 
     with tempfile.TemporaryDirectory(prefix="probhub-stress-build-") as build_temp:
         commands = {}
@@ -1583,7 +1597,7 @@ def _stress_problem(
             if against is not None and not ok and _is_killer_outcome(outcome):
                 ok = True
                 status = "killer_confirmed"
-            return {
+            replay_result = {
                 "ok": ok,
                 "status": status,
                 "problem_id": problem_id,
@@ -1602,9 +1616,32 @@ def _stress_problem(
                 "comparison": _public_run(outcome.get("comparison")),
                 "compile": compile_events,
             }
+            if event_sink is not None:
+                event_sink.emit_progress(
+                    "stress",
+                    problem_id,
+                    completed=1,
+                    total=1,
+                    unit="rounds",
+                    detail={"round": round_number, "seed": seed},
+                    force=True,
+                )
+                event_sink.emit_final(
+                    "stress",
+                    problem_id,
+                    ok=replay_result["ok"],
+                    status=replay_result["status"],
+                    result=replay_result,
+                )
+            return replay_result
 
         for round_number in range(1, requested_rounds + 1):
-            check_cancellation(cancel_check)
+            try:
+                check_cancellation(cancel_check)
+            except ProcessCancelled:
+                if event_sink is not None:
+                    event_sink.emit_cancelled("stress", problem_id, completed=round_number - 1, total=requested_rounds)
+                raise
             seed = master_seed + round_number - 1
             with tempfile.TemporaryDirectory(prefix="probhub-stress-round-") as round_temp:
                 outcome = _round_once(
@@ -1615,6 +1652,16 @@ def _stress_problem(
                     round_number,
                     round_temp,
                     cancel_check=cancel_check,
+                )
+            if event_sink is not None:
+                event_sink.emit_progress(
+                    "stress",
+                    problem_id,
+                    completed=round_number,
+                    total=requested_rounds,
+                    unit="rounds",
+                    detail={"round": round_number, "seed": seed},
+                    force=(round_number == requested_rounds or not outcome["ok"]),
                 )
             if not outcome["ok"]:
                 artifact, metadata = _save_counterexample(
@@ -1677,11 +1724,25 @@ def _stress_problem(
                                 configured["brute_rel"],
                                 fixate_snapshot,
                             )
+                if event_sink is not None:
+                    event_sink.emit_final(
+                        "stress",
+                        problem_id,
+                        ok=result["ok"],
+                        status=result["status"],
+                        result=result,
+                    )
                 return result
 
-    check_cancellation(cancel_check)
+    try:
+        check_cancellation(cancel_check)
+    except ProcessCancelled:
+        if event_sink is not None:
+            event_sink.emit_cancelled("stress", problem_id, completed=requested_rounds, total=requested_rounds)
+        raise
+
     if against is not None:
-        return {
+        result = {
             "ok": True,
             "status": "not_separated",
             "problem_id": problem_id,
@@ -1698,7 +1759,17 @@ def _stress_problem(
             ),
             "compile": compile_events,
         }
-    return {
+        if event_sink is not None:
+            event_sink.emit_final(
+                "stress",
+                problem_id,
+                ok=True,
+                status="not_separated",
+                result=result,
+            )
+        return result
+
+    result = {
         "ok": True,
         "status": "passed",
         "problem_id": problem_id,
@@ -1709,13 +1780,30 @@ def _stress_problem(
         "counterexample": None,
         "compile": compile_events,
     }
+    if event_sink is not None:
+        event_sink.emit_final(
+            "stress",
+            problem_id,
+            ok=True,
+            status="passed",
+            result=result,
+        )
+    return result
 
 
 def stress_problem(*args, **kwargs):
     """Run differential testing using the shared cancellation contract."""
+    event_sink = kwargs.get("event_sink")
     try:
         return _stress_problem(*args, **kwargs)
     except ProcessCancelled as exc:
+        if event_sink is not None and not event_sink.has_emitted_cancelled and not event_sink.has_emitted_final:
+            prob_id = "unknown"
+            if len(args) > 2 and isinstance(args[2], dict):
+                prob_id = args[2].get("id") or "unknown"
+            elif "config" in kwargs and isinstance(kwargs["config"], dict):
+                prob_id = kwargs["config"].get("id") or "unknown"
+            event_sink.emit_cancelled("stress", prob_id, reason=str(exc))
         return {
             "ok": False,
             "status": "cancelled",

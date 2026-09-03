@@ -36,6 +36,7 @@
     {
       "id": "execution",
       "tests": [
+        "test_event_stream.py",
         "test_judge_execution.py",
         "test_judging.py",
         "test_local_judge_layout.py",

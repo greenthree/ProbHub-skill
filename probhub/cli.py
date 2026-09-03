@@ -13,6 +13,7 @@ from .building import build_workspace, package_workspace, typeset_workspace
 from .cli_output import render_human_result
 from .doctor import run_doctor
 from .errors import ProbHubError
+from .events import EventSink
 from .generations import (
     assemble_exam_generation,
     create_problem_checkpoint,
@@ -77,8 +78,18 @@ def emit(data, json_output=False):
             print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _event_sink(args):
+    return (
+        EventSink()
+        if (getattr(args, "event_stream", False) or getattr(args, "output_format", None) == "stream")
+        else None
+    )
+
+
 def emit_result(data, args, renderer=None):
     """Select presentation without changing the structured result."""
+    if getattr(args, "event_stream", False) or getattr(args, "output_format", None) == "stream":
+        return
     output_format = getattr(args, "output_format", None)
     if renderer is not None and not args.json_output and output_format != "json":
         print(renderer(data, args), end="")
@@ -515,10 +526,16 @@ def command_judge(args):
     root, workspace = workspace_context(args)
     ensure_no_pending_transactions(root, workspace)
     _ensure_local_gitignore(root)
+    sink = _event_sink(args)
     results = {}
     for entry in select_entries(workspace, args.problem):
         problem_dir, _ = load_problem(root, entry)
-        results[entry["id"]] = judge_problem(root, problem_dir, use_cache=not args.no_cache)
+        results[entry["id"]] = judge_problem(
+            root,
+            problem_dir,
+            use_cache=not args.no_cache,
+            event_sink=sink,
+        )
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
 
 
@@ -570,6 +587,7 @@ def command_stress(args):
         raise ProbHubError("stress --replay requires exactly one problem id")
     if args.against is not None and len(entries) != 1:
         raise ProbHubError("stress --against requires exactly one problem id")
+    sink = _event_sink(args)
     results = {}
     for entry in entries:
         if args.fixate is None:
@@ -587,6 +605,7 @@ def command_stress(args):
             against=args.against,
             fixate=args.fixate,
             fixate_group=args.group,
+            event_sink=sink,
         )
     return {"ok": all(item["ok"] for item in results.values()), "problems": results}
 
@@ -598,6 +617,7 @@ def command_mutate(args):
     if args.timeout is not None and args.timeout <= 0:
         raise ProbHubError("mutation --timeout must be positive", code="mutation_timeout_invalid")
     entries = select_entries(workspace, args.problem)
+    sink = _event_sink(args)
     results = {}
     for entry in entries:
         problem_dir, _ = load_problem(root, entry)
@@ -609,6 +629,7 @@ def command_mutate(args):
             max_mutants=args.max_mutants,
             jobs=args.jobs,
             deadline=(time.monotonic() + args.timeout) if args.timeout else None,
+            event_sink=sink,
         )
         if result.get("code") in {"mutation_cancelled", "cancelled"} or (
             result.get("execution") or {}
@@ -861,9 +882,16 @@ def build_parser():
     parser.add_argument("--json", action="store_true", dest="json_output", help="emit JSON")
     parser.add_argument(
         "--format",
-        choices=("json", "text"),
+        choices=("json", "text", "stream"),
         dest="output_format",
-        help="output format; text is a bounded human-readable summary",
+        help="output format; text is a bounded human-readable summary, stream is an NDJSON event stream",
+    )
+    parser.add_argument(
+        "--event-stream",
+        action="store_true",
+        default=False,
+        dest="event_stream",
+        help="emit protocol_schema_version: 1 NDJSON event stream",
     )
     parser.add_argument("--workspace", help="workspace path or a path inside it")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -910,6 +938,14 @@ def build_parser():
             item.add_argument("--allow-missing-pdf", action="store_true")
         if name in {"judge", "judge-qa", "sample-check", "build"}:
             item.add_argument("--no-cache", action="store_true", help="ignore existing sandbox caches and refresh them")
+        if name == "judge":
+            item.add_argument(
+                "--event-stream",
+                action="store_true",
+                default=argparse.SUPPRESS,
+                dest="event_stream",
+                help="emit protocol_schema_version: 1 NDJSON event stream",
+            )
         if name == "build":
             item.add_argument("--skip-judge", action="store_true")
         item.set_defaults(handler=handler)
@@ -922,6 +958,13 @@ def build_parser():
     stress.add_argument("--against", help="hunt a killer for this solution instead of comparing with brute")
     stress.add_argument("--fixate", help="on a killer hit, persist it as this secret case with recipe and data group")
     stress.add_argument("--group", help="data group name for --fixate (defaults to the case name)")
+    stress.add_argument(
+        "--event-stream",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        dest="event_stream",
+        help="emit protocol_schema_version: 1 NDJSON event stream",
+    )
     stress.set_defaults(handler=command_stress)
 
     mutate = sub.add_parser("mutation", aliases=["mutate"])
@@ -942,6 +985,13 @@ def build_parser():
     )
     mutate.add_argument("--timeout", type=float, help="overall seconds per problem")
     mutate.add_argument("--no-cache", action="store_true", help="ignore temporary Judge caches")
+    mutate.add_argument(
+        "--event-stream",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        dest="event_stream",
+        help="emit protocol_schema_version: 1 NDJSON event stream",
+    )
     mutate.set_defaults(handler=command_mutate)
 
     checkpoint = sub.add_parser("checkpoint")
