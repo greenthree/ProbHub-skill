@@ -118,6 +118,7 @@ def judge_problem(
     memory_limit_mb=None,
     process_limit=None,
     cancel_check=None,
+    event_sink=None,
 ):
     root = Path(root)
     problem_dir = Path(problem_dir)
@@ -130,6 +131,9 @@ def judge_problem(
         )
     except (FileNotFoundError, ProbHubError, OSError, ValueError, TypeError):
         config = None
+    problem_id = str((config or {}).get("id") or problem_dir.name)
+    if event_sink is not None:
+        event_sink.emit_started("judge", problem_id)
     try:
         run, events, stderr_text = _invoke_local_judge(
             root,
@@ -142,6 +146,8 @@ def judge_problem(
             cancel_check=cancel_check,
         )
     except ProcessCancelled as exc:
+        if event_sink is not None and not event_sink.has_emitted_cancelled and not event_sink.has_emitted_final:
+            event_sink.emit_cancelled("judge", problem_id, reason=str(exc))
         return {
             "ok": False,
             "returncode": None,
@@ -160,7 +166,7 @@ def judge_problem(
     summaries = [event for event in events if event.get("type") == "summary"]
     if run["reason"] != "completed":
         final = _supervisor_failure(run, stderr_text)
-        return {
+        result = {
             "ok": False,
             "returncode": run["returncode"],
             "final": final,
@@ -169,6 +175,15 @@ def judge_problem(
             "calibration": None,
             "events": events,
         }
+        if event_sink is not None:
+            event_sink.emit_final(
+                "judge",
+                problem_id,
+                ok=False,
+                status="failed",
+                result=result,
+            )
+        return result
     final = events[-1] if events else {}
     ok = run["returncode"] == 0 and final.get("type") == "final" and final.get("status") == "passed" and final.get("code") == "all_expectations_met"
     evidence = None
@@ -196,7 +211,7 @@ def judge_problem(
         except (OSError, UnicodeError, ValueError, TypeError, ProbHubError) as exc:
             evidence = None
             evidence_error = str(exc)
-    return {
+    result = {
         "ok": ok,
         "returncode": run["returncode"],
         "final": final,
@@ -207,6 +222,15 @@ def judge_problem(
         **({"calibration_error": evidence_error} if evidence_error else {}),
         "events": events,
     }
+    if event_sink is not None:
+        event_sink.emit_final(
+            "judge",
+            problem_id,
+            ok=result["ok"],
+            status=str(final.get("status") or ("passed" if result["ok"] else "failed")),
+            result=result,
+        )
+    return result
 
 
 def check_sample_answers(
