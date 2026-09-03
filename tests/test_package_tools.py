@@ -641,7 +641,7 @@ class PackageToolsTests(unittest.TestCase):
 
             self.assertEqual(validate_dir, problem / "output_validators" / "validate")
             self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0]["timeout"], 60.0)
+            self.assertEqual(calls[0]["timeout"], 90.0)
             self.assertEqual(calls[0]["memory_limit_mb"], 2048)
             self.assertEqual(calls[0]["output_limit_bytes"], 8 * 1024 * 1024)
 
