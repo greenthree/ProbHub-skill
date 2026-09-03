@@ -43,6 +43,7 @@ DEFAULT_ROUNDS = 1000
 # Keep in sync with datagen.CASE_NAME_PATTERN (importing datagen here would cycle).
 _CASE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 DEFAULT_TOOL_TIMEOUT = 5.0
+DEFAULT_COMPILER_TIMEOUT_SECONDS = 90.0
 MIB = 1024 * 1024
 STRESS_METADATA_BUDGET_BYTES = 64 * 1024
 
@@ -195,7 +196,7 @@ def _compile_cpp(source, output, role):
             command,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
-            timeout=60.0,
+            timeout=DEFAULT_COMPILER_TIMEOUT_SECONDS,
             memory_limit_mb=2048,
             output_limit_bytes=8 * 1024 * 1024,
             process_limit=DEFAULT_PROCESS_LIMIT,

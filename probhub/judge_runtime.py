@@ -23,6 +23,7 @@ class BinaryChangedError(RuntimeError):
 
 
 _COMPILER_IDENTITY: str | None = None
+DEFAULT_COMPILER_TIMEOUT_SECONDS: float = 90.0
 
 
 class _QuietReporter:
@@ -316,7 +317,7 @@ def compile_cpp(
                 flags,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
-                timeout=60.0,
+                timeout=DEFAULT_COMPILER_TIMEOUT_SECONDS,
                 memory_limit_mb=2048,
                 output_limit_bytes=8 * 1024 * 1024,
                 process_limit=process_limit,

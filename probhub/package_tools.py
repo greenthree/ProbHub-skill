@@ -22,6 +22,7 @@ from .process_control import DEFAULT_PROCESS_LIMIT, ProcessCancelled, run_manage
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 TESTLIB_PATH = PACKAGE_ROOT / "references" / "testlib.h"
+DEFAULT_COMPILER_TIMEOUT_SECONDS = 90.0
 
 FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 ROOT_FILES = ("domjudge-problem.ini", "problem.yaml", "problem.pdf")
@@ -390,7 +391,7 @@ def validate_output_validator_source(problem_dir, config):
                 command,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
-                timeout=60.0,
+                timeout=DEFAULT_COMPILER_TIMEOUT_SECONDS,
                 memory_limit_mb=2048,
                 output_limit_bytes=8 * 1024 * 1024,
                 process_limit=DEFAULT_PROCESS_LIMIT,
@@ -1337,7 +1338,7 @@ def _validate_packaged_output_validator(
                 command,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
-                timeout=60.0,
+                timeout=DEFAULT_COMPILER_TIMEOUT_SECONDS,
                 memory_limit_mb=2048,
                 output_limit_bytes=8 * 1024 * 1024,
                 process_limit=DEFAULT_PROCESS_LIMIT,
@@ -1589,7 +1590,7 @@ def _compile_input_validator(source, build_dir, diagnostics, errors, warnings):
             command,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
-            timeout=60.0,
+            timeout=DEFAULT_COMPILER_TIMEOUT_SECONDS,
             memory_limit_mb=2048,
             output_limit_bytes=8 * 1024 * 1024,
             process_limit=DEFAULT_PROCESS_LIMIT,
