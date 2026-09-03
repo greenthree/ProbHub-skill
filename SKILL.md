@@ -86,7 +86,7 @@ probhub build L01 L02 L03 --no-cache
 probhub verify-package L01.zip --require-pdf --problem L01
 ```
 
-默认输出为结构化 JSON；`--format text` 只是人类摘要，不能替代 JSON、退出码或最终事件。诊断中的 `remediation` 只提供下一步建议：执行前检查 `manual_review_required`，未知动作码安全忽略，它不会自动修改规范源或证明题目正确。
+默认输出为结构化 JSON；`--format text` 只是人类摘要，不能替代 JSON、退出码或最终事件；`--event-stream`（或 `--format stream`）输出实时 NDJSON 协议流（`started` / `progress` / `final` / `cancelled`）。诊断中的 `remediation` 只提供下一步建议：执行前检查 `manual_review_required`，未知动作码安全忽略，它不会自动修改规范源或证明题目正确。
 
 ## 5. 验证模式
 

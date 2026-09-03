@@ -52,6 +52,7 @@ probhub --workspace C:\path\to\workspace --json status L01
 - `--workspace <path>`：显式指定工作区根目录或其内部路径。
 - `--json`：输出单个 JSON 文档，适合脚本集成。
 - `--format text`：输出有界的人类可读摘要；必须写在子命令前。默认输出和 `--json` 保持 JSON 兼容。
+- `--format stream` 或 `--event-stream`：启用 Schema v1 实时流式事件协议（NDJSON），输出包含 `protocol_schema_version: 1` 的 `started`、`progress`（有界时间节流）、`final` 和 `cancelled` 结构化事件帧，供 IDE、WebUI 或 Harness 后台作业消费。
 - `--version`：输出版本号并退出。
 
 人类摘要只展示命令状态、每题首要结果、最多三条诊断和下一条建议命令；完整诊断、路径和证据仍通过 `--json` 获取。摘要不使用 ANSI 颜色，因此在 PowerShell、Ubuntu、重定向文件和非 TTY 中语义一致。
