@@ -22,7 +22,7 @@ from .judge_qa import (
 )
 from .metadata import build_meta, normalize_display_name
 from .mutation_config import inspect_mutation_config
-from .problem_paths import ProblemPathError, resolve_problem_regular_file
+from .problem_paths import ProblemPathError, is_link_like, resolve_problem_regular_file
 from .remediation import attach_remediations
 from .solutions import analyze_solution_verification
 from .source_diagnostics import diagnose_source, format_diagnostic
@@ -544,6 +544,13 @@ def lint_problem(root, workspace, entry):
     if duplicate_groups:
         errors.append("duplicate data group names: " + ", ".join(duplicate_groups))
     for kind, default in (("sample", "data/sample"), ("secret", "data/secret")):
+        configured_path = (config.get("data") or {}).get(f"{kind}_dir", default)
+        raw_dir = problem_dir / configured_path
+        if is_link_like(raw_dir):
+            errors.append(
+                f"{kind} data directory must not be a symlink or reparse point: {configured_path}"
+            )
+            continue
         try:
             directory = resolve_data_dir(problem_dir, config, f"{kind}_dir", default)
         except ProbHubError as exc:
@@ -553,6 +560,11 @@ def lint_problem(root, workspace, entry):
         answers = set()
         if directory.is_dir():
             for path in directory.iterdir():
+                if is_link_like(path):
+                    errors.append(
+                        f"{kind} data file must not be a symlink or reparse point: {path.name}"
+                    )
+                    continue
                 if not path.is_file():
                     continue
                 suffix = path.suffix.casefold()
@@ -657,8 +669,18 @@ def lint_problem(root, workspace, entry):
     solution_verification = analyze_solution_verification(problem_dir, config)
     errors.extend(solution_verification.get("errors") or [])
     warnings.extend(solution_verification.get("warnings") or [])
-    source_hash = compute_source_hash(problem_dir, config)
-    data_hash = compute_data_hash(problem_dir, config)
+    try:
+        source_hash = compute_source_hash(problem_dir, config)
+    except ProbHubError as exc:
+        source_hash = ""
+        if str(exc) not in errors:
+            errors.append(str(exc))
+    try:
+        data_hash = compute_data_hash(problem_dir, config)
+    except ProbHubError as exc:
+        data_hash = ""
+        if str(exc) not in errors:
+            errors.append(str(exc))
     judge_qa_evidence = evaluate_judge_qa_evidence(
         problem_dir,
         config,
@@ -804,9 +826,17 @@ def problem_status(
                 "pending_transactions": pending,
             }
     manifest, manifest_error = _read_manifest(problem_dir)
+    try:
+        current_source_hash = compute_source_hash(problem_dir, config)
+    except ProbHubError:
+        current_source_hash = None
+    try:
+        current_data_hash = compute_data_hash(problem_dir, config)
+    except ProbHubError:
+        current_data_hash = None
     current = {
-        "source_hash": compute_source_hash(problem_dir, config),
-        "data_hash": compute_data_hash(problem_dir, config),
+        "source_hash": current_source_hash,
+        "data_hash": current_data_hash,
         "pdf_hash": hash_file(problem_dir / "problem.pdf"),
         "package_hash": hash_file(problem_dir.parent / f"{config['id']}.zip"),
     }

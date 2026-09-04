@@ -241,6 +241,59 @@ class StressEventStreamIntegrationTests(unittest.TestCase):
             self.assertIn("problems", parsed)
             self.assertNotIn("protocol_schema_version", parsed)
 
+    def test_stream_emits_final_frame_on_cli_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            self.create_workspace(root)
+
+            captured = io.StringIO()
+            with mock.patch("sys.stdout", captured):
+                code = cli.main([
+                    "--workspace", str(root),
+                    "--format", "stream",
+                    "judge", "DOES_NOT_EXIST",
+                ])
+
+            self.assertEqual(code, 1)
+            lines = [l for l in captured.getvalue().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 1)
+            frame = parse_event_stream_line(lines[0])
+            self.assertIsNotNone(frame)
+            self.assertEqual(frame["type"], "final")
+            self.assertFalse(frame["ok"])
+            self.assertEqual(frame["problem_id"], "DOES_NOT_EXIST")
+            self.assertEqual(frame["status"], "failed")
+            self.assertIn("unknown problem", frame["result"]["error"])
+
+    def test_stream_emits_final_frame_on_argument_error(self):
+        captured = io.StringIO()
+        with mock.patch("sys.stdout", captured), mock.patch("sys.stderr", io.StringIO()):
+            try:
+                cli.main(["--format", "stream", "invalid_subcommand"])
+            except SystemExit as exc:
+                self.assertEqual(exc.code, 2)
+
+        lines = [l for l in captured.getvalue().splitlines() if l.strip()]
+        self.assertGreaterEqual(len(lines), 1)
+        frame = parse_event_stream_line(lines[0])
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame["type"], "final")
+        self.assertFalse(frame["ok"])
+        self.assertEqual(frame["code"], "invalid_arguments")
+
+    def test_event_sink_callback_reentrancy_no_deadlock(self):
+        reentrant_calls = []
+
+        def callback(event):
+            reentrant_calls.append(sink.has_emitted_terminal)
+
+        sink = EventSink(stream=io.StringIO(), callback=callback)
+        sink.emit_started("stress", "A")
+        sink.emit_final("stress", "A", ok=True, status="passed")
+        self.assertEqual(len(reentrant_calls), 2)
+        self.assertFalse(reentrant_calls[0])
+        self.assertTrue(reentrant_calls[1])
+
 
 if __name__ == "__main__":
     unittest.main()

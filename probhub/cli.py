@@ -79,16 +79,42 @@ def emit(data, json_output=False):
 
 
 def _event_sink(args):
-    return (
+    if hasattr(args, "_sink"):
+        return args._sink
+    sink = (
         EventSink()
         if (getattr(args, "event_stream", False) or getattr(args, "output_format", None) == "stream")
         else None
     )
+    args._sink = sink
+    return sink
 
 
 def emit_result(data, args, renderer=None):
     """Select presentation without changing the structured result."""
-    if getattr(args, "event_stream", False) or getattr(args, "output_format", None) == "stream":
+    is_stream = getattr(args, "event_stream", False) or getattr(args, "output_format", None) == "stream"
+    if is_stream:
+        sink = _event_sink(args)
+        if sink is not None and not sink.has_emitted_terminal:
+            op = getattr(args, "command", None) or "unknown"
+            problem = getattr(args, "problem", None) or getattr(args, "problem_id", None) or ""
+            if isinstance(problem, list):
+                problem_id = problem[0] if problem else ""
+            else:
+                problem_id = str(problem)
+            is_ok = bool(data.get("ok", False)) if isinstance(data, dict) else False
+            status = str(data.get("status", "completed" if is_ok else "failed")) if isinstance(data, dict) else ("completed" if is_ok else "failed")
+            code = None
+            if isinstance(data, dict):
+                code = data.get("code") or (status if not is_ok else None)
+            sink.emit_final(
+                operation=op,
+                problem_id=problem_id,
+                ok=is_ok,
+                status=status,
+                result=data if isinstance(data, dict) else {"result": data},
+                code=str(code) if code is not None else None,
+            )
         return
     output_format = getattr(args, "output_format", None)
     if renderer is not None and not args.json_output and output_format != "json":
@@ -876,8 +902,32 @@ def command_build(args):
     )
 
 
+class StreamArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._raw_argv = None
+
+    def parse_args(self, args=None, namespace=None):
+        self._raw_argv = sys.argv[1:] if args is None else list(args)
+        return super().parse_args(args=args, namespace=namespace)
+
+    def error(self, message):
+        raw = self._raw_argv if self._raw_argv is not None else sys.argv[1:]
+        if any(arg in raw for arg in ("--event-stream", "stream")):
+            sink = EventSink()
+            sink.emit_final(
+                operation="unknown",
+                problem_id="",
+                ok=False,
+                status="failed",
+                code="invalid_arguments",
+                result={"ok": False, "code": "invalid_arguments", "error": message},
+            )
+        super().error(message)
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(prog="probhub", description="ProbHub deterministic problem build system")
+    parser = StreamArgumentParser(prog="probhub", description="ProbHub deterministic problem build system")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--json", action="store_true", dest="json_output", help="emit JSON")
     parser.add_argument(
