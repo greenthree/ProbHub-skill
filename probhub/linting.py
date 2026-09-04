@@ -669,8 +669,18 @@ def lint_problem(root, workspace, entry):
     solution_verification = analyze_solution_verification(problem_dir, config)
     errors.extend(solution_verification.get("errors") or [])
     warnings.extend(solution_verification.get("warnings") or [])
-    source_hash = compute_source_hash(problem_dir, config)
-    data_hash = compute_data_hash(problem_dir, config)
+    try:
+        source_hash = compute_source_hash(problem_dir, config)
+    except ProbHubError as exc:
+        source_hash = ""
+        if str(exc) not in errors:
+            errors.append(str(exc))
+    try:
+        data_hash = compute_data_hash(problem_dir, config)
+    except ProbHubError as exc:
+        data_hash = ""
+        if str(exc) not in errors:
+            errors.append(str(exc))
     judge_qa_evidence = evaluate_judge_qa_evidence(
         problem_dir,
         config,
@@ -816,9 +826,17 @@ def problem_status(
                 "pending_transactions": pending,
             }
     manifest, manifest_error = _read_manifest(problem_dir)
+    try:
+        current_source_hash = compute_source_hash(problem_dir, config)
+    except ProbHubError:
+        current_source_hash = None
+    try:
+        current_data_hash = compute_data_hash(problem_dir, config)
+    except ProbHubError:
+        current_data_hash = None
     current = {
-        "source_hash": compute_source_hash(problem_dir, config),
-        "data_hash": compute_data_hash(problem_dir, config),
+        "source_hash": current_source_hash,
+        "data_hash": current_data_hash,
         "pdf_hash": hash_file(problem_dir / "problem.pdf"),
         "package_hash": hash_file(problem_dir.parent / f"{config['id']}.zip"),
     }

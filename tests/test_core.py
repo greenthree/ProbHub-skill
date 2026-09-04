@@ -1013,7 +1013,10 @@ class CoreWorkspaceTests(unittest.TestCase):
             config_normal["data"]["sample_dir"] = "data/sample"
             write_yaml(problem / "probhub.yaml", config_normal)
 
-            with patch("probhub.linting.is_link_like", side_effect=lambda p: "sample" in Path(p).name):
+            with (
+                patch("probhub.linting.is_link_like", side_effect=lambda p: "sample" in Path(p).name),
+                patch("probhub.hashing.is_link_like", side_effect=lambda p: "sample" in Path(p).name),
+            ):
                 lint_mock = lint_workspace(root, workspace)
                 self.assertFalse(lint_mock["ok"])
                 self.assertTrue(any("must not be a symlink" in err for err in lint_mock["problems"][0]["errors"]))
