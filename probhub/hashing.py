@@ -1,10 +1,13 @@
 import hashlib
 from pathlib import Path
 
+from .errors import ProbHubError
+from .problem_paths import is_link_like
+
 
 def hash_file(path):
     path = Path(path)
-    if not path.is_file():
+    if is_link_like(path) or not path.is_file():
         return None
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -20,13 +23,18 @@ def hash_paths(root, paths, *, normalize_lf_suffixes=(), check=None):
     }
     digest = hashlib.sha256()
     existing = []
-    for path in sorted({Path(p) for p in paths}, key=lambda p: p.as_posix()):
+    for path in sorted(paths, key=lambda item: Path(item).as_posix()):
         if check is not None:
             check()
-        full = path if path.is_absolute() else root / path
+        full = root / path
+        if is_link_like(full):
+            raise ProbHubError(
+                f"hashed file must not be a symlink or reparse point: {full}",
+                code="unsafe_data_source",
+            )
         if not full.is_file():
             continue
-        rel = full.relative_to(root).as_posix().encode("utf-8")
+        rel = Path(path).as_posix().encode("utf-8")
         if full.suffix.lower() not in normalize_lf_suffixes:
             expected_size = full.stat().st_size
             digest.update(len(rel).to_bytes(4, "big"))
@@ -55,12 +63,22 @@ def hash_paths(root, paths, *, normalize_lf_suffixes=(), check=None):
 
 def files_under(path, suffixes=None, *, check=None):
     path = Path(path)
+    if is_link_like(path):
+        raise ProbHubError(
+            f"data directory must not be a symlink or reparse point: {path}",
+            code="unsafe_data_source",
+        )
     if not path.exists():
         return []
     result = []
     for item in path.rglob("*"):
         if check is not None:
             check()
+        if is_link_like(item):
+            raise ProbHubError(
+                f"data file or directory must not be a symlink or reparse point: {item}",
+                code="unsafe_data_source",
+            )
         if item.is_file() and (suffixes is None or item.suffix in suffixes):
             result.append(item)
     return result

@@ -42,6 +42,7 @@ from .linting import (
     lint_workspace,
 )
 from .package_tools import build_verified_package, generate_domjudge_config, validate_output_validator_source
+from .problem_paths import is_link_like
 from .process_control import ProcessCancelled, check_cancellation
 from .remediation import remediation_for_error
 from .typesetting import compile_collection, extract_problem_pdfs, is_temporary_typst_source
@@ -409,6 +410,25 @@ def create_build_snapshot(plan, *, cancel_check=None):
     temporary_root = None
     try:
         check_cancellation(cancel_check)
+        for item in plan.problems:
+            pdir = Path(item.problem_dir)
+            config = item.config
+            data = config.get("data") or {}
+            for key, default in (("sample_dir", "data/sample"), ("secret_dir", "data/secret")):
+                rel = data.get(key, default)
+                d = pdir / rel
+                if is_link_like(d):
+                    raise ProbHubError(
+                        f"data directory must not be a symlink or reparse point: {d}",
+                        code="unsafe_data_source",
+                    )
+                if d.is_dir():
+                    for sub in d.rglob("*"):
+                        if is_link_like(sub):
+                            raise ProbHubError(
+                                f"data file or directory must not be a symlink or reparse point: {sub}",
+                                code="unsafe_data_source",
+                            )
         try:
             temporary_root = Path(tempfile.mkdtemp(
                 prefix=f".{plan.root.name}-probhub-{plan.batch_id[:8]}-",
@@ -418,6 +438,7 @@ def create_build_snapshot(plan, *, cancel_check=None):
             shutil.copytree(
                 plan.root,
                 snapshot_root,
+                symlinks=True,
                 ignore=_snapshot_ignore(plan),
             )
             check_cancellation(cancel_check)

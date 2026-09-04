@@ -945,6 +945,84 @@ class CoreWorkspaceTests(unittest.TestCase):
             _publish_output_validators(root / "missing-source", destination)
             self.assertFalse(destination.exists())
 
+    def test_lint_and_build_fail_closed_on_data_symlinks(self):
+        from probhub.building import build_workspace
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            problem = self.create_workspace(root)
+            _, workspace = load_workspace(root)
+
+            # 1. Test real symlink if supported by OS
+            external_dir = root / "external_data"
+            external_dir.mkdir()
+            (external_dir / "1.in").write_text("1\n", encoding="utf-8")
+            (external_dir / "1.ans").write_text("1\n", encoding="utf-8")
+
+            symlink_created = False
+            try:
+                sample_link = problem / "data/sample_link"
+                sample_link.symlink_to(external_dir, target_is_directory=True)
+                symlink_created = True
+            except (NotImplementedError, OSError):
+                pass
+
+            if symlink_created:
+                config = read_yaml(problem / "probhub.yaml")
+                config["data"]["sample_dir"] = "data/sample_link"
+                write_yaml(problem / "probhub.yaml", config)
+
+                lint_res = lint_workspace(root, workspace)
+                self.assertFalse(lint_res["ok"])
+                self.assertTrue(any("must not be a symlink" in err for err in lint_res["problems"][0]["errors"]))
+
+                with self.assertRaises(ProbHubError) as cm:
+                    compute_data_hash(problem, config)
+                self.assertEqual(cm.exception.code, "unsafe_data_source")
+
+            fake_fingerprint = {
+                "probhub_version": "0.7.0",
+                "build_manifest_schema_version": 1,
+                "generation_schema_version": 1,
+                "typst_version": "0.14.2",
+                "pypdf_version": "6.14.2",
+                "template_hash": "fixture-template",
+                "font": {
+                    "family": "Noto Sans CJK SC",
+                    "policy": "bundled-only-v1",
+                    "sha256": "fixture-font",
+                },
+                "digest": "fixture-builder",
+            }
+            with (
+                patch("probhub.building.compute_builder_fingerprint", return_value=fake_fingerprint),
+                patch("probhub.building.require_collection_sealed", return_value={}),
+            ):
+                if symlink_created:
+                    with self.assertRaises(ProbHubError) as cm:
+                        build_workspace(root, workspace, problem_entries(workspace), run_judge=False)
+                    self.assertEqual(cm.exception.code, "unsafe_data_source")
+
+                with patch("probhub.building.is_link_like", return_value=True):
+                    with self.assertRaises(ProbHubError) as cm:
+                        build_workspace(root, workspace, problem_entries(workspace), run_judge=False)
+                    self.assertEqual(cm.exception.code, "unsafe_data_source")
+
+            # 2. Test link-like detection to guarantee CI coverage across all platforms
+            config_normal = read_yaml(problem / "probhub.yaml")
+            config_normal["data"]["sample_dir"] = "data/sample"
+            write_yaml(problem / "probhub.yaml", config_normal)
+
+            with patch("probhub.linting.is_link_like", side_effect=lambda p: "sample" in Path(p).name):
+                lint_mock = lint_workspace(root, workspace)
+                self.assertFalse(lint_mock["ok"])
+                self.assertTrue(any("must not be a symlink" in err for err in lint_mock["problems"][0]["errors"]))
+
+            with patch("probhub.hashing.is_link_like", return_value=True):
+                with self.assertRaises(ProbHubError) as cm:
+                    compute_data_hash(problem, config_normal)
+                self.assertEqual(cm.exception.code, "unsafe_data_source")
+
 
 if __name__ == "__main__":
     unittest.main()

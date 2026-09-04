@@ -18,6 +18,16 @@ class ProblemPathError(ValueError):
         super().__init__(reason)
 
 
+def is_link_like(path: os.PathLike[str] | str) -> bool:
+    """Return True if path is a symlink or Windows reparse point."""
+    try:
+        info = os.lstat(os.fspath(path))
+    except (OSError, ValueError):
+        return False
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(stat.S_ISLNK(info.st_mode) or (attributes & _FILE_ATTRIBUTE_REPARSE_POINT))
+
+
 def resolve_problem_regular_file(problem_dir, value):
     """Resolve a problem-local regular file without traversing link-like paths."""
 

@@ -45,18 +45,25 @@ class EventSink:
         with self._lock:
             return self._emitted_cancelled
 
+    @property
+    def has_emitted_terminal(self) -> bool:
+        with self._lock:
+            return self._emitted_final or self._emitted_cancelled
+
     def emit_raw(self, event: dict[str, Any]) -> None:
         """Serialize and emit one raw event dictionary."""
         payload = json.dumps(event, ensure_ascii=False)
         with self._lock:
-            if self._callback is not None:
-                self._callback(event)
-            if self._stream is not None:
-                self._stream.write(payload + "\n")
-                try:
-                    self._stream.flush()
-                except (OSError, ValueError):
-                    pass
+            callback = self._callback
+            stream = self._stream
+        if callback is not None:
+            callback(event)
+        if stream is not None:
+            stream.write(payload + "\n")
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
 
     def emit_started(
         self,
@@ -132,6 +139,8 @@ class EventSink:
         ok: bool,
         status: str,
         result: dict[str, Any] | None = None,
+        *,
+        code: str | None = None,
     ) -> None:
         """Emit the terminal final event frame."""
         event: dict[str, Any] = {
@@ -143,6 +152,10 @@ class EventSink:
             "status": status,
             "timestamp": time.time(),
         }
+        if code is not None:
+            event["code"] = code
+        elif result is not None and "code" in result and isinstance(result["code"], str):
+            event["code"] = result["code"]
         if result is not None:
             event["result"] = result
         with self._lock:

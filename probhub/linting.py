@@ -22,7 +22,7 @@ from .judge_qa import (
 )
 from .metadata import build_meta, normalize_display_name
 from .mutation_config import inspect_mutation_config
-from .problem_paths import ProblemPathError, resolve_problem_regular_file
+from .problem_paths import ProblemPathError, is_link_like, resolve_problem_regular_file
 from .remediation import attach_remediations
 from .solutions import analyze_solution_verification
 from .source_diagnostics import diagnose_source, format_diagnostic
@@ -544,6 +544,13 @@ def lint_problem(root, workspace, entry):
     if duplicate_groups:
         errors.append("duplicate data group names: " + ", ".join(duplicate_groups))
     for kind, default in (("sample", "data/sample"), ("secret", "data/secret")):
+        configured_path = (config.get("data") or {}).get(f"{kind}_dir", default)
+        raw_dir = problem_dir / configured_path
+        if is_link_like(raw_dir):
+            errors.append(
+                f"{kind} data directory must not be a symlink or reparse point: {configured_path}"
+            )
+            continue
         try:
             directory = resolve_data_dir(problem_dir, config, f"{kind}_dir", default)
         except ProbHubError as exc:
@@ -553,6 +560,11 @@ def lint_problem(root, workspace, entry):
         answers = set()
         if directory.is_dir():
             for path in directory.iterdir():
+                if is_link_like(path):
+                    errors.append(
+                        f"{kind} data file must not be a symlink or reparse point: {path.name}"
+                    )
+                    continue
                 if not path.is_file():
                     continue
                 suffix = path.suffix.casefold()
