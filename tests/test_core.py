@@ -1001,7 +1001,7 @@ class CoreWorkspaceTests(unittest.TestCase):
                 if symlink_created:
                     with self.assertRaises(ProbHubError) as cm:
                         build_workspace(root, workspace, problem_entries(workspace), run_judge=False)
-                    self.assertEqual(cm.exception.code, "unsafe_data_source")
+                    self.assertIn("must not be a symlink", str(cm.exception))
 
                 with patch("probhub.building.is_link_like", return_value=True):
                     with self.assertRaises(ProbHubError) as cm:
