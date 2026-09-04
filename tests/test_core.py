@@ -980,6 +980,14 @@ class CoreWorkspaceTests(unittest.TestCase):
                     compute_data_hash(problem, config)
                 self.assertEqual(cm.exception.code, "unsafe_data_source")
 
+                with self.assertRaises(ProbHubError) as cm:
+                    build_workspace(root, workspace, problem_entries(workspace), run_judge=False)
+                self.assertIn("must not be a symlink", str(cm.exception))
+
+                # Reset to normal data directory so subsequent tests start clean
+                config["data"]["sample_dir"] = "data/sample"
+                write_yaml(problem / "probhub.yaml", config)
+
             fake_fingerprint = {
                 "probhub_version": "0.7.0",
                 "build_manifest_schema_version": 1,
@@ -997,16 +1005,11 @@ class CoreWorkspaceTests(unittest.TestCase):
             with (
                 patch("probhub.building.compute_builder_fingerprint", return_value=fake_fingerprint),
                 patch("probhub.building.require_collection_sealed", return_value={}),
+                patch("probhub.building.is_link_like", return_value=True),
             ):
-                if symlink_created:
-                    with self.assertRaises(ProbHubError) as cm:
-                        build_workspace(root, workspace, problem_entries(workspace), run_judge=False)
-                    self.assertIn("must not be a symlink", str(cm.exception))
-
-                with patch("probhub.building.is_link_like", return_value=True):
-                    with self.assertRaises(ProbHubError) as cm:
-                        build_workspace(root, workspace, problem_entries(workspace), run_judge=False)
-                    self.assertEqual(cm.exception.code, "unsafe_data_source")
+                with self.assertRaises(ProbHubError) as cm:
+                    build_workspace(root, workspace, problem_entries(workspace), run_judge=False)
+                self.assertEqual(cm.exception.code, "unsafe_data_source")
 
             # 2. Test link-like detection to guarantee CI coverage across all platforms
             config_normal = read_yaml(problem / "probhub.yaml")
