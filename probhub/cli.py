@@ -976,7 +976,7 @@ def build_parser():
     ui.add_argument("--check", action="store_true", help="load the packaged WebUI and exit")
     ui.set_defaults(handler=command_ui)
 
-    report = sub.add_parser("report")
+    report = sub.add_parser("report", aliases=["verify"])
     report.add_argument("problem", nargs="*")
     report.add_argument("--format", choices=("text", "markdown"), default="text")
     report.set_defaults(handler=command_report, renderer=render_report_result)

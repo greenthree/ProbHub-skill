@@ -3,6 +3,7 @@
   "tests": [
     "test_builder_fingerprint.py",
     "test_core.py",
+    "test_constraints.py",
     "test_dependency_audit.py",
     "test_judge_cache.py",
     "test_judge_planning.py",
