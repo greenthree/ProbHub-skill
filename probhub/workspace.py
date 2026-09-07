@@ -70,8 +70,17 @@ def load_problem(root, entry):
     if not config_path.is_file():
         raise ProbHubError(f"problem config not found: {config_path}")
     config = read_yaml(config_path)
-    if config.get("schema_version") != 1:
-        raise ProbHubError(f"{config_path}: unsupported schema_version")
+    schema_version = config.get("schema_version")
+    if schema_version != 1:
+        raise ProbHubError(
+            f"{config_path}: unsupported schema_version",
+            code="unsupported_schema",
+        )
+    if "constraints" in config:
+        raise ProbHubError(
+            f"{config_path}: constraints requires problem schema_version 2",
+            code="constraints_requires_problem_schema_v2",
+        )
     if config.get("id") != entry["id"]:
         raise ProbHubError(f"{config_path}: id does not match workspace entry {entry['id']}")
     return problem_dir, config

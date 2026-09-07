@@ -10,6 +10,7 @@
         "test_cancellation_contract.py",
         "test_cli_output.py",
         "test_core.py",
+        "test_constraints.py",
         "test_data_groups.py",
         "test_dependency_audit.py",
         "test_generations.py",

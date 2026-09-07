@@ -267,9 +267,10 @@ Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以
 probhub report [ID...]
 probhub report [ID...] --format markdown
 probhub --json report [ID...]
+probhub verify [ID...]
 ```
 
-生成只读工作区体检，默认输出适合终端阅读的文本；`--format markdown` 输出 Markdown；全局 `--json` 输出 `report schema v1` 结构化文档并优先于文本格式。报告按正式题序汇总：
+生成只读工作区体检，默认输出适合终端阅读的文本；verify 是同一 Core report 的稳定别名，不复制或改变业务逻辑。`--format markdown` 输出 Markdown；全局 `--json` 输出 `report schema v1` 结构化文档并优先于文本格式。报告按正式题序汇总：
 
 - 题号、稳定 ID、题名、难度与标签；
 - sample/secret 数量、输入/答案字节规模和最大输入；
@@ -277,6 +278,9 @@ probhub --json report [ID...]
 - `data.recipes` 覆盖率，以及无 recipe、随机型比例过高、缺少定向 recipe、缺少近上界信号等结构化 warning；
 - 最近一次完整成功 Judge evidence 中 accepted 的 TL headroom；本机测量固定 `target_guarantee: false`；
 - 按错解 × 数据组展示声明目标和当前 evidence 的击杀矩阵：`killed`、`missed`、`unknown`、`not-targeted`。
+- 每道题的 `risk` 摘要：`risk_level`（`low`/`review`/`high`/`blocked`）、`delivery_state`、`verification_complete` 和触发信号；该摘要用于防止把 `lint.ok=true` 误读为正式可交付，不改变 lint/build 退出码或正式发布门禁。
+
+`verification_complete: false` 表示报告仍有高风险证据缺口或人工审查项，例如 calibration 缺失、secret recipe 不完整、约束对账为 partial/dynamic、高难题缺少独立 accepted，或 Judge QA probe 需要人工复核。`risk` 是基于当前只读证据的分级结果，不是算法正确性证明；正式交付仍需按本文件的 `seal`、`build`、`status`、验包和 PDF 审查要求完成。
 
 recipe 的随机/定向/近上界分类是显式标注的启发式分析：读取 recipe case/args、数据组 role/targets，以及与题面直接上界相等的参数。它用于提醒人工复核，不证明生成器真的覆盖了算法边界。
 
