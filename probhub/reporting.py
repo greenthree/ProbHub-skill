@@ -40,6 +40,7 @@ _BOUNDARY_SIGNALS = (
     "最小",
 )
 _TARGET_SIGNALS = ("killer", "target", "counterexample", "hack", "反例", "定向", "卡")
+_RISK_LEVEL_ORDER = {"low": 0, "review": 1, "high": 2, "blocked": 3}
 
 
 def _diagnostic(code, message, *, severity="warning", **payload):
@@ -398,10 +399,125 @@ def _judge_qa_profile(lint_result):
         "cases": [],
         "probes": [],
     }
-    return {
+    result = {
         key: evidence.get(key, defaults.get(key))
         for key in keys
         if key in evidence or key in defaults
+    }
+    return result
+
+
+def _risk_profile(problem):
+    """Classify delivery risk without changing lint/build compatibility."""
+    lint = problem.get("lint") or {}
+    diagnostics = problem.get("diagnostics") or []
+    signals = []
+
+    def add(code, message, *, level="high"):
+        signals.append({"code": code, "level": level, "message": message})
+
+    if lint.get("errors"):
+        add(
+            "lint_errors",
+            "lint has blocking errors; the problem is not ready for delivery",
+            level="blocked",
+        )
+    if any(
+        isinstance(item, dict) and item.get("severity") == "error"
+        for item in diagnostics
+    ):
+        add(
+            "diagnostic_errors",
+            "the report contains blocking error diagnostics; the problem is not ready for delivery",
+            level="blocked",
+        )
+
+    difficulty = problem.get("difficulty")
+    diagnostic_codes = {
+        item.get("code")
+        for item in diagnostics
+        if isinstance(item, dict)
+    }
+    if (
+        isinstance(difficulty, int)
+        and difficulty >= 4
+        and "single_accepted_high_difficulty" in diagnostic_codes
+    ):
+        add(
+            "high_difficulty_single_accepted",
+            "high-difficulty problem has only one full-range accepted solution",
+        )
+
+    aggregate = problem.get("aggregate_constraints") or {}
+    aggregate_summary = aggregate.get("summary") or {}
+    if (
+        aggregate_summary.get("statement_only", 0)
+        or aggregate_summary.get("validator_only", 0)
+        or aggregate_summary.get("dynamic", 0)
+        or (
+            aggregate.get("multi_case_detected")
+            and aggregate.get("analysis_state") == "partial"
+        )
+    ):
+        add(
+            "constraint_analysis_incomplete",
+            "constraint reconciliation is partial, dynamic, or contains unmatched bounds",
+        )
+
+    calibration = problem.get("calibration") or {}
+    if calibration.get("state") != "current":
+        add(
+            "calibration_evidence_incomplete",
+            "local calibration evidence is missing or stale",
+        )
+
+    recipes = problem.get("recipes") or {}
+    coverage = recipes.get("coverage_ratio")
+    if coverage is None or coverage < 1:
+        add(
+            "data_provenance_incomplete",
+            "one or more secret cases do not have reproducible recipe provenance",
+        )
+
+    judge_qa = problem.get("judge_qa") or {}
+    if (
+        judge_qa.get("configured")
+        and judge_qa.get("applicable")
+        and judge_qa.get("state") != "current"
+    ):
+        add(
+            "judge_qa_evidence_incomplete",
+            "configured special-judge QA evidence is missing or stale",
+        )
+    if judge_qa.get("manual_review_probes", 0):
+        add(
+            "judge_qa_manual_review",
+            "Judge QA contains probes that require author review",
+        )
+
+    if signals:
+        level = max(
+            (item["level"] for item in signals),
+            key=lambda value: _RISK_LEVEL_ORDER[value],
+        )
+    elif any(
+        isinstance(item, dict) and item.get("severity") == "warning"
+        for item in diagnostics
+    ):
+        level = "review"
+    else:
+        level = "low"
+    delivery_state = {
+        "low": "ready",
+        "review": "review",
+        "high": "review",
+        "blocked": "blocked",
+    }[level]
+    return {
+        "risk_level": level,
+        "delivery_state": delivery_state,
+        "verification_complete": level == "low",
+        "signals": signals,
     }
 
 
@@ -521,7 +637,7 @@ def _problem_report(root, workspace, entry, position, lint_result):
         *diagnostics,
         *mutation.get("diagnostics", []),
     ]
-    return {
+    result = {
         "id": entry["id"],
         "number": position,
         "label": _problem_label(position),
@@ -563,6 +679,8 @@ def _problem_report(root, workspace, entry, position, lint_result):
         "kill_matrix": _kill_matrix(config, groups, cases, calibration),
         "diagnostics": report_diagnostics,
     }
+    result["risk"] = _risk_profile(result)
+    return result
 
 
 def build_workspace_report(root, workspace, selected=None, *, lint_result=None):
@@ -659,6 +777,15 @@ def build_workspace_report(root, workspace, selected=None, *, lint_result=None):
         "warnings": sum(item.get("severity") == "warning" for item in diagnostics),
         "errors": sum(item.get("severity") == "error" for item in diagnostics)
         + sum(len(_unstructured_lint_errors(problem)) for problem in problems),
+        "risk_levels": dict(Counter(
+            problem["risk"]["risk_level"] for problem in problems
+        )),
+        "verification_incomplete": sum(
+            not problem["risk"]["verification_complete"] for problem in problems
+        ),
+        "delivery_states": dict(Counter(
+            problem["risk"]["delivery_state"] for problem in problems
+        )),
     }
     return {
         "ok": bool(lint.get("ok")),
@@ -725,6 +852,8 @@ def render_markdown_report(report):
         f"- 题目：{summary['problems']}",
         f"- 测试点：sample {summary['sample_cases']} / secret {summary['secret_cases']}",
         f"- 输入总量：{summary['input_bytes']} bytes",
+        f"- 交付状态：{_markdown_escape(', '.join(f'{key}={value}' for key, value in summary['delivery_states'].items()))}",
+        f"- 验证未完成：{summary['verification_incomplete']} / {summary['problems']}",
         f"- Warning / Error：{summary['warnings']} / {summary['errors']}",
         "",
         "## 题目概览",
@@ -760,6 +889,8 @@ def render_markdown_report(report):
             f"targeted {recipes['targeted']}/{recipes['total']}；near-boundary {recipes['near_boundary']}/{recipes['total']}",
             f"- 校准：{problem['calibration']['state']}；primary accepted TL 余量 "
             f"{_format_headroom(problem['calibration']['primary_headroom'])}；`target_guarantee: false`",
+            f"- 风险：{problem['risk']['risk_level']}；交付状态 {problem['risk']['delivery_state']}；"
+            f"verification_complete={str(problem['risk']['verification_complete']).lower()}",
             f"- Judge QA：{problem['judge_qa']['state']}；case "
             f"{problem['judge_qa']['matched_cases']}/{problem['judge_qa']['declared_cases']}；"
             f"probe {problem['judge_qa']['evidence_probes']}/{problem['judge_qa']['declared_probes']}；"
@@ -874,6 +1005,9 @@ def render_text_report(report):
         f"ProbHub 工作区报告: {workspace['title']}",
         f"题目 {summary['problems']} | sample {summary['sample_cases']} | secret {summary['secret_cases']} | "
         f"warning {summary['warnings']} | error {summary['errors']}",
+        "交付状态: " + ", ".join(
+            f"{key}={value}" for key, value in summary["delivery_states"].items()
+        ) + f" | verification-incomplete={summary['verification_incomplete']}/{summary['problems']}",
         f"Mutation: killed {summary['mutation_killed']} | survived {summary['mutation_survived']} | "
         f"compile-invalid {summary['mutation_compile_invalid']} | "
         f"infrastructure-failed {summary['mutation_infrastructure_failed']}",
@@ -901,6 +1035,11 @@ def render_text_report(report):
             f"targeted={recipes['targeted']}/{recipes['total']} "
             f"near-boundary={recipes['near_boundary']}/{recipes['total']} "
             f"analysis={recipes['analysis_state']}"
+        )
+        lines.append(
+            f"  风险: {problem['risk']['risk_level']} | "
+            f"delivery={problem['risk']['delivery_state']} | "
+            f"verification_complete={str(problem['risk']['verification_complete']).lower()}"
         )
         aggregate = problem["aggregate_constraints"]
         lines.append(

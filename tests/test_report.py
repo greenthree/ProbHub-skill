@@ -12,6 +12,7 @@ from probhub.cli import main as cli_main
 from probhub.io import write_yaml
 from probhub.linting import compute_data_hash, compute_source_hash, lint_workspace
 from probhub.reporting import (
+    _risk_profile,
     build_workspace_report,
     render_markdown_report,
     render_text_report,
@@ -222,6 +223,12 @@ class WorkspaceReportTests(unittest.TestCase):
             self.assertEqual(item["recipes"]["random"], 2)
             self.assertEqual(item["recipes"]["targeted"], 1)
             self.assertEqual(item["calibration"]["primary_headroom"], 5.0)
+            self.assertEqual(item["risk"]["risk_level"], "high")
+            self.assertEqual(item["risk"]["delivery_state"], "review")
+            self.assertFalse(item["risk"]["verification_complete"])
+            self.assertEqual(report["summary"]["risk_levels"], {"high": 1})
+            self.assertEqual(report["summary"]["verification_incomplete"], 1)
+            self.assertEqual(report["summary"]["delivery_states"], {"review": 1})
             self.assertEqual(item["aggregate_constraints"]["state"], "matched")
             self.assertEqual(item["aggregate_constraints"]["summary"]["matched"], 1)
             row = item["kill_matrix"]["rows"][0]
@@ -230,6 +237,66 @@ class WorkspaceReportTests(unittest.TestCase):
             codes = {diagnostic["code"] for diagnostic in item["diagnostics"]}
             self.assertIn("report_random_ratio_high", codes)
             self.assertIn("report_near_boundary_recipe_missing", codes)
+
+    def test_risk_profile_distinguishes_ready_from_incomplete_evidence(self):
+        ready = _risk_profile({
+            "lint": {"errors": []},
+            "diagnostics": [],
+            "difficulty": 3,
+            "aggregate_constraints": {
+                "analysis_state": "complete",
+                "multi_case_detected": False,
+                "summary": {"statement_only": 0, "validator_only": 0, "dynamic": 0},
+            },
+            "calibration": {"state": "current"},
+            "recipes": {"coverage_ratio": 1.0},
+            "judge_qa": {"manual_review_probes": 0},
+        })
+        self.assertEqual(ready["risk_level"], "low")
+        self.assertEqual(ready["delivery_state"], "ready")
+        self.assertTrue(ready["verification_complete"])
+
+        incomplete = _risk_profile({
+            "lint": {"errors": []},
+            "diagnostics": [{
+                "code": "calibration_evidence_missing",
+                "severity": "warning",
+            }],
+            "difficulty": 5,
+            "aggregate_constraints": {
+                "analysis_state": "partial",
+                "multi_case_detected": True,
+                "summary": {"statement_only": 1, "validator_only": 0, "dynamic": 0},
+            },
+            "calibration": {"state": "missing"},
+            "recipes": {"coverage_ratio": 0.5},
+            "judge_qa": {"manual_review_probes": 0},
+        })
+        self.assertEqual(incomplete["risk_level"], "high")
+        self.assertEqual(incomplete["delivery_state"], "review")
+        self.assertFalse(incomplete["verification_complete"])
+
+    def test_risk_profile_blocks_error_diagnostics_even_without_lint_errors(self):
+        profile = _risk_profile({
+            "lint": {"errors": []},
+            "diagnostics": [{
+                "code": "report_internal_error",
+                "severity": "error",
+            }],
+            "difficulty": 3,
+            "aggregate_constraints": {
+                "analysis_state": "complete",
+                "multi_case_detected": False,
+                "summary": {"statement_only": 0, "validator_only": 0, "dynamic": 0},
+            },
+            "calibration": {"state": "current"},
+            "recipes": {"coverage_ratio": 1.0},
+            "judge_qa": {"manual_review_probes": 0},
+        })
+        self.assertEqual(profile["risk_level"], "blocked")
+        self.assertEqual(profile["delivery_state"], "blocked")
+        self.assertFalse(profile["verification_complete"])
+        self.assertIn("diagnostic_errors", {item["code"] for item in profile["signals"]})
 
     def test_report_accepts_precomputed_lint_result_without_relinting(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -261,6 +328,7 @@ class WorkspaceReportTests(unittest.TestCase):
                 outputs[name] = output.getvalue()
 
             self.assertIn("ProbHub 工作区报告", outputs["text"])
+            self.assertIn("verification-incomplete=1/1", outputs["text"])
             self.assertIn("击杀矩阵", outputs["text"])
             self.assertIn("near-boundary=0/3", outputs["text"])
             self.assertIn("累计约束: matched", outputs["text"])
@@ -275,6 +343,20 @@ class WorkspaceReportTests(unittest.TestCase):
                 "matched",
             )
             self.assertEqual(self.snapshot(root), before)
+
+    def test_verify_alias_uses_the_same_read_only_report(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.create_workspace(root)
+            report_output = io.StringIO()
+            verify_output = io.StringIO()
+            with redirect_stdout(report_output):
+                report_code = cli_main(["--workspace", str(root), "report"])
+            with redirect_stdout(verify_output):
+                verify_code = cli_main(["--workspace", str(root), "verify"])
+            self.assertEqual(report_code, 0, report_output.getvalue())
+            self.assertEqual(verify_code, 0, verify_output.getvalue())
+            self.assertEqual(report_output.getvalue(), verify_output.getvalue())
 
     def test_missing_recipes_and_targeted_groups_are_structured_warnings(self):
         with tempfile.TemporaryDirectory() as temp:
