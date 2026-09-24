@@ -266,15 +266,29 @@ def compile_collection(root, workspace, loaded_problems, *, cancel_check=None):
     fixed_font_identity()
     compile_main, generated = _configured_typst_sources(root, workspace, main_typ)
     try:
+        font_paths = [str(fixed_font_directory())]
+        configured_paths = (workspace.get("typst") or {}).get("font_paths") or []
+        if isinstance(configured_paths, (str, Path)):
+            configured_paths = [configured_paths]
+        for p in configured_paths:
+            resolved_p = (root / p).resolve() if not Path(p).is_absolute() else Path(p)
+            if resolved_p.is_dir() and str(resolved_p) not in font_paths:
+                font_paths.append(str(resolved_p))
+
+        if os.name == "nt":
+            win_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+            if win_fonts.is_dir() and str(win_fonts) not in font_paths:
+                font_paths.append(str(win_fonts))
+
         command = [
             "typst",
             "compile",
             "--root",
             ".",
-            "--font-path",
-            str(fixed_font_directory()),
-            "--ignore-system-fonts",
         ]
+        for p in font_paths:
+            command.extend(["--font-path", p])
+        command.append("--ignore-system-fonts")
         creation_timestamp = typst.get("creation_timestamp")
         if creation_timestamp is not None:
             command.extend(["--creation-timestamp", str(int(creation_timestamp))])

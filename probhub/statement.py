@@ -39,6 +39,10 @@ _SAMPLE_IO_HEADINGS = (
         r"^(?:input|output)\s+sample(?:\s*#?\s*\d+)?$",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"^(?:样例|示例|samples?|examples?)(?:\s*[#：:]?\s*\d+)?$",
+        re.IGNORECASE,
+    ),
 )
 
 

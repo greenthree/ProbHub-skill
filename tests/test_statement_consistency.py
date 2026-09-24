@@ -104,6 +104,14 @@ class StatementConsistencyTests(unittest.TestCase):
                 VALID_STATEMENT + "\n## 样例 1 输出\n\n1\n",
                 "statement_embedded_sample_section",
             ),
+            "embedded_sample_naked": (
+                VALID_STATEMENT + "\n## 样例\n\nstandard input\n\n1\n",
+                "statement_embedded_sample_section",
+            ),
+            "embedded_examples_naked": (
+                VALID_STATEMENT + "\n## Examples\n\n1\n",
+                "statement_embedded_sample_section",
+            ),
         }
         for name, (statement, expected_code) in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
