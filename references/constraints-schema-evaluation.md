@@ -1,11 +1,11 @@
 # `constraints` Schema 评估与设计决策
 
-> 状态：设计评估，**尚未实现，也未启用**。
-> 基线：2026-07-28，当前 Core 仍只支持现有问题 Schema；本文中的字段、Token、头文件、诊断码和状态均是未来契约，不是当前可用功能。
+> 状态：执行切片进行中。当前只实现 Schema v1 的 fail-closed 检查、规范化和 fingerprint 基础，**尚未启用 Schema v2 执行路径**。
+> 设计基线：2026-07-28。当前 Core 0.7.x 仍只支持现有问题 Schema；本文中的字段、Token、头文件、诊断码和状态均是未来契约，不是当前可用功能。
 
 ## 1. 决策摘要
 
-当前 0.5.0 §3.2 切片不启用 `constraints` 字段，只完成样例快检、题面/Validator 约束对账和可确定的题面规范 lint。原因是“约束单一事实源”不是一个只改 YAML 或题面渲染器的局部功能，而是同时影响：
+当前 Core 执行切片不启用 `constraints` 字段，只完成样例快检、题面/Validator 约束对账和可确定的题面规范 lint。原因是“约束单一事实源”不是一个只改 YAML 或题面渲染器的局部功能，而是同时影响：
 
 - `problem.md` 的源文本与最终渲染文本；
 - Validator、Generator、accepted、brute、wrong、Checker 和 Interactor 的 C++ 编译环境；
@@ -17,13 +17,13 @@
 在这些路径没有共享同一 Core 实现前，任何部分启用都会制造“看似单一事实源、实际仍有两套值”的危险状态。因此本次决策是：
 
 1. 当前版本不把 `constraints` 写入正式 Schema 参考，不生成头文件，不展开 Token。
-2. 当前版本若在 `probhub.yaml` 手工加入未知的 `constraints`，它**不会产生功能效果**。
+2. 当前版本若在问题 Schema v1 的 `probhub.yaml` 手工加入 `constraints`，Core 会以 `constraints_requires_problem_schema_v2` fail closed，不会继续 Judge、gen 或 build。
 3. 未来实现必须是 problem-level、显式 opt-in、fail-closed 的完整切片；缺任一编译或渲染路径都不得发布。
 4. 存量题不强制迁移；没有 opt-in 的题目保持现有行为。
 
 ## 2. 当前行为与必须写清的边界
 
-当前 YAML loader 只确认文档根是 mapping、`schema_version` 为已支持值，并由各模块通过 `.get(...)` 读取已知字段；它没有通用的“拒绝所有未知顶层字段”机制。因此当前手工添加：
+当前 YAML loader 只确认文档根是 mapping、`schema_version` 为已支持值，并由各模块通过 `.get(...)` 读取已知字段。针对 `constraints`，Core 已增加显式的版本门禁；因此当前手工添加：
 
 ```yaml
 constraints:
@@ -32,16 +32,16 @@ constraints:
     n_max: 200000
 ```
 
-可能仍能通过现有 YAML 读取，但没有任何消费者解释它：
+不会进入现有执行路径，而会在加载问题配置时 fail closed：
 
 - `problem.md` 中的 `{{constraints.n_max}}` 会保持普通文本，不会替换；
 - 不会生成 `probhub_constraints.hpp`；
 - 不会向任何编译命令增加 include 目录；
-- Judge、stress 和 gen 不会获得该值；
+- Judge、stress、gen 和 build 不会获得该值；
 - metadata、PDF 和 WebUI 预览不会把它当作约束；
 - 当前 WebUI 不展示或验证该结构，现有写回路径即使偶然保留未知字段，也不构成公开兼容承诺。
 
-`probhub.yaml` 文件本身已参与 source hash，所以添加未知字段可能让 `source_hash`、seal 或 status 发生变化；这只表示配置文件字节变了，**不表示该字段已生效**。在正式支持发布前，不得用未知字段作为题面、Validator 或数据生成的事实来源。
+`probhub.yaml` 文件本身已参与 source hash，所以添加该字段可能让 `source_hash`、seal 或 status 发生变化；当前会优先返回稳定的 `constraints_requires_problem_schema_v2`，**不表示该字段已生效**。在正式支持发布前，不得用它作为题面、Validator 或数据生成的事实来源。
 
 ## 3. 为什么不能做部分实现
 
