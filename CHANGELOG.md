@@ -4,8 +4,9 @@
 
 ## [Unreleased]
 
-## [0.7.1] - 2026-09-25
+## [0.7.2] - 2026-09-25
 
+- 因 npm registry 存在暂存冲突（`Cannot publish over previously staged version "0.7.1"`）跳过 0.7.1，完整承载以下更新：
 - 题面字体与排版对齐标准模板（PR #131）：完整支持 `serif`, `sans`, `song`, `zsong`, `kaishu`, `songti-bold`, `mono`, `yl` 字体映射，提供跨平台字体回退链；样例块严格使用 `fonts.yl` 14pt 双列细线表格与居中表头；Windows 下自动将系统字体目录 `C:/Windows/Fonts` 注册到 Typst 路径；拦截题面中孤立手写的 `## 样例` / `## Examples` 避免格式破损。
 - 赛题可信验证增强基础（PR #130）：增加只读风险等级评定与 `verification_complete` 指标；新增 `probhub verify` 别名与测试；在 Problem Schema v1 下严格拒绝未启用的 constraints 配置并做 fail-closed 防护。
 - 流式终端帧与数据符号链接安全加固（PR #129）：流式 CLI 模式下任何参数错误或运行期异常均由 `StreamArgumentParser` 及 `emit_result` 保证输出标准结构化 `final` 终端帧；在数据目录扫描与构建快照中严格防御符号链接与 Windows Reparse Point，拦截不安全数据源。
