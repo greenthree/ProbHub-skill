@@ -989,7 +989,7 @@ class CoreWorkspaceTests(unittest.TestCase):
                 write_yaml(problem / "probhub.yaml", config)
 
             fake_fingerprint = {
-                "probhub_version": "0.7.0",
+                "probhub_version": "0.7.1",
                 "build_manifest_schema_version": 1,
                 "generation_schema_version": 1,
                 "typst_version": "0.14.2",

@@ -4,7 +4,15 @@
 
 ## [Unreleased]
 
-- 通用脚手架封面移除赛事专属 `usts.png`，由主包根 `logo.svg` 生成并发布 `school-badge.png`；`probhub init`、Typst、WebUI、发布清单和干净安装默认统一为工作区内的 `school-badge.png`，赛事仍可配置自己的 Typst 目录内 Logo。
+## [0.7.1] - 2026-09-25
+
+- 题面字体与排版对齐标准模板（PR #131）：完整支持 `serif`, `sans`, `song`, `zsong`, `kaishu`, `songti-bold`, `mono`, `yl` 字体映射，提供跨平台字体回退链；样例块严格使用 `fonts.yl` 14pt 双列细线表格与居中表头；Windows 下自动将系统字体目录 `C:/Windows/Fonts` 注册到 Typst 路径；拦截题面中孤立手写的 `## 样例` / `## Examples` 避免格式破损。
+- 赛题可信验证增强基础（PR #130）：增加只读风险等级评定与 `verification_complete` 指标；新增 `probhub verify` 别名与测试；在 Problem Schema v1 下严格拒绝未启用的 constraints 配置并做 fail-closed 防护。
+- 流式终端帧与数据符号链接安全加固（PR #129）：流式 CLI 模式下任何参数错误或运行期异常均由 `StreamArgumentParser` 及 `emit_result` 保证输出标准结构化 `final` 终端帧；在数据目录扫描与构建快照中严格防御符号链接与 Windows Reparse Point，拦截不安全数据源。
+- 编译器超时放宽（PR #128）：C++ 编译超时上限由 60.0s 放宽至 90.0s，避免复杂宏展开和大型评测代码编译偶发超时。
+- 实时流式事件协议（PR #127）：实现结构化事件流 NDJSON 实时输出与取消令牌协议，统一各入口的实时监督机制。
+- 通用脚手架封面移除赛事专属 `usts.png`，由主包根 `logo.svg` 生成并发布 `school-badge.png`；`probhub init`、Typst、WebUI、发布清单和干净安装默认统一为工作区内的 `school-badge.png`。
+- 安全升级 `pypdf` 至安全版本并补充 DeepSeek Harness (DSH) 插件规范说明。
 
 ## [0.7.0] - 2026-08-25
 
