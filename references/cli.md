@@ -55,6 +55,8 @@ probhub --workspace C:\path\to\workspace --json status L01
 - `--format stream` 或 `--event-stream`：启用 Schema v1 实时流式事件协议（NDJSON），输出包含 `protocol_schema_version: 1` 的 `started`、`progress`（有界时间节流）、`final` 和 `cancelled` 结构化事件帧，供 IDE、WebUI 或 Harness 后台作业消费。
 - `--version`：输出版本号并退出。
 
+多题 `judge`、`stress` 和 `mutation` 的流式输出使用逐题 `problem_final`，最后再输出 `problem_id: ""`、`result.problems` 包含全部题目的整批 `final`；消费端应以 `final` 判断命令总体结果，并同时核对退出码。单题仍只输出一份终态结果。
+
 人类摘要只展示命令状态、每题首要结果、最多三条诊断和下一条建议命令；完整诊断、路径和证据仍通过 `--json` 获取。摘要不使用 ANSI 颜色，因此在 PowerShell、Ubuntu、重定向文件和非 TTY 中语义一致。
 
 诊断可能包含可选的 `remediation` 附加对象。它只描述稳定、可确定的下一步，不会自动修改文件或替代正确性审查：
@@ -257,7 +259,7 @@ probhub status [ID...]
 
 Manifest 中的 `collection_hash` 根据工作区/模板、题面媒体资源以及所有题目实际生成 Typst metadata 的输入计算。其他题的题面、题面图片、样例、展示配置或题序变化可能改变当前题的页码、总页数或单题 PDF，因此会使当前题变为 `stale`；其他题仅修改不参与排版的 secret 数据不会使当前题过期。
 
-正式 Build Manifest 使用 schema v4。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`，并分别记录其 `sealed_revision_id`；缺失时显示对应的 `stale_fields`。每份 Manifest 还记录同一规范化 `builder_fingerprint`：ProbHub/Core 版本、Manifest 与 generation schema、Typst、pypdf、LF 规范化模板 hash 和包内固定字体字节 hash。Node、g++、Flask、操作系统等不影响 PDF/ZIP 字节的诊断环境不进入该指纹。
+正式 Build Manifest 使用 schema v4。一次 build 的所有所选 Manifest 必须包含相同的非空 `batch_id`，并分别记录其 `sealed_revision_id`；缺失时显示对应的 `stale_fields`。每份 Manifest 还记录同一规范化 `builder_fingerprint`：ProbHub/Core 版本、Manifest 与 generation schema、Typst、pypdf、LF 规范化模板 hash、包内固定字体字节 hash，以及 Typst 实际搜索的字体路径内字体文件内容 hash。Node、g++ 和 Flask 等不影响 PDF/ZIP 字节的诊断环境不进入该指纹。
 
 旧 v1/v2/v3 Manifest 会以 `stale_fields: ["manifest_schema"]` 明确要求重建，不会被静默视为 `current`。指纹变化按 `builder_fingerprint.<field>` 精确报告；当前机器无法确定 Typst、pypdf 或固定字体身份时报告 `builder_fingerprint.unavailable` 与 `builder_fingerprint_error`，已有产物不会被误报为 `current`。
 
@@ -781,4 +783,4 @@ probhub typeset L01
 
 ### `builder_fingerprint_failed` / `builder_changed`
 
-正式 build、typeset、assemble 和 seal 需要确定的构建器身份。Typst 或 pypdf 缺失、包内固定字体缺失/损坏时以 `builder_fingerprint_failed` 阻断；运行期间工具版本、模板或字体身份变化时以 `builder_changed` 阻断发布。先运行 `probhub doctor` 修复环境，再重新执行原命令。只读 `status` / `generation-status` 会把无法探测身份报告为 stale，而不会把文件误判为损坏。
+正式 build、typeset、assemble 和 seal 需要确定的构建器身份。Typst 或 pypdf 缺失、包内固定字体缺失/损坏，或字体搜索路径无法可靠读取时以 `builder_fingerprint_failed` 阻断；运行期间工具版本、模板或字体身份变化时以 `builder_changed` 阻断发布。先运行 `probhub doctor` 修复环境，再重新执行原命令。只读 `status` / `generation-status` 会把无法探测身份报告为 stale，而不会把文件误判为损坏。系统字体或自定义字体文件变化后，旧 PDF 会显示 `builder_fingerprint.font_paths` 过期。

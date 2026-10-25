@@ -10,7 +10,7 @@
   zsong: ("STZhongSong", "STZhongSong", "Noto Sans CJK SC"),
   kaishu: ("FZKai-Z03", "KaiTi", "Noto Sans CJK SC"),
   songti-bold: ("New Computer Modern Math", "SimSun-ExtG"),
-  mono: ("New Computer Modern Mono", "DejaVu Sans Mono"),
+  mono: ("New Computer Modern Mono",),
   yl: ("New Computer Modern Mono", "DejaVu Sans Mono")
 )
 #set text(font: fonts.song)
