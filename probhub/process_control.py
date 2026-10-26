@@ -30,6 +30,7 @@ POSIX_CLEANUP_TIMEOUT_SECONDS = 2.0
 PROCESS_CLEANUP_DIAGNOSTIC_LIMIT = 32
 PROCESS_CLEANUP_FAILED = "process_cleanup_failed"
 MAX_TRACKED_WINDOWS_PROCESSES = 4096
+MAX_WINDOWS_SNAPSHOT_BYTES = 64 * 1024 * 1024
 UNIX_EXEC_HELPER_CODE = r'''
 import os
 import signal
@@ -360,18 +361,25 @@ def _windows_api():
                 ("dwFlags", wintypes.DWORD),
             ]
 
-        class ProcessEntry32(ctypes.Structure):
+        class UnicodeString(ctypes.Structure):
             _fields_ = [
-                ("dwSize", wintypes.DWORD),
-                ("cntUsage", wintypes.DWORD),
-                ("th32ProcessID", wintypes.DWORD),
-                ("th32DefaultHeapID", ulong_ptr),
-                ("th32ModuleID", wintypes.DWORD),
-                ("cntThreads", wintypes.DWORD),
-                ("th32ParentProcessID", wintypes.DWORD),
-                ("pcPriClassBase", wintypes.LONG),
-                ("dwFlags", wintypes.DWORD),
-                ("szExeFile", wintypes.WCHAR * 260),
+                ("Length", wintypes.USHORT),
+                ("MaximumLength", wintypes.USHORT),
+                ("Buffer", ctypes.c_void_p),
+            ]
+
+        class SystemProcessInformation(ctypes.Structure):
+            _fields_ = [
+                ("NextEntryOffset", wintypes.ULONG),
+                ("NumberOfThreads", wintypes.ULONG),
+                ("Reserved", ctypes.c_int64 * 3),
+                ("CreateTime", ctypes.c_int64),
+                ("UserTime", ctypes.c_int64),
+                ("KernelTime", ctypes.c_int64),
+                ("ImageName", UnicodeString),
+                ("BasePriority", wintypes.LONG),
+                ("UniqueProcessId", wintypes.HANDLE),
+                ("InheritedFromUniqueProcessId", wintypes.HANDLE),
             ]
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -400,10 +408,6 @@ def _windows_api():
         kernel32.OpenThread.restype = wintypes.HANDLE
         kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
         kernel32.ResumeThread.restype = wintypes.DWORD
-        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
-        kernel32.Process32FirstW.restype = wintypes.BOOL
-        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
-        kernel32.Process32NextW.restype = wintypes.BOOL
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
@@ -412,13 +416,25 @@ def _windows_api():
         kernel32.TerminateProcess.restype = wintypes.BOOL
         kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.c_void_p] * 4
         kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.DuplicateHandle.argtypes = [
+            wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE, ctypes.c_void_p,
+            wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
+        ]
+        kernel32.DuplicateHandle.restype = wintypes.BOOL
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtQuerySystemInformation.argtypes = [
+            wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)
+        ]
+        ntdll.NtQuerySystemInformation.restype = wintypes.LONG
         _WINDOWS_API = {
             "ctypes": ctypes,
             "kernel32": kernel32,
             "info_type": ExtendedLimitInformation,
             "accounting_type": BasicAccountingInformation,
             "thread_entry_type": ThreadEntry32,
-            "process_entry_type": ProcessEntry32,
+            "process_information_type": SystemProcessInformation,
+            "query_processes": ntdll.NtQuerySystemInformation,
         }
     except Exception:
         _WINDOWS_API = {}
@@ -557,28 +573,43 @@ def terminate_windows_job(handle, timeout=2.0):
     return result
 
 
+class _WindowsProcessSnapshot(dict):
+    def __init__(self):
+        super().__init__()
+        self.created = {}
+
+
 def _windows_process_parents():
     api = _windows_api()
     if not api:
         raise OSError("Windows process enumeration is unavailable")
-    ctypes, kernel = api["ctypes"], api["kernel32"]
-    snapshot = kernel.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
-    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
-        raise OSError("cannot snapshot Windows descendants")
-    try:
-        entry = api["process_entry_type"]()
-        entry.dwSize = ctypes.sizeof(entry)
-        if not kernel.Process32FirstW(snapshot, ctypes.byref(entry)):
-            raise OSError("cannot enumerate Windows descendants")
-        parents = {}
-        while True:
-            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
-            if not kernel.Process32NextW(snapshot, ctypes.byref(entry)):
-                if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
-                    raise OSError("Windows descendant enumeration was incomplete")
+    ctypes = api["ctypes"]
+    entry_type = api["process_information_type"]
+    size = 256 * 1024
+    while size <= MAX_WINDOWS_SNAPSHOT_BYTES:
+        buffer = ctypes.create_string_buffer(size)
+        returned = ctypes.c_uint32()
+        status = api["query_processes"](5, buffer, size, ctypes.byref(returned)) & 0xFFFFFFFF
+        if status == 0xC0000004:  # STATUS_INFO_LENGTH_MISMATCH
+            size = max(size * 2, returned.value)
+            continue
+        if status != 0 or not 0 < returned.value <= size:
+            raise OSError(f"cannot snapshot Windows descendants (NTSTATUS {status:#x})")
+        parents = _WindowsProcessSnapshot()
+        offset = 0
+        while offset + ctypes.sizeof(entry_type) <= returned.value:
+            entry = entry_type.from_buffer(buffer, offset)
+            pid = int(entry.UniqueProcessId or 0)
+            parents[pid] = int(entry.InheritedFromUniqueProcessId or 0)
+            parents.created[pid] = int(entry.CreateTime)
+            step = int(entry.NextEntryOffset)
+            if not step:
                 return parents
-    finally:
-        close_windows_handle(snapshot)
+            if step < ctypes.sizeof(entry_type):
+                raise OSError("Windows process snapshot has an invalid entry offset")
+            offset += step
+        raise OSError("Windows process snapshot is truncated")
+    raise OSError("Windows process snapshot exceeds its byte limit")
 
 
 def _windows_process_created(handle):
@@ -599,7 +630,17 @@ class _WindowsProcessTree:
         self.errors = []
         self.pending = {}
         try:
-            self._open(proc.pid)
+            api = _windows_api()
+            ctypes, kernel = api["ctypes"], api["kernel32"]
+            current = kernel.GetCurrentProcess()
+            owned = ctypes.c_void_p()
+            if not kernel.DuplicateHandle(current, int(proc._handle), current, ctypes.byref(owned), 0, False, 2):
+                raise OSError("cannot pin managed Windows root handle")
+            try:
+                self.handles[proc.pid] = (owned.value, _windows_process_created(owned.value))
+            except BaseException:
+                close_windows_handle(owned.value)
+                raise
         except OSError as exc:
             self._error(exc)
 
@@ -641,8 +682,10 @@ class _WindowsProcessTree:
         new = []
         try:
             parents = _windows_process_parents()
-            for pid, (parent, _) in tuple(self.pending.items()):
-                if parents.get(pid) != parent:
+            for pid, (parent, _, created) in tuple(self.pending.items()):
+                if parents.get(pid) != parent or (
+                    created is not None and getattr(parents, "created", {}).get(pid) != created
+                ):
                     del self.pending[pid]  # gone or reused; never signal a raw PID
             children = {}
             for pid, parent in parents.items():
@@ -653,6 +696,9 @@ class _WindowsProcessTree:
                 for pid in children.get(parent, ()):
                     if pid in self.handles:
                         continue
+                    observed_created = getattr(parents, "created", {}).get(pid)
+                    if observed_created is not None and observed_created < self.handles[parent][1]:
+                        continue  # old child of a previous occupant of this parent PID
                     if pid not in self.pending and (
                         len(self.handles) + len(self.pending) >= MAX_TRACKED_WINDOWS_PROCESSES
                     ):
@@ -664,7 +710,7 @@ class _WindowsProcessTree:
                         # same-image process clone without termination access.
                         # Retain it as unresolved until exit is confirmed, not
                         # as either a successful cleanup or a permanent error.
-                        self.pending[pid] = (parent, str(exc))
+                        self.pending[pid] = (parent, str(exc), observed_created)
                         continue
                     self.pending.pop(pid, None)
                     if opened is None:
@@ -682,6 +728,9 @@ class _WindowsProcessTree:
                 for pid in new:
                     if parents[pid] in discarded or (
                         pid in current and current[pid] != parents[pid]
+                    ) or (
+                        pid in getattr(current, "created", {})
+                        and current.created[pid] != self.handles[pid][1]
                     ):
                         close_windows_handle(self.handles.pop(pid)[0])
                         discarded.add(pid)
@@ -726,7 +775,7 @@ class _WindowsProcessTree:
                 time.sleep(0.01)
             if remaining:
                 self._error("Windows descendant processes survived cleanup deadline")
-            for _, message in self.pending.values():
+            for _, message, _ in self.pending.values():
                 self._error(message)
             try:
                 self.proc.wait(timeout=2)

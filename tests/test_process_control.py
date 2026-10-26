@@ -710,11 +710,102 @@ class ProcessControlTests(unittest.TestCase):
                 self.assertTrue(result["errors"], result)
                 kernel.CloseHandle.assert_called_once_with(123)
 
+    def test_windows_root_identity_uses_original_handle_not_reopened_pid(self):
+        kernel = mock.Mock()
+        kernel.GetCurrentProcess.return_value = -1
+
+        def duplicate(source, handle, target, output, access, inherit, options):
+            self.assertEqual((source, handle, target, access, inherit, options), (-1, 456, -1, 0, False, 2))
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 123
+            return True
+
+        kernel.DuplicateHandle.side_effect = duplicate
+        with (
+            mock.patch.object(process_control, "_WINDOWS_API", {"ctypes": ctypes, "kernel32": kernel}),
+            mock.patch.object(process_control, "_windows_process_created", return_value=100),
+        ):
+            tree = process_control._WindowsProcessTree(mock.Mock(pid=10, _handle=456))
+            self.assertEqual(tree.handles, {10: (123, 100)})
+            tree.close()
+        kernel.OpenProcess.assert_not_called()
+        kernel.CloseHandle.assert_called_once_with(123)
+
+    def test_windows_snapshot_is_bounded_and_carries_creation_times(self):
+        class Entry(ctypes.Structure):
+            _fields_ = [
+                ("NextEntryOffset", ctypes.c_uint32), ("Threads", ctypes.c_uint32),
+                ("Reserved", ctypes.c_int64 * 3), ("CreateTime", ctypes.c_int64),
+                ("UserTime", ctypes.c_int64), ("KernelTime", ctypes.c_int64),
+                ("ImageName", ctypes.c_byte * 16), ("Priority", ctypes.c_int32),
+                ("UniqueProcessId", ctypes.c_void_p), ("InheritedFromUniqueProcessId", ctypes.c_void_p),
+            ]
+
+        calls = []
+
+        def query(kind, buffer, size, returned):
+            self.assertEqual(kind, 5)
+            calls.append(size)
+            ctypes.cast(returned, ctypes.POINTER(ctypes.c_uint32)).contents.value = ctypes.sizeof(Entry) * 2
+            if len(calls) == 1:
+                return 0xC0000004
+            for index, pid in enumerate((11, 12)):
+                entry = Entry.from_buffer(buffer, index * ctypes.sizeof(Entry))
+                entry.NextEntryOffset = ctypes.sizeof(Entry) if index == 0 else 0
+                entry.UniqueProcessId = pid
+                entry.InheritedFromUniqueProcessId = pid - 1
+                entry.CreateTime = pid * 100
+            return 0
+
+        api = {"ctypes": ctypes, "process_information_type": Entry, "query_processes": query}
+        with mock.patch.object(process_control, "_WINDOWS_API", api):
+            snapshot = process_control._windows_process_parents()
+        self.assertEqual(snapshot, {11: 10, 12: 11})
+        self.assertEqual(snapshot.created, {11: 1100, 12: 1200})
+        self.assertEqual(calls, [256 * 1024, 512 * 1024])
+
+        for failure in ("status", "length", "offset", "limit"):
+            with self.subTest(failure=failure):
+                def invalid(kind, buffer, size, returned):
+                    ctypes.cast(returned, ctypes.POINTER(ctypes.c_uint32)).contents.value = size + 1 if failure == "length" else ctypes.sizeof(Entry)
+                    Entry.from_buffer(buffer).NextEntryOffset = 1
+                    return 0xC0000022 if failure == "status" else 0
+
+                api["query_processes"] = invalid
+                with (
+                    mock.patch.object(process_control, "_WINDOWS_API", api),
+                    mock.patch.object(process_control, "MAX_WINDOWS_SNAPSHOT_BYTES", 1 if failure == "limit" else 64 * 1024 * 1024),
+                    self.assertRaises(OSError),
+                ):
+                    process_control._windows_process_parents()
+
+    @unittest.skipUnless(platform.system() == "Windows", "Windows native process creation time")
+    def test_windows_snapshot_creation_time_matches_kernel_process_handle(self):
+        snapshot = process_control._windows_process_parents()
+        api = process_control._windows_api()
+        handle = api["kernel32"].OpenProcess(0x1000, False, os.getpid())
+        self.assertTrue(handle)
+        try:
+            self.assertEqual(snapshot.created[os.getpid()], process_control._windows_process_created(handle))
+        finally:
+            process_control.close_windows_handle(handle)
+
     def test_windows_descendant_capture_rejects_stale_parent_and_reused_pid(self):
         tree = process_control._WindowsProcessTree.__new__(process_control._WindowsProcessTree)
         tree.handles = {10: (100, 20)}
         tree.errors = []
         tree.pending = {}
+
+        snapshot = process_control._WindowsProcessSnapshot()
+        snapshot[11] = 10
+        snapshot.created[11] = 10
+        with (
+            mock.patch.object(process_control, "_windows_process_parents", return_value=snapshot),
+            mock.patch.object(tree, "_open", side_effect=OSError("protected stale process")) as opened_stale,
+        ):
+            tree.capture()
+        opened_stale.assert_not_called()
+        self.assertEqual(tree.pending, {})
+        self.assertEqual(tree.errors, [])
 
         def opened(pid):
             tree.handles[pid] = (pid * 10, 10 if pid == 11 else 30)
