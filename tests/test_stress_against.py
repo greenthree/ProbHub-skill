@@ -521,7 +521,7 @@ class StressAgainstIntegrationTests(unittest.TestCase):
                 "stress", "A", "--against", "code/std2.cpp",
                 "--rounds", "4", "--seed", "11",
             ])
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 0, result)
             outcome = result["problems"]["A"]
             self.assertTrue(outcome["ok"])
             self.assertEqual(outcome["status"], "not_separated")

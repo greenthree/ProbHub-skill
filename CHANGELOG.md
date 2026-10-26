@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- Windows 受控运行补充有界后代句柄跟踪，清理 Store Python 虚拟环境启动器产生的 Job 外后代；Job 查询失败、退出无法确认或跟踪超限不再误报清理成功。沙箱缓存 Schema 升至 9。
+
 - 安全升级 `pypdf` 至 6.21.2、`Werkzeug` 至 3.1.9，刷新跨平台 wheel 哈希锁以处理依赖审计发现的已知漏洞。
 
 - 多题 Judge、stress 与 mutation 的流式输出以 `problem_final` 表示逐题完成，并以唯一的整批 `final` 汇总总体结果，避免前题失败被后题成功掩盖。

@@ -29,6 +29,7 @@ MAX_TRACKED_POSIX_DESCENDANTS = 4096
 POSIX_CLEANUP_TIMEOUT_SECONDS = 2.0
 PROCESS_CLEANUP_DIAGNOSTIC_LIMIT = 32
 PROCESS_CLEANUP_FAILED = "process_cleanup_failed"
+MAX_TRACKED_WINDOWS_PROCESSES = 4096
 UNIX_EXEC_HELPER_CODE = r'''
 import os
 import signal
@@ -359,6 +360,20 @@ def _windows_api():
                 ("dwFlags", wintypes.DWORD),
             ]
 
+        class ProcessEntry32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ulong_ptr),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
         kernel32.SetInformationJobObject.argtypes = [
@@ -385,12 +400,25 @@ def _windows_api():
         kernel32.OpenThread.restype = wintypes.HANDLE
         kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
         kernel32.ResumeThread.restype = wintypes.DWORD
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.c_void_p] * 4
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
         _WINDOWS_API = {
             "ctypes": ctypes,
             "kernel32": kernel32,
             "info_type": ExtendedLimitInformation,
             "accounting_type": BasicAccountingInformation,
             "thread_entry_type": ThreadEntry32,
+            "process_entry_type": ProcessEntry32,
         }
     except Exception:
         _WINDOWS_API = {}
@@ -498,67 +526,226 @@ def close_windows_handle(handle):
 def terminate_windows_job(handle, timeout=2.0):
     """Terminate a Windows Job and wait until every associated process exits."""
     api = _windows_api()
+    result = {"ok": False, "tracked": 0, "remaining_pids": [], "errors": []}
     if not handle or not api:
         close_windows_handle(handle)
-        return
+        result["errors"].append("Windows Job cleanup is unavailable")
+        return result
     ctypes = api["ctypes"]
     kernel32 = api["kernel32"]
     accounting_type = api["accounting_type"]
     try:
-        if kernel32.TerminateJobObject(handle, 1):
-            deadline = time.perf_counter() + float(timeout)
-            while True:
-                accounting = accounting_type()
-                queried = kernel32.QueryInformationJobObject(
-                    handle,
-                    1,
-                    ctypes.byref(accounting),
-                    ctypes.sizeof(accounting),
-                    None,
-                )
-                if not queried or int(accounting.ActiveProcesses) == 0:
-                    break
-                if time.perf_counter() >= deadline:
-                    break
-                time.sleep(0.01)
-    except Exception:
-        pass
+        if not kernel32.TerminateJobObject(handle, 1):
+            raise OSError("cannot terminate Windows Job")
+        deadline = time.perf_counter() + float(timeout)
+        while True:
+            accounting = accounting_type()
+            if not kernel32.QueryInformationJobObject(
+                handle, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None
+            ):
+                raise OSError("cannot confirm Windows Job process exit")
+            if int(accounting.ActiveProcesses) == 0:
+                result["ok"] = True
+                break
+            if time.perf_counter() >= deadline:
+                raise OSError("Windows Job processes survived cleanup deadline")
+            time.sleep(0.01)
+    except Exception as exc:
+        result["errors"].append(str(exc))
     finally:
         close_windows_handle(handle)
+    return result
 
 
-def terminate_process(proc, job_handle=None):
-    """Terminate a direct process and every descendant, then reap it."""
-    if proc is None:
-        terminate_windows_job(job_handle)
-        return
-    if platform.system() == "Windows":
-        if job_handle:
-            terminate_windows_job(job_handle)
-            job_handle = None
-        elif proc.poll() is None:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-    else:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+def _windows_process_parents():
+    api = _windows_api()
+    if not api:
+        raise OSError("Windows process enumeration is unavailable")
+    ctypes, kernel = api["ctypes"], api["kernel32"]
+    snapshot = kernel.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        raise OSError("cannot snapshot Windows descendants")
     try:
-        proc.wait(timeout=2)
-    except (subprocess.TimeoutExpired, OSError):
-        if proc.poll() is None:
+        entry = api["process_entry_type"]()
+        entry.dwSize = ctypes.sizeof(entry)
+        if not kernel.Process32FirstW(snapshot, ctypes.byref(entry)):
+            raise OSError("cannot enumerate Windows descendants")
+        parents = {}
+        while True:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            if not kernel.Process32NextW(snapshot, ctypes.byref(entry)):
+                if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
+                    raise OSError("Windows descendant enumeration was incomplete")
+                return parents
+    finally:
+        close_windows_handle(snapshot)
+
+
+def _windows_process_created(handle):
+    api = _windows_api()
+    ctypes = api["ctypes"]
+    times = [ctypes.c_uint64() for _ in range(4)]
+    if not api["kernel32"].GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+        raise OSError("cannot identify Windows descendant creation time")
+    return times[0].value
+
+
+class _WindowsProcessTree:
+    """Pin observed PIDs with handles, including Store redirector breakaways."""
+
+    def __init__(self, proc):
+        self.proc = proc
+        self.handles = {}
+        self.errors = []
+        self.pending = {}
+        try:
+            self._open(proc.pid)
+        except OSError as exc:
+            self._error(exc)
+
+    def _error(self, error):
+        if len(self.errors) < PROCESS_CLEANUP_DIAGNOSTIC_LIMIT:
+            self.errors.append(str(error)[:4096])
+
+    def _open(self, pid):
+        kernel = _windows_api()["kernel32"]
+        # A held handle pins the process identity even after it exits. Never
+        # terminate a descendant by a later, potentially reused raw PID.
+        handle = kernel.OpenProcess(0x100000 | 0x1000 | 0x0001, False, pid)
+        if not handle:
+            error = _windows_api()["ctypes"].get_last_error()
+            if error == 87:  # already exited
+                return None
+            # A Job memory/exit race can revoke termination access before the
+            # process object is signalled. Confirm exit with narrower rights;
+            # never treat access denied itself as evidence of successful exit.
+            observer = kernel.OpenProcess(0x100000 | 0x1000, False, pid)
+            if observer:
+                try:
+                    if kernel.WaitForSingleObject(observer, 100) == 0:
+                        return None
+                finally:
+                    close_windows_handle(observer)
+            if pid not in _windows_process_parents():
+                return None
+            raise OSError(f"cannot open Windows descendant {pid} of root {self.proc.pid} (Windows error {error})")
+        try:
+            created = _windows_process_created(handle)
+        except BaseException:
+            close_windows_handle(handle)
+            raise
+        self.handles[pid] = (handle, created)
+        return handle
+
+    def capture(self):
+        new = []
+        try:
+            parents = _windows_process_parents()
+            for pid, (parent, _) in tuple(self.pending.items()):
+                if parents.get(pid) != parent:
+                    del self.pending[pid]  # gone or reused; never signal a raw PID
+            children = {}
+            for pid, parent in parents.items():
+                children.setdefault(parent, []).append(pid)
+            pending = list(self.handles)
+            while pending:
+                parent = pending.pop()
+                for pid in children.get(parent, ()):
+                    if pid in self.handles:
+                        continue
+                    if pid not in self.pending and (
+                        len(self.handles) + len(self.pending) >= MAX_TRACKED_WINDOWS_PROCESSES
+                    ):
+                        raise OSError("Windows descendant tracking limit exceeded")
+                    try:
+                        opened = self._open(pid)
+                    except OSError as exc:
+                        # Windows fault reporting can temporarily expose a
+                        # same-image process clone without termination access.
+                        # Retain it as unresolved until exit is confirmed, not
+                        # as either a successful cleanup or a permanent error.
+                        self.pending[pid] = (parent, str(exc))
+                        continue
+                    self.pending.pop(pid, None)
+                    if opened is None:
+                        continue
+                    if self.handles[pid][1] < self.handles[parent][1]:
+                        close_windows_handle(self.handles.pop(pid)[0])
+                        continue  # stale parent PID from before this parent existed
+                    new.append(pid)
+                    pending.append(pid)
+            if new:
+                # Validate the snapshot after pinning handles: a candidate PID
+                # may have been reused between enumeration and OpenProcess.
+                current = _windows_process_parents()
+                discarded = set()
+                for pid in new:
+                    if parents[pid] in discarded or (
+                        pid in current and current[pid] != parents[pid]
+                    ):
+                        close_windows_handle(self.handles.pop(pid)[0])
+                        discarded.add(pid)
+        except OSError as exc:
+            # Never retain a candidate whose post-open identity check failed:
+            # it could be an unrelated process that reused a snapshot PID.
+            for pid in new:
+                if pid in self.handles:
+                    close_windows_handle(self.handles.pop(pid)[0])
+            self._error(exc)
+
+    def terminate(self, job_handle):
+        self.capture()
+        kernel = _windows_api()["kernel32"]
+        job_result = terminate_windows_job(job_handle) if job_handle else None
+        if job_result and not job_result["ok"]:
+            for error in job_result["errors"]:
+                self._error(error)
+        deadline = time.perf_counter() + 2.0
+        remaining = []
+        try:
+            while True:
+                for pid, (handle, _) in self.handles.items():
+                    state = kernel.WaitForSingleObject(handle, 0)
+                    if state == 0x102:  # WAIT_TIMEOUT: still alive
+                        # TerminateJobObject/another handle may have initiated
+                        # exit already. Only the final bounded wait determines
+                        # whether a failed termination request is an error.
+                        kernel.TerminateProcess(handle, 1)
+                    elif state != 0:
+                        self._error(f"cannot confirm Windows descendant {pid} exit")
+                # A previously observed redirector can create another process
+                # while the root/Job is stopping. Discover it before releasing
+                # any identity handles, including when the root already exited.
+                self.capture()
+                remaining = [
+                    pid for pid, (handle, _) in self.handles.items()
+                    if kernel.WaitForSingleObject(handle, 0) != 0
+                ]
+                if (not remaining and not self.pending) or time.perf_counter() >= deadline:
+                    break
+                time.sleep(0.01)
+            if remaining:
+                self._error("Windows descendant processes survived cleanup deadline")
+            for _, message in self.pending.values():
+                self._error(message)
             try:
-                proc.kill()
-                proc.wait(timeout=1)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+                self.proc.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                self._error(f"cannot reap Windows root process: {exc}")
+            return {
+                "ok": not self.errors,
+                "tracked": max(0, len(self.handles) - 1),
+                "remaining_pids": sorted(set(remaining) | set(self.pending))[:PROCESS_CLEANUP_DIAGNOSTIC_LIMIT],
+                "errors": list(self.errors),
+            }
+        finally:
+            self.close()
+
+    def close(self):
+        for handle, _ in self.handles.values():
+            close_windows_handle(handle)
+        self.handles.clear()
+        self.pending.clear()
 
 
 def process_alive(pid):
@@ -1016,9 +1203,11 @@ class ManagedProcess:
     root_identity: ProcessIdentity | None = field(default=None, init=False, repr=False)
     known_descendants: dict = field(default_factory=dict, init=False, repr=False)
     identity_tracking_overflow: bool = field(default=False, init=False, repr=False)
+    windows_tree: object = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         if platform.system() == "Windows":
+            self.windows_tree = _WindowsProcessTree(self.proc)
             return
         state, info = _read_linux_process_info(self.proc.pid)
         if state == "present":
@@ -1036,6 +1225,7 @@ class ManagedProcess:
 
     def sample(self):
         if platform.system() == "Windows":
+            self.windows_tree.capture()
             current = windows_query_job_peak_memory(self.job_handle)
             count = None
         else:
@@ -1047,8 +1237,7 @@ class ManagedProcess:
 
     def terminate(self):
         if platform.system() == "Windows":
-            terminate_process(self.proc, self.job_handle)
-            result = {"ok": True, "tracked": 0, "remaining_pids": [], "errors": []}
+            result = self.windows_tree.terminate(self.job_handle)
         else:
             result = _terminate_posix_process_tree(
                 self.proc,
@@ -1061,6 +1250,8 @@ class ManagedProcess:
 
     def close(self):
         close_windows_handle(self.job_handle)
+        if self.windows_tree is not None:
+            self.windows_tree.close()
         self.job_handle = None
 
 
