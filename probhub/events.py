@@ -141,11 +141,12 @@ class EventSink:
         result: dict[str, Any] | None = None,
         *,
         code: str | None = None,
+        terminal: bool = True,
     ) -> None:
-        """Emit the terminal final event frame."""
+        """Emit a command final or a non-terminal per-problem completion frame."""
         event: dict[str, Any] = {
             "protocol_schema_version": PROTOCOL_SCHEMA_VERSION,
-            "type": "final",
+            "type": "final" if terminal else "problem_final",
             "operation": operation,
             "problem_id": problem_id,
             "ok": bool(ok),
@@ -158,8 +159,9 @@ class EventSink:
             event["code"] = result["code"]
         if result is not None:
             event["result"] = result
-        with self._lock:
-            self._emitted_final = True
+        if terminal:
+            with self._lock:
+                self._emitted_final = True
         self.emit_raw(event)
 
     def emit_cancelled(
@@ -217,3 +219,16 @@ def parse_event_stream(lines: Iterator[str] | list[str]) -> Iterator[dict[str, A
         frame = parse_event_stream_line(line)
         if frame is not None:
             yield frame
+
+
+class BatchProblemEventSink:
+    """Keep per-problem completions from ending a multi-problem CLI stream."""
+
+    def __init__(self, sink: EventSink):
+        self._sink = sink
+
+    def emit_final(self, *args, **kwargs):
+        return self._sink.emit_final(*args, terminal=False, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._sink, name)

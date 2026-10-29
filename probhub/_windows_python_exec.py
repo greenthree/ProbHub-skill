@@ -40,7 +40,7 @@ def _run(arguments):
             raise SystemExit("argument expected for -c")
         source, *script_args = rest
         sys.argv = ["-c", *script_args]
-        if not sys.flags.safe_path:
+        if not getattr(sys.flags, "safe_path", sys.flags.isolated):
             sys.path[0] = ""
         namespace = {
             "__name__": "__main__",
@@ -55,13 +55,13 @@ def _run(arguments):
             raise SystemExit("argument expected for -m")
         module, *module_args = rest
         sys.argv = [module, *module_args]
-        if not sys.flags.safe_path:
+        if not getattr(sys.flags, "safe_path", sys.flags.isolated):
             sys.path[0] = ""
         runpy.run_module(module, run_name="__main__", alter_sys=True)
         return
     if target == "-":
         sys.argv = ["-", *rest]
-        if not sys.flags.safe_path:
+        if not getattr(sys.flags, "safe_path", sys.flags.isolated):
             sys.path[0] = ""
         source = sys.stdin.buffer.read()
         namespace = {

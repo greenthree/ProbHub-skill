@@ -7,6 +7,7 @@ import re
 import shutil
 import stat
 import tempfile
+from functools import lru_cache
 from importlib import metadata as importlib_metadata
 from pathlib import Path, PureWindowsPath
 
@@ -15,7 +16,7 @@ from .errors import ProbHubError
 from .process_control import run_managed_to_files
 
 
-BUILDER_FINGERPRINT_SCHEMA_VERSION = 1
+BUILDER_FINGERPRINT_SCHEMA_VERSION = 2
 BUILD_MANIFEST_SCHEMA_VERSION = 4
 GENERATION_SCHEMA_VERSION = 3
 
@@ -26,6 +27,7 @@ FIXED_FONT_FAMILY = "Noto Sans CJK SC"
 FIXED_FONT_POLICY = "bundled-only-v1"
 FIXED_FONT_SHA256 = "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
 FIXED_FONT_FILENAME = "NotoSansCJKsc-Regular.otf"
+FONT_SUFFIXES = frozenset({".otf", ".otc", ".ttf", ".ttc"})
 TYPST_TEXT_TEMPLATE_SUFFIXES = {
     ".csv",
     ".json",
@@ -48,6 +50,41 @@ def fixed_font_directory():
     return fixed_font_path().parent
 
 
+def _windows_font_directory():
+    if os.name != "nt":
+        return None
+    path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+    return path.resolve() if path.is_dir() else None
+
+
+def typst_font_paths(root, workspace):
+    """Return the same ordered font search paths used by Typst and its identity."""
+    root = Path(root).resolve()
+    paths = [fixed_font_directory()]
+    configured = (workspace.get("typst") or {}).get("font_paths") or []
+    if isinstance(configured, (str, Path)):
+        configured = [configured]
+    if not isinstance(configured, list):
+        raise ProbHubError(
+            "typst.font_paths must be a list of directories",
+            code="builder_fingerprint_failed",
+        )
+    for value in configured:
+        if not isinstance(value, (str, Path)):
+            raise ProbHubError(
+                "typst.font_paths must contain directory paths",
+                code="builder_fingerprint_failed",
+            )
+        candidate = Path(value)
+        path = (root / candidate).resolve()
+        if path.is_dir() and path not in paths:
+            paths.append(path)
+    windows_fonts = _windows_font_directory()
+    if windows_fonts is not None and windows_fonts not in paths:
+        paths.append(windows_fonts)
+    return paths
+
+
 def _is_link_like(path):
     try:
         info = os.lstat(path)
@@ -65,6 +102,79 @@ def _hash_file(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _font_tree_signature(directory):
+    pending = [directory]
+    files = []
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as iterator:
+            entries = sorted(iterator, key=lambda item: item.name)
+        for entry in entries:
+            path = current / entry.name
+            if _is_link_like(path):
+                raise OSError(f"font path contains a link or reparse point: {path}")
+            info = os.lstat(path)
+            if stat.S_ISDIR(info.st_mode):
+                pending.append(path)
+            elif stat.S_ISREG(info.st_mode) and path.suffix.lower() in FONT_SUFFIXES:
+                files.append((
+                    path.relative_to(directory).as_posix(),
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ctime_ns,
+                ))
+    return tuple(sorted(files))
+
+
+@lru_cache(maxsize=8)
+def _cached_font_tree_hash(directory, signature):
+    # Reuse byte hashes while the file inventory and stat identities are unchanged.
+    digest = hashlib.sha256()
+    for relative, device, inode, size, modified, changed in signature:
+        path = Path(directory) / relative
+        before = os.lstat(path)
+        identity = (
+            before.st_dev, before.st_ino, before.st_size,
+            before.st_mtime_ns, before.st_ctime_ns,
+        )
+        if _is_link_like(path) or identity != (device, inode, size, modified, changed):
+            raise OSError(f"font changed while hashing: {path}")
+        content_hash = _hash_file(path)
+        after = os.lstat(path)
+        if (
+            after.st_dev, after.st_ino, after.st_size,
+            after.st_mtime_ns, after.st_ctime_ns,
+        ) != identity:
+            raise OSError(f"font changed while hashing: {path}")
+        name = relative.encode("utf-8")
+        digest.update(len(name).to_bytes(4, "big"))
+        digest.update(name)
+        digest.update(bytes.fromhex(content_hash))
+    return digest.hexdigest()
+
+
+def font_paths_identity(root, workspace):
+    root = Path(root).resolve()
+    result = []
+    for index, path in enumerate(typst_font_paths(root, workspace)):
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:
+            relative = path.as_posix()
+        source = "bundled" if index == 0 else relative
+        try:
+            content_hash = _cached_font_tree_hash(str(path), _font_tree_signature(path))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ProbHubError(
+                f"cannot determine Typst font path identity: {path}: {exc}",
+                code="builder_fingerprint_failed",
+            ) from exc
+        result.append({"path": source, "sha256": content_hash})
+    return result
 
 
 def fixed_font_identity():
@@ -286,6 +396,7 @@ def compute_builder_fingerprint(root, workspace):
             "policy": font["policy"],
             "sha256": font["sha256"],
         },
+        "font_paths": font_paths_identity(root, workspace),
     }
     return {**fields, "digest": _fingerprint_digest(fields)}
 
@@ -303,6 +414,7 @@ def builder_fingerprint_stale_fields(recorded, current, prefix="builder_fingerpr
         "typst_version",
         "pypdf_version",
         "template_hash",
+        "font_paths",
     ):
         if recorded.get(key) != current.get(key):
             fields.append(f"{prefix}.{key}")

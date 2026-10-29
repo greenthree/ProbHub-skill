@@ -13,7 +13,7 @@ from .building import build_workspace, package_workspace, typeset_workspace
 from .cli_output import render_human_result
 from .doctor import run_doctor
 from .errors import ProbHubError
-from .events import EventSink
+from .events import BatchProblemEventSink, EventSink
 from .generations import (
     assemble_exam_generation,
     create_problem_checkpoint,
@@ -90,6 +90,12 @@ def _event_sink(args):
     return sink
 
 
+def _problem_event_sink(args, entries):
+    args._stream_batch = len(entries) > 1
+    sink = _event_sink(args)
+    return BatchProblemEventSink(sink) if sink is not None and args._stream_batch else sink
+
+
 def emit_result(data, args, renderer=None):
     """Select presentation without changing the structured result."""
     is_stream = getattr(args, "event_stream", False) or getattr(args, "output_format", None) == "stream"
@@ -98,7 +104,9 @@ def emit_result(data, args, renderer=None):
         if sink is not None and not sink.has_emitted_terminal:
             op = getattr(args, "command", None) or "unknown"
             problem = getattr(args, "problem", None) or getattr(args, "problem_id", None) or ""
-            if isinstance(problem, list):
+            if getattr(args, "_stream_batch", False):
+                problem_id = ""
+            elif isinstance(problem, list):
                 problem_id = problem[0] if problem else ""
             else:
                 problem_id = str(problem)
@@ -552,9 +560,10 @@ def command_judge(args):
     root, workspace = workspace_context(args)
     ensure_no_pending_transactions(root, workspace)
     _ensure_local_gitignore(root)
-    sink = _event_sink(args)
+    entries = select_entries(workspace, args.problem)
+    sink = _problem_event_sink(args, entries)
     results = {}
-    for entry in select_entries(workspace, args.problem):
+    for entry in entries:
         problem_dir, _ = load_problem(root, entry)
         results[entry["id"]] = judge_problem(
             root,
@@ -613,7 +622,7 @@ def command_stress(args):
         raise ProbHubError("stress --replay requires exactly one problem id")
     if args.against is not None and len(entries) != 1:
         raise ProbHubError("stress --against requires exactly one problem id")
-    sink = _event_sink(args)
+    sink = _problem_event_sink(args, entries)
     results = {}
     for entry in entries:
         if args.fixate is None:
@@ -643,7 +652,7 @@ def command_mutate(args):
     if args.timeout is not None and args.timeout <= 0:
         raise ProbHubError("mutation --timeout must be positive", code="mutation_timeout_invalid")
     entries = select_entries(workspace, args.problem)
-    sink = _event_sink(args)
+    sink = _problem_event_sink(args, entries)
     results = {}
     for entry in entries:
         problem_dir, _ = load_problem(root, entry)

@@ -19,6 +19,78 @@ from probhub.stressing import stress_problem
 
 
 class EventStreamProtocolTests(unittest.TestCase):
+    def test_multi_problem_stream_ends_with_aggregate_failure(self):
+        entries = [{"id": "A"}, {"id": "B"}]
+        for command in ("judge", "stress", "mutation"):
+            with self.subTest(command=command):
+                def fake_operation(_root, problem_dir, *args, **kwargs):
+                    problem_id = problem_dir.name
+                    result = {"ok": problem_id == "B"}
+                    kwargs["event_sink"].emit_final(
+                        command, problem_id, ok=result["ok"],
+                        status="passed" if result["ok"] else "failed", result=result,
+                    )
+                    return result
+
+                captured = io.StringIO()
+                with (
+                    mock.patch("sys.stdout", captured),
+                    mock.patch("probhub.cli.workspace_context", return_value=(Path("."), {})),
+                    mock.patch("probhub.cli.ensure_no_pending_transactions"),
+                    mock.patch("probhub.cli._ensure_local_gitignore"),
+                    mock.patch("probhub.cli.select_entries", return_value=entries),
+                    mock.patch("probhub.cli.load_problem", side_effect=lambda _root, entry: (Path(entry["id"]), {})),
+                    mock.patch("probhub.cli.judge_problem", side_effect=fake_operation),
+                    mock.patch("probhub.cli.stress_problem", side_effect=fake_operation),
+                    mock.patch("probhub.cli.mutation_test_problem", side_effect=fake_operation),
+                ):
+                    code = cli.main(["--format", "stream", command, "A", "B"])
+
+                frames = list(parse_event_stream(captured.getvalue().splitlines()))
+                self.assertEqual(code, 1)
+                self.assertEqual([frame["type"] for frame in frames], ["problem_final", "problem_final", "final"])
+                self.assertEqual([frame["problem_id"] for frame in frames], ["A", "B", ""])
+                self.assertFalse(frames[-1]["ok"])
+                self.assertEqual(frames[-1]["result"]["problems"], {"A": {"ok": False}, "B": {"ok": True}})
+
+    def test_multi_problem_stream_reports_error_after_an_earlier_final(self):
+        from probhub.errors import ProbHubError
+
+        def fake_judge(_root, problem_dir, *, use_cache, event_sink):
+            if problem_dir.name == "B":
+                raise ProbHubError("second problem failed", code="fixture_failure")
+            event_sink.emit_final("judge", "A", ok=True, status="passed", result={"ok": True})
+            return {"ok": True}
+
+        captured = io.StringIO()
+        with (
+            mock.patch("sys.stdout", captured),
+            mock.patch("probhub.cli.workspace_context", return_value=(Path("."), {})),
+            mock.patch("probhub.cli.ensure_no_pending_transactions"),
+            mock.patch("probhub.cli._ensure_local_gitignore"),
+            mock.patch("probhub.cli.select_entries", return_value=[{"id": "A"}, {"id": "B"}]),
+            mock.patch("probhub.cli.load_problem", side_effect=lambda _root, entry: (Path(entry["id"]), {})),
+            mock.patch("probhub.cli.judge_problem", side_effect=fake_judge),
+        ):
+            code = cli.main(["--event-stream", "judge", "A", "B"])
+
+        frames = list(parse_event_stream(captured.getvalue().splitlines()))
+        self.assertEqual(code, 1)
+        self.assertEqual([frame["type"] for frame in frames], ["problem_final", "final"])
+        self.assertEqual([frame["problem_id"] for frame in frames], ["A", ""])
+        self.assertEqual(frames[-1]["code"], "fixture_failure")
+        self.assertFalse(frames[-1]["ok"])
+
+    def test_single_problem_stream_keeps_one_final(self):
+        captured = io.StringIO()
+        args = cli.build_parser().parse_args(["--format", "stream", "judge", "A"])
+        args._sink = EventSink(captured)
+        args._sink.emit_final("judge", "A", ok=True, status="passed", result={"ok": True})
+        cli.emit_result({"ok": True, "problems": {"A": {"ok": True}}}, args)
+        frames = list(parse_event_stream(captured.getvalue().splitlines()))
+        self.assertEqual(len(frames), 1)
+        self.assertTrue(frames[0]["ok"])
+
     def test_started_frame_schema(self):
         buf = io.StringIO()
         sink = EventSink(buf)
@@ -68,6 +140,13 @@ class EventStreamProtocolTests(unittest.TestCase):
         self.assertTrue(frame["ok"])
         self.assertEqual(frame["status"], "passed")
         self.assertEqual(frame["result"], {"passed": True})
+
+    def test_problem_final_frame_does_not_mark_the_stream_terminal(self):
+        buf = io.StringIO()
+        sink = EventSink(buf)
+        sink.emit_final("judge", "A", ok=True, status="passed", terminal=False)
+        self.assertFalse(sink.has_emitted_terminal)
+        self.assertEqual(json.loads(buf.getvalue())["type"], "problem_final")
 
     def test_cancelled_frame_schema(self):
         buf = io.StringIO()

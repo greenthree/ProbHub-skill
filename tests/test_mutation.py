@@ -1337,11 +1337,18 @@ class MutationFixtureTests(unittest.TestCase):
                 previous = b"previous evidence\n"
                 evidence.write_bytes(previous)
                 cancel_check = lambda: False
-                deadline = time.monotonic() + 0.5
-                with patch(
-                    "probhub.mutation.locate_cpp_mutation_syntax",
-                    side_effect=ProbHubError("parser stopped", code=parser_code),
-                ) as locate:
+                # This tests parser result mapping and budget forwarding, not
+                # the machine's snapshot/probe latency. Real deadline expiry
+                # is covered by the slow-Judge and parser-worker tests.
+                now = time.monotonic()
+                deadline = now + 0.5
+                with (
+                    patch("probhub.mutation.time.monotonic", return_value=now),
+                    patch(
+                        "probhub.mutation.locate_cpp_mutation_syntax",
+                        side_effect=ProbHubError("parser stopped", code=parser_code),
+                    ) as locate,
+                ):
                     with self.assertRaises(ProbHubError) as raised:
                         mutation_test_problem(
                             root,

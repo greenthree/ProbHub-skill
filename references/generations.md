@@ -24,7 +24,7 @@ checkpoint 只复制 Schema v1 规范源，排除 PDF、ZIP、Manifest、metadat
     └── <ID>.pdf
 ```
 
-generation 使用内容寻址 ID，不覆盖正式 Typst `main.pdf`、单题 `problem.pdf`、ZIP 或 Build Manifest。ID 同时绑定工作区配置、checkpoint 集合和规范化 `builder_fingerprint`；Core、Typst、pypdf、模板或包内固定字体变化后生成新版本，不复用旧 generation。
+generation 使用内容寻址 ID，不覆盖正式 Typst `main.pdf`、单题 `problem.pdf`、ZIP 或 Build Manifest。ID 同时绑定工作区配置、checkpoint 集合和规范化 `builder_fingerprint`；Core、Typst、pypdf、模板、包内固定字体或 Typst 字体搜索路径内的字体文件变化后生成新版本，不复用旧 generation。
 
 ## 2. 命令
 

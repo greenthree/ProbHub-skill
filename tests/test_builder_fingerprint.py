@@ -137,6 +137,7 @@ class BuilderFingerprintTests(unittest.TestCase):
         self.assertEqual(fingerprint["typst_version"], "0.14.2")
         self.assertEqual(fingerprint["pypdf_version"], "6.14.2")
         self.assertEqual(fingerprint["font"]["sha256"], FIXED_FONT_SHA256)
+        self.assertEqual(fingerprint["font_paths"][0]["path"], "bundled")
         self.assertEqual(len(fingerprint["digest"]), 64)
         for excluded in ("node", "g++", "flask", "os", "platform"):
             self.assertNotIn(excluded, fingerprint)
@@ -155,6 +156,7 @@ class BuilderFingerprintTests(unittest.TestCase):
                 "policy": "bundled-only-v1",
                 "sha256": "font",
             },
+            "font_paths": [{"path": "bundled", "sha256": "fonts"}],
             "digest": "baseline",
         }
         cases = (
@@ -165,6 +167,7 @@ class BuilderFingerprintTests(unittest.TestCase):
             (("typst_version",), "builder_fingerprint.typst_version"),
             (("pypdf_version",), "builder_fingerprint.pypdf_version"),
             (("template_hash",), "builder_fingerprint.template_hash"),
+            (("font_paths",), "builder_fingerprint.font_paths"),
             (("font", "family"), "builder_fingerprint.font.family"),
             (("font", "policy"), "builder_fingerprint.font.policy"),
             (("font", "sha256"), "builder_fingerprint.font.sha256"),
@@ -187,6 +190,40 @@ class BuilderFingerprintTests(unittest.TestCase):
             builder_fingerprint_stale_fields(baseline, digest_only),
             ["builder_fingerprint.digest"],
         )
+
+    def test_configured_and_system_font_bytes_change_builder_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = self.create_workspace(root)
+            configured = root / "custom-fonts"
+            configured.mkdir()
+            configured_font = configured / "custom.ttf"
+            configured_font.write_bytes(b"first-font")
+            system = root / "windows-fonts"
+            system.mkdir()
+            system_font = system / "system.ttc"
+            system_font.write_bytes(b"first-system-font")
+            workspace["typst"]["font_paths"] = ["custom-fonts"]
+
+            with (
+                patch("probhub.builder_fingerprint.builder_toolchain_status", return_value=self.toolchain()),
+                patch("probhub.builder_fingerprint._windows_font_directory", return_value=system),
+            ):
+                first = compute_builder_fingerprint(root, workspace)
+                configured_font.write_bytes(b"second-font-with-different-size")
+                second = compute_builder_fingerprint(root, workspace)
+                system_font.write_bytes(b"second-system-font-with-different-size")
+                third = compute_builder_fingerprint(root, workspace)
+
+            self.assertEqual(len(first["font_paths"]), 3)
+            self.assertEqual(
+                builder_fingerprint_stale_fields(first, second),
+                ["builder_fingerprint.font_paths"],
+            )
+            self.assertEqual(
+                builder_fingerprint_stale_fields(second, third),
+                ["builder_fingerprint.font_paths"],
+            )
 
     def test_missing_tool_identity_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp:

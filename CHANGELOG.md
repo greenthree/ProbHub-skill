@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+- Windows 后代快照在打开进程前核对创建时间，排除父 PID 复用留下的旧关系；根身份直接复制原始进程句柄，避免快速退出后的重新打开竞态。
+
+- Windows 受控运行补充有界后代句柄跟踪，清理 Store Python 虚拟环境启动器产生的 Job 外后代；Job 查询失败、退出无法确认或跟踪超限不再误报清理成功。沙箱缓存 Schema 升至 9。
+
+- 安全升级 `pypdf` 至 6.21.2、`Werkzeug` 至 3.1.9，刷新跨平台 wheel 哈希锁以处理依赖审计发现的已知漏洞。
+
+- 多题 Judge、stress 与 mutation 的流式输出以 `problem_final` 表示逐题完成，并以唯一的整批 `final` 汇总总体结果，避免前题失败被后题成功掩盖。
+- 构建指纹纳入 Typst 实际搜索的字体文件内容与路径顺序；系统或自定义字体变化会使旧产物过期，并在发布前重新检查。
+- Typst 模板的 `mono` 字体仅使用 `New Computer Modern Mono`。
+
 ## [0.7.1] - 2026-09-25
 
 - 题面字体与排版对齐标准模板（PR #131）：完整支持 `serif`, `sans`, `song`, `zsong`, `kaishu`, `songti-bold`, `mono`, `yl` 字体映射，提供跨平台字体回退链；样例块严格使用 `fonts.yl` 14pt 双列细线表格与居中表头；Windows 下自动将系统字体目录 `C:/Windows/Fonts` 注册到 Typst 路径；拦截题面中孤立手写的 `## 样例` / `## Examples` 避免格式破损。
